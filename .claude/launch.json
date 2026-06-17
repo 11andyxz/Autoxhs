@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "forwardcraft-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/andyxiongzheng/AndyXiongZheng LLC/forwardcraft-web", "run", "dev"],
+      "port": 3000
+    },
+    {
+      "name": "autoxhs-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/andyxiongzheng/AndyXiongZheng LLC/Autoxhs/web", "run", "dev"],
+      "port": 3100
+    }
+  ]
+}
