@@ -11,10 +11,9 @@ const HEADER_BG = "FF334155";
 
 function xlDate(iso: string): Date {
   const [y, m, d] = iso.split("-").map(Number);
-  return new Date(y, m - 1, d); // 本地午夜,避免时区 -1 天
+  return new Date(y, m - 1, d);
 }
 
-/** 表头加粗+底色、首行冻结、开启筛选、自动列宽、金额/日期格式 */
 function finishDataSheet(
   ws: ExcelJS.Worksheet,
   headerLen: number,
@@ -45,7 +44,7 @@ function finishDataSheet(
 
 /**
  * 重新计算并生成工作簿(与页面共用同一 calc,数字完全一致)。
- *  Sheet1 Summary / Sheet2 Work Hours(按工作周)/ Sheet3 Fee Breakdown
+ *  Sheet1 Summary / Sheet2 Work Hours(含 Tax)/ Sheet3 Fee Breakdown(按月)
  */
 export async function buildServiceFeeWorkbook(
   inputs: ServiceFeeInputs,
@@ -57,39 +56,31 @@ export async function buildServiceFeeWorkbook(
 
   // ---------------- Sheet 1: Summary ----------------
   const s = wb.addWorksheet("Summary");
-  s.columns = [{ width: 36 }, { width: 30 }];
+  s.columns = [{ width: 38 }, { width: 30 }];
   s.mergeCells("A1:B1");
   s.getCell("A1").value = "Service Fee Calculation — Summary";
   s.getCell("A1").font = { bold: true, size: 14 };
   s.addRow([]);
 
-  const methodLabel = inputs.prorateServiceCharge
-    ? "Prorated by calendar days"
-    : "Per involved month (full)";
-  const assignLabel =
-    inputs.assignPayrollFeeBy === "payDate"
-      ? `Pay Date (period end + ${inputs.payDateOffsetDays} days)`
-      : "Payroll Period End Date";
-
   type Kind = "money" | "date" | "text" | "num";
   const summaryRows: Array<[string, string | number, Kind]> = [
     ["Original Selected Start Date", inputs.startDate, "date"],
     ["Original Selected End Date", inputs.endDate, "date"],
-    ["Payroll Cycle Start Date", inputs.payrollCycleStartDate, "date"],
     ["Weekly Work Hours", inputs.weeklyWorkHours, "num"],
     ["Daily Work Hours", r.dailyWorkHours, "num"],
     ["Hourly Wage", inputs.hourlyWage, "money"],
-    ["Tax Withheld Per Payroll", inputs.taxWithheldPerPayroll, "money"],
-    ["First Payroll Fee", inputs.firstPayrollFee, "money"],
-    ["Second Payroll Fee", inputs.secondPayrollFee, "money"],
+    ["Tax Withheld Per Biweekly (every 2 weeks)", inputs.taxWithheldPerPayroll, "money"],
+    ["Monthly Payroll Fee", inputs.monthlyPayrollFee, "money"],
     ["Monthly Service Charge", inputs.monthlyServiceCharge, "money"],
-    ["Service Charge Calculation Method", methodLabel, "text"],
-    ["Assign Payroll Fee By", assignLabel, "text"],
+    ["Service Charge Basis", "Monthly anniversary of Start Date", "text"],
     ["Total Calendar Days", r.totalCalendarDays, "num"],
     ["Total Working Days (Actual)", r.totalWorkingDays, "num"],
     ["Total Adjusted Working Days", r.totalAdjustedWorkingDays, "num"],
     ["Work Week Count", r.workWeekCount, "num"],
     ["Total Work Hours", r.totalWorkHours, "num"],
+    ["Tax Charge Count (every 2 weeks)", r.taxChargeCount, "num"],
+    ["Covered Month Count", r.monthCount, "num"],
+    ["Service Charge Count", r.serviceChargeCount, "num"],
     ["Gross Wages", r.grossWages, "money"],
     ["Total Tax Withheld", r.totalTaxWithheld, "money"],
     ["Total Payroll Fees", r.totalPayrollFees, "money"],
@@ -127,7 +118,7 @@ export async function buildServiceFeeWorkbook(
     "Week No", "Original Selected Start Date", "Original Selected End Date",
     "Work Week Start Date", "Work Week End Date", "Covered Start Date", "Covered End Date",
     "Actual Working Days", "Adjusted Working Days", "Weekly Work Hours", "Work Hours",
-    "Hourly Wage", "Gross Wages", "Work Hours Adjustment Type",
+    "Hourly Wage", "Gross Wages", "Tax Withheld", "Work Hours Adjustment Type",
   ];
   w.addRow(wHeaders);
   for (const row of r.workWeeks) {
@@ -136,43 +127,41 @@ export async function buildServiceFeeWorkbook(
       xlDate(row.workWeekStartISO), xlDate(row.workWeekEndISO),
       xlDate(row.coveredStartISO), xlDate(row.coveredEndISO),
       row.actualWorkingDays, row.adjustedWorkingDays, row.weeklyWorkHours, row.workHours,
-      row.hourlyWage, row.grossWages, row.adjustmentType,
+      row.hourlyWage, row.grossWages, row.taxWithheld, row.adjustmentType,
     ]);
   }
   const wTotal = w.addRow([
     "Total", "", "", "", "", "", "",
-    "", r.totalAdjustedWorkingDays, "", r.totalWorkHours, "", r.grossWages, "",
+    "", r.totalAdjustedWorkingDays, "", r.totalWorkHours, "", r.grossWages, r.totalTaxWithheld, "",
   ]);
   wTotal.font = { bold: true };
-  wTotal.getCell(13).numFmt = MONEY_FMT;
+  [13, 14].forEach((c) => (wTotal.getCell(c).numFmt = MONEY_FMT));
   wTotal.getCell(13).font = { bold: true, color: { argb: ACCENT } };
   wTotal.getCell(13).fill = { type: "pattern", pattern: "solid", fgColor: { argb: ACCENT_BG } };
-  finishDataSheet(w, wHeaders.length, [12, 13], [2, 3, 4, 5, 6, 7]);
+  finishDataSheet(w, wHeaders.length, [12, 13, 14], [2, 3, 4, 5, 6, 7]);
 
-  // ---------------- Sheet 3: Fee Breakdown ----------------
+  // ---------------- Sheet 3: Fee Breakdown (by month) ----------------
   const f = wb.addWorksheet("Fee Breakdown");
   const fHeaders = [
-    "Payroll Number", "Payroll Period Start", "Payroll Period End", "Payroll Month",
-    "Payroll Sequence in Month", "Covered Start Date", "Covered End Date", "Calendar Days Covered",
-    "Tax Withheld", "Payroll Fee Type", "Payroll Fee", "Service Charge", "Subtotal",
+    "Payroll Month", "Covered Start Date", "Covered End Date",
+    "Monthly Payroll Fee", "Service Charge Date", "Service Charge", "Subtotal",
   ];
   f.addRow(fHeaders);
   for (const row of r.feeRows) {
     f.addRow([
-      row.payrollNumber, xlDate(row.periodStartISO), xlDate(row.periodEndISO), row.payrollMonth,
-      row.sequenceInMonth, xlDate(row.coveredStartISO), xlDate(row.coveredEndISO), row.calendarDaysCovered,
-      row.taxWithheld, row.payrollFeeType, row.payrollFee, row.serviceCharge, row.subtotal,
+      row.payrollMonth, xlDate(row.coveredStartISO), xlDate(row.coveredEndISO),
+      row.payrollFee, row.serviceChargeDateISO ? xlDate(row.serviceChargeDateISO) : "",
+      row.serviceCharge, row.subtotal,
     ]);
   }
-  const feeTotal = round2(r.totalTaxWithheld + r.totalPayrollFees + r.totalServiceCharge);
+  const feeTotal = round2(r.totalPayrollFees + r.totalServiceCharge);
   const fTotal = f.addRow([
-    "Total", "", "", "", "", "", "", "",
-    r.totalTaxWithheld, "", r.totalPayrollFees, r.totalServiceCharge, feeTotal,
+    "Total", "", "", r.totalPayrollFees, "", r.totalServiceCharge, feeTotal,
   ]);
   fTotal.font = { bold: true };
-  fTotal.getCell(13).font = { bold: true, color: { argb: ACCENT } };
-  fTotal.getCell(13).fill = { type: "pattern", pattern: "solid", fgColor: { argb: ACCENT_BG } };
-  finishDataSheet(f, fHeaders.length, [9, 11, 12, 13], [2, 3, 6, 7]);
+  fTotal.getCell(7).font = { bold: true, color: { argb: ACCENT } };
+  fTotal.getCell(7).fill = { type: "pattern", pattern: "solid", fgColor: { argb: ACCENT_BG } };
+  finishDataSheet(f, fHeaders.length, [4, 6, 7], [2, 3, 5]);
 
   return (await wb.xlsx.writeBuffer()) as unknown as Buffer;
 }

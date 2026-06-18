@@ -5,17 +5,15 @@ import { useEffect, useMemo, useState } from "react";
 
 import { calculateServiceFee, round2 } from "@/lib/serviceFee/calc";
 import { parseDate } from "@/lib/serviceFee/dateUtils";
-import type { AssignPayrollFeeBy, CalculationResult, ServiceFeeInputs } from "@/lib/serviceFee/types";
+import type { CalculationResult, ServiceFeeInputs } from "@/lib/serviceFee/types";
 import { validateInputs } from "@/lib/serviceFee/validate";
 
 const DEFAULTS = {
   weeklyWorkHours: "20",
   hourlyWage: "",
   taxWithheld: "100",
-  firstFee: "92",
-  secondFee: "12",
+  payrollFee: "92",
   serviceCharge: "120",
-  payOffset: "5",
 };
 
 const usd = (n: number) => n.toLocaleString("en-US", { style: "currency", currency: "USD" });
@@ -39,17 +37,12 @@ export default function ServiceFeePage() {
   // 日期
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const [cycleStart, setCycleStart] = useState("");
   // 工时 / 工资 / 费用
   const [weeklyWorkHours, setWeeklyWorkHours] = useState(DEFAULTS.weeklyWorkHours);
   const [hourlyWage, setHourlyWage] = useState(DEFAULTS.hourlyWage);
   const [taxWithheld, setTaxWithheld] = useState(DEFAULTS.taxWithheld);
-  const [firstFee, setFirstFee] = useState(DEFAULTS.firstFee);
-  const [secondFee, setSecondFee] = useState(DEFAULTS.secondFee);
+  const [payrollFee, setPayrollFee] = useState(DEFAULTS.payrollFee);
   const [serviceCharge, setServiceCharge] = useState(DEFAULTS.serviceCharge);
-  const [prorate, setProrate] = useState(false);
-  const [assignBy, setAssignBy] = useState<AssignPayrollFeeBy>("periodEnd");
-  const [payOffset, setPayOffset] = useState(DEFAULTS.payOffset);
 
   const [result, setResult] = useState<CalculationResult | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
@@ -61,30 +54,23 @@ export default function ServiceFeePage() {
     const { first, last } = todayMonthDefaults();
     setStartDate(first);
     setEndDate(last);
-    setCycleStart(first);
   }, []);
 
   const currentInputs: ServiceFeeInputs = useMemo(
     () => ({
       startDate,
       endDate,
-      payrollCycleStartDate: cycleStart,
       weeklyWorkHours: num(weeklyWorkHours, 20),
       hourlyWage: hourlyWage.trim() === "" ? NaN : num(hourlyWage, NaN),
       taxWithheldPerPayroll: num(taxWithheld, 100),
-      firstPayrollFee: num(firstFee, 92),
-      secondPayrollFee: num(secondFee, 12),
+      monthlyPayrollFee: num(payrollFee, 92),
       monthlyServiceCharge: num(serviceCharge, 120),
-      prorateServiceCharge: prorate,
-      assignPayrollFeeBy: assignBy,
-      payDateOffsetDays: num(payOffset, 5),
     }),
-    [startDate, endDate, cycleStart, weeklyWorkHours, hourlyWage, taxWithheld, firstFee, secondFee, serviceCharge, prorate, assignBy, payOffset],
+    [startDate, endDate, weeklyWorkHours, hourlyWage, taxWithheld, payrollFee, serviceCharge],
   );
 
-  // 日期范围实时统计(仅依赖日期/周期,工资缺省补 0 不影响计数)
-  const datesOk =
-    !!startDate && !!endDate && !!cycleStart && parseDate(endDate) >= parseDate(startDate);
+  // 日期范围实时统计(仅依赖日期,工资缺省补 0 不影响计数)
+  const datesOk = !!startDate && !!endDate && parseDate(endDate) >= parseDate(startDate);
   const preview = useMemo(() => {
     if (!datesOk) return null;
     return calculateServiceFee({
@@ -109,16 +95,11 @@ export default function ServiceFeePage() {
     const { first, last } = todayMonthDefaults();
     setStartDate(first);
     setEndDate(last);
-    setCycleStart(first);
     setWeeklyWorkHours(DEFAULTS.weeklyWorkHours);
     setHourlyWage(DEFAULTS.hourlyWage);
     setTaxWithheld(DEFAULTS.taxWithheld);
-    setFirstFee(DEFAULTS.firstFee);
-    setSecondFee(DEFAULTS.secondFee);
+    setPayrollFee(DEFAULTS.payrollFee);
     setServiceCharge(DEFAULTS.serviceCharge);
-    setProrate(false);
-    setAssignBy("periodEnd");
-    setPayOffset(DEFAULTS.payOffset);
     setResult(null);
     setErrors([]);
   }
@@ -168,42 +149,25 @@ export default function ServiceFeePage() {
           </p>
         </header>
 
-        {/* 1. 日期范围 + Payroll Cycle */}
+        {/* 1. 日期范围 */}
         <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="text-sm font-semibold text-slate-800">日期范围 & Payroll Cycle</h2>
-          <div className="mt-4 grid gap-4 sm:grid-cols-3">
+          <h2 className="text-sm font-semibold text-slate-800">日期范围</h2>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <Field label="Start Date">
               <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className={inputCls} />
             </Field>
             <Field label="End Date">
               <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className={inputCls} />
             </Field>
-            <Field label="Payroll Cycle Start Date">
-              <input type="date" value={cycleStart} onChange={(e) => setCycleStart(e.target.value)} className={inputCls} />
-            </Field>
-          </div>
-
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <Field label="Assign Payroll Fee By">
-              <select value={assignBy} onChange={(e) => setAssignBy(e.target.value as AssignPayrollFeeBy)} className={inputCls}>
-                <option value="periodEnd">Payroll Period End Date</option>
-                <option value="payDate">Pay Date</option>
-              </select>
-            </Field>
-            {assignBy === "payDate" && (
-              <Field label="Pay Date = Period End + (days)">
-                <input type="number" min={0} value={payOffset} onChange={(e) => setPayOffset(e.target.value)} className={inputCls} />
-              </Field>
-            )}
           </div>
 
           {/* 日期统计 */}
           <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-5">
             <Stat label="总天数" value={preview ? preview.totalCalendarDays : "—"} />
-            <Stat label="工作日" value={preview ? preview.totalWorkingDays : "—"} />
-            <Stat label="周末" value={preview ? preview.totalWeekendDays : "—"} />
-            <Stat label="Payroll Period" value={preview ? preview.payrollPeriodCount : "—"} />
+            <Stat label="工作周" value={preview ? preview.workWeekCount : "—"} />
+            <Stat label="Tax 次数(每2周)" value={preview ? preview.taxChargeCount : "—"} />
             <Stat label="涉及月份" value={preview ? preview.monthCount : "—"} />
+            <Stat label="Service 收费次数" value={preview ? preview.serviceChargeCount : "—"} />
           </div>
         </section>
 
@@ -217,23 +181,16 @@ export default function ServiceFeePage() {
             <Field label="Hourly Wage ($/hour)">
               <input type="number" min={0} step="0.01" placeholder="例如 19" value={hourlyWage} onChange={(e) => setHourlyWage(e.target.value)} className={inputCls} />
             </Field>
-            <Field label="Tax Withheld Per Biweekly Payroll ($)">
+            <Field label="Tax Withheld Per Biweekly Payroll ($)" hint="每个唯一双周收一次">
               <input type="number" min={0} step="0.01" value={taxWithheld} onChange={(e) => setTaxWithheld(e.target.value)} className={inputCls} />
             </Field>
-            <Field label="First Biweekly Payroll Fee ($)">
-              <input type="number" min={0} step="0.01" value={firstFee} onChange={(e) => setFirstFee(e.target.value)} className={inputCls} />
+            <Field label="Monthly Payroll Fee ($)" hint="每个自然月收一次">
+              <input type="number" min={0} step="0.01" value={payrollFee} onChange={(e) => setPayrollFee(e.target.value)} className={inputCls} />
             </Field>
-            <Field label="Second Biweekly Payroll Fee ($)">
-              <input type="number" min={0} step="0.01" value={secondFee} onChange={(e) => setSecondFee(e.target.value)} className={inputCls} />
-            </Field>
-            <Field label="Monthly Service Charge ($)">
+            <Field label="Monthly Service Charge ($)" hint="从 Start 起每月同一天收一次">
               <input type="number" min={0} step="0.01" value={serviceCharge} onChange={(e) => setServiceCharge(e.target.value)} className={inputCls} />
             </Field>
           </div>
-          <label className="mt-4 flex cursor-pointer items-center gap-2 text-sm text-slate-700">
-            <input type="checkbox" checked={prorate} onChange={(e) => setProrate(e.target.checked)} className="h-4 w-4 rounded border-slate-300" />
-            Prorate Monthly Service Charge(按每月实际覆盖天数比例计算)
-          </label>
         </section>
 
         {/* 按钮 */}
@@ -307,12 +264,13 @@ export default function ServiceFeePage() {
               </h2>
               <p className="mt-1 text-xs text-slate-400">
                 按自然工作周(周一–周日)切割,每周补足整周 {result.weeklyWorkHours} 工时;共 {result.workWeekCount} 周。
+                Tax Withheld 每 2 周收一次 $100(第 1、3、5… 周)。
               </p>
               <div className="mt-3 overflow-x-auto">
-                <table className="w-full min-w-[820px] text-xs">
+                <table className="w-full min-w-[900px] text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 text-left text-slate-500">
-                      {["工作周", "覆盖区间", "实际工作日", "计入工作日", "Work Hours", "时薪", "Gross Wages", "调整类型"].map((h) => (
+                      {["工作周", "覆盖区间", "实际工作日", "计入工作日", "Work Hours", "时薪", "Gross Wages", "Tax Withheld", "调整类型"].map((h) => (
                         <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">{h}</th>
                       ))}
                     </tr>
@@ -327,6 +285,7 @@ export default function ServiceFeePage() {
                         <td className="px-3 py-2">{w.workHours}</td>
                         <td className="px-3 py-2">{usd(w.hourlyWage)}</td>
                         <td className="px-3 py-2 font-medium">{usd(w.grossWages)}</td>
+                        <td className={`px-3 py-2 ${w.taxWithheld > 0 ? "font-medium text-slate-700" : "text-slate-300"}`}>{usd(w.taxWithheld)}</td>
                         <td className="whitespace-nowrap px-3 py-2 text-slate-400">{w.adjustmentType}</td>
                       </tr>
                     ))}
@@ -338,6 +297,7 @@ export default function ServiceFeePage() {
                       <td className="px-3 py-2">{result.totalWorkHours}</td>
                       <td className="px-3 py-2">—</td>
                       <td className="px-3 py-2 text-emerald-700">{usd(result.grossWages)}</td>
+                      <td className="px-3 py-2">{usd(result.totalTaxWithheld)}</td>
                       <td className="px-3 py-2">—</td>
                     </tr>
                   </tfoot>
@@ -351,13 +311,14 @@ export default function ServiceFeePage() {
                 费用明细 <span className="text-slate-400">Fee Breakdown</span>
               </h2>
               <p className="mt-1 text-xs text-slate-400">
-                Tax / Payroll Fee / Service Charge 按原始选择区间与 Payroll 规则计算(不受工作周顺延影响)。
+                Payroll Fee 每个自然月 $92;Service Charge 从 Start Date 起每月同一天收一次 $120。
+                (Tax Withheld 见上方工时周表。)
               </p>
               <div className="mt-3 overflow-x-auto">
-                <table className="w-full min-w-[720px] text-xs">
+                <table className="w-full min-w-[680px] text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 text-left text-slate-500">
-                      {["Payroll Period", "覆盖区间", "Tax Withheld", "Payroll Fee", "Service Charge", "小计"].map((h) => (
+                      {["自然月", "覆盖区间", "Payroll Fee", "Service Charge Date", "Service Charge", "小计"].map((h) => (
                         <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">{h}</th>
                       ))}
                     </tr>
@@ -365,13 +326,10 @@ export default function ServiceFeePage() {
                   <tbody>
                     {result.feeRows.map((row, i) => (
                       <tr key={i} className="border-b border-slate-100">
-                        <td className="whitespace-nowrap px-3 py-2 text-slate-700">
-                          #{row.payrollNumber}
-                          <span className="ml-1 text-slate-400">{row.payrollMonth} · {row.payrollFeeType !== "None" ? row.payrollFeeType : "—"}</span>
-                        </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-slate-700">{row.payrollMonth}</td>
                         <td className="whitespace-nowrap px-3 py-2 text-slate-500">{row.coveredStart} – {row.coveredEnd}</td>
-                        <td className="px-3 py-2">{usd(row.taxWithheld)}</td>
                         <td className="px-3 py-2">{usd(row.payrollFee)}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-slate-500">{row.serviceChargeDate || "—"}</td>
                         <td className="px-3 py-2">{usd(row.serviceCharge)}</td>
                         <td className="px-3 py-2 font-medium">{usd(row.subtotal)}</td>
                       </tr>
@@ -380,11 +338,11 @@ export default function ServiceFeePage() {
                   <tfoot>
                     <tr className="border-t-2 border-slate-300 font-bold text-slate-900">
                       <td className="px-3 py-2" colSpan={2}>Total</td>
-                      <td className="px-3 py-2">{usd(result.totalTaxWithheld)}</td>
                       <td className="px-3 py-2">{usd(result.totalPayrollFees)}</td>
+                      <td className="px-3 py-2">—</td>
                       <td className="px-3 py-2">{usd(result.totalServiceCharge)}</td>
                       <td className="px-3 py-2 text-emerald-700">
-                        {usd(round2(result.totalTaxWithheld + result.totalPayrollFees + result.totalServiceCharge))}
+                        {usd(round2(result.totalPayrollFees + result.totalServiceCharge))}
                       </td>
                     </tr>
                   </tfoot>

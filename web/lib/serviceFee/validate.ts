@@ -6,18 +6,13 @@ export function validateInputs(i: ServiceFeeInputs): string[] {
   const e: string[] = [];
   if (!i.startDate) e.push("请选择 Start Date。");
   if (!i.endDate) e.push("请选择 End Date。");
-  if (!i.payrollCycleStartDate) e.push("请选择 Payroll Cycle Start Date。");
   if (i.startDate && i.endDate && parseDate(i.endDate) < parseDate(i.startDate)) {
     e.push("End Date 不能早于 Start Date。");
   }
   if (!(i.weeklyWorkHours >= 0)) e.push("Weekly Work Hours 不能小于 0,请填写有效数字。");
   if (!(i.hourlyWage >= 0)) e.push("请填写 Hourly Wage(时薪,必填且不能小于 0)。");
   if (!(i.taxWithheldPerPayroll >= 0)) e.push("Tax Withheld 不能小于 0。");
-  if (!(i.firstPayrollFee >= 0)) e.push("First Payroll Fee 不能小于 0。");
-  if (!(i.secondPayrollFee >= 0)) e.push("Second Payroll Fee 不能小于 0。");
+  if (!(i.monthlyPayrollFee >= 0)) e.push("Monthly Payroll Fee 不能小于 0。");
   if (!(i.monthlyServiceCharge >= 0)) e.push("Monthly Service Charge 不能小于 0。");
-  if (i.assignPayrollFeeBy === "payDate" && !(i.payDateOffsetDays >= 0)) {
-    e.push("Pay Date Offset 不能小于 0。");
-  }
   return e;
 }
