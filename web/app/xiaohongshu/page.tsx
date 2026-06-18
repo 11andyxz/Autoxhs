@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { copyToClipboard } from "@/lib/clipboard";
@@ -128,7 +129,10 @@ export default function XiaohongshuPage() {
       <div className="mx-auto max-w-3xl px-4 py-10">
         {/* 1. 标题区域 */}
         <header className="mb-8">
-          <span className="inline-flex items-center rounded-full bg-xhs/10 px-3 py-1 text-xs font-medium text-xhs">
+          <Link href="/" className="block text-xs text-gray-400 transition hover:text-gray-600">
+            ← 工具箱
+          </Link>
+          <span className="mt-2 inline-flex items-center rounded-full bg-xhs/10 px-3 py-1 text-xs font-medium text-xhs">
             小红书 · 文案助手
           </span>
           <h1 className="mt-3 text-2xl font-bold tracking-tight sm:text-3xl">
