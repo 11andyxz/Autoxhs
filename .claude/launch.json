@@ -12,6 +12,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "/Users/andyxiongzheng/AndyXiongZheng LLC/Autoxhs/web", "run", "dev"],
       "port": 3100
+    },
+    {
+      "name": "forwardcraft-repo",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/andyxiongzheng/AndyXiongZheng LLC/ForwardCraft/web", "run", "dev"],
+      "port": 3000
     }
   ]
 }

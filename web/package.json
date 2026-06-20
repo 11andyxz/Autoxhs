@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "exceljs": "^4.4.0",
+    "mysql2": "^3.11.0",
     "next": "^15.1.0",
     "openai": "^4.77.0",
     "react": "^19.0.0",

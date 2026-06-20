@@ -14,6 +14,7 @@ import {
 import type {
   CalculationResult,
   FeeRow,
+  PriorCharges,
   ServiceFeeInputs,
   WeekRow,
   WorkHoursAdjustment,
@@ -22,6 +23,8 @@ import type {
 export function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
+
+const EMPTY_PRIOR: PriorCharges = { payrollMonths: [], serviceMonths: [], taxWeeks: [] };
 
 function countWeekdays(a: number, b: number): number {
   let c = 0;
@@ -33,10 +36,7 @@ function daysInYearMonth(y: number, m: number): number {
   return new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
 }
 
-/**
- * Service Charge 收费日:从 Start Date 当天起,每个月同一天。
- * 该月没有对应日(29/30/31)时取当月最后一天。仅保留落在 [start, end] 内的。
- */
+/** Service Charge 收费日:从 Start Date 当天起每月同一天(月末日不存在取当月最后一天),仅保留落在 [start,end] 内的 */
 function serviceChargeDates(startTs: number, endTs: number): number[] {
   const sd = new Date(startTs);
   const day = sd.getUTCDate();
@@ -60,21 +60,26 @@ function serviceChargeDates(startTs: number, endTs: number): number[] {
 /**
  * 收费计算核心(纯函数,确定性)。
  *
- * 工时 + Tax(按自然工作周 周一–周日):
- *  - 每个被原始区间触及的工作周补足整周 Weekly Work Hours;首周不向前补、末周顺延至周日。
- *  - Tax Withheld:每 2 个工作周算一个双周,$100 落在每个双周的第 1 周(第 1、3、5… 周)。
+ * 工时(按自然工作周 周一–周日):每周补足整周 Weekly Work Hours;首周不向前补、末周顺延至周日。
  *
- * 费用(每个自然月一行):
- *  - Payroll Fee:每个涉及自然月固定 $92。
- *  - Service Charge:从 Start Date 起每月同一天收一次 $120,落在该月对应行(月末日不存在取当月最后一天)。
- *
- * 所有费用都基于「原始选择的 Start/End」,工作周顺延不会增加任何费用/月份。
+ * 费用(基于原始选择区间;`prior` 为该客户已保存过的费用键,用于跨记录去重):
+ *  - Tax:每个工作周(周一锚定)每客户只计一次;Tax = ⌈新增工作周/2⌉ × 单价,落在新增周的第 1、3、5…
+ *  - Payroll Fee:每个自然月 $92,已收过的月置 0。
+ *  - Service Charge:从 Start 起每月同一天 $120,已收过的月置 0。
+ *  Gross / 工时不去重。工作周顺延不增加任何费用。
  */
-export function calculateServiceFee(inp: ServiceFeeInputs): CalculationResult {
+export function calculateServiceFee(
+  inp: ServiceFeeInputs,
+  prior: PriorCharges = EMPTY_PRIOR,
+): CalculationResult {
   const rangeStart = parseDate(inp.startDate);
   const rangeEnd = parseDate(inp.endDate);
   const weeklyWorkHours = inp.weeklyWorkHours;
   const wage = inp.hourlyWage;
+
+  const priorTaxWeeks = new Set(prior.taxWeeks);
+  const priorPayrollMonths = new Set(prior.payrollMonths);
+  const priorServiceMonths = new Set(prior.serviceMonths);
 
   // ---------- 日期统计 + 涉及自然月(有序) ----------
   const totalCalendarDays = diffDays(rangeStart, rangeEnd) + 1;
@@ -98,10 +103,14 @@ export function calculateServiceFee(inp: ServiceFeeInputs): CalculationResult {
   const lastMon = mondayOf(rangeEnd);
   const workWeekCount = diffDays(firstMon, lastMon) / 7 + 1;
 
+  const billedTaxWeeks: string[] = []; // 本次新覆盖的周(用于持久化)
+  let newWeekCount = 0;
+
   const workWeeks: WeekRow[] = [];
   for (let i = 0; i < workWeekCount; i++) {
     const weekMon = addDays(firstMon, i * 7);
     const weekSun = addDays(weekMon, 6);
+    const weekMondayISO = toISO(weekMon);
     const isFirst = i === 0;
     const isLast = i === workWeekCount - 1;
     const displayedStart = isFirst ? rangeStart : weekMon;
@@ -117,8 +126,13 @@ export function calculateServiceFee(inp: ServiceFeeInputs): CalculationResult {
     else if (adjustedWorkingDays === 5) adjustmentType = "Full Work Week";
     else adjustmentType = "No Adjustment";
 
-    // 每 2 周一个双周:$100 落在第 1、3、5… 周(0 基偶数)
-    const taxWithheld = i % 2 === 0 ? round2(inp.taxWithheldPerPayroll) : 0;
+    const taxAlreadyBilled = priorTaxWeeks.has(weekMondayISO);
+    let taxWithheld = 0;
+    if (!taxAlreadyBilled) {
+      newWeekCount += 1;
+      billedTaxWeeks.push(weekMondayISO);
+      taxWithheld = newWeekCount % 2 === 1 ? round2(inp.taxWithheldPerPayroll) : 0;
+    }
 
     workWeeks.push({
       index: i + 1,
@@ -137,6 +151,7 @@ export function calculateServiceFee(inp: ServiceFeeInputs): CalculationResult {
       hourlyWage: round2(wage),
       grossWages: round2(weeklyWorkHours * wage),
       taxWithheld,
+      taxAlreadyBilled,
       adjustmentType,
     });
   }
@@ -146,12 +161,15 @@ export function calculateServiceFee(inp: ServiceFeeInputs): CalculationResult {
   const totalAdjustedWorkingDays = workWeeks.reduce((a, w) => a + w.adjustedWorkingDays, 0);
   const totalTaxWithheld = round2(workWeeks.reduce((a, w) => a + w.taxWithheld, 0));
   const taxChargeCount = workWeeks.filter((w) => w.taxWithheld > 0).length;
+  const actualEndDateISO = workWeeks[workWeeks.length - 1].workWeekEndISO;
 
-  // ================= 费用(每个自然月一行) =================
+  // ================= 费用(每个自然月一行,带去重) =================
   const scDates = serviceChargeDates(rangeStart, rangeEnd);
   const scByMonth = new Map<string, number>();
   for (const dts of scDates) scByMonth.set(monthKey(dts), dts);
-  const serviceChargeCount = scDates.length;
+
+  const chargedPayrollMonths: string[] = [];
+  const chargedServiceMonths: string[] = [];
 
   const feeRows: FeeRow[] = monthOrder.map((mk) => {
     const [y, m] = mk.split("-").map(Number);
@@ -160,8 +178,15 @@ export function calculateServiceFee(inp: ServiceFeeInputs): CalculationResult {
     const coveredStartTs = Math.max(monthFirst, rangeStart);
     const coveredEndTs = Math.min(monthLast, rangeEnd);
     const scTs = scByMonth.get(mk) ?? null;
-    const sc = scTs !== null ? round2(inp.monthlyServiceCharge) : 0;
-    const payrollFee = round2(inp.monthlyPayrollFee);
+
+    const payrollAlreadyBilled = priorPayrollMonths.has(mk);
+    const payrollFee = payrollAlreadyBilled ? 0 : round2(inp.monthlyPayrollFee);
+    if (!payrollAlreadyBilled) chargedPayrollMonths.push(mk);
+
+    const serviceAlreadyBilled = scTs !== null && priorServiceMonths.has(mk);
+    const serviceCharge = scTs !== null && !serviceAlreadyBilled ? round2(inp.monthlyServiceCharge) : 0;
+    if (scTs !== null && !serviceAlreadyBilled) chargedServiceMonths.push(mk);
+
     return {
       monthKey: mk,
       payrollMonth: monthLabel(monthFirst),
@@ -170,16 +195,19 @@ export function calculateServiceFee(inp: ServiceFeeInputs): CalculationResult {
       coveredStartISO: toISO(coveredStartTs),
       coveredEndISO: toISO(coveredEndTs),
       payrollFee,
-      payrollFeeType: "Monthly Payroll Fee",
+      payrollFeeType: payrollFee > 0 ? "Monthly Payroll Fee" : "None",
+      payrollAlreadyBilled,
       serviceChargeDate: scTs !== null ? formatUS(scTs) : "",
       serviceChargeDateISO: scTs !== null ? toISO(scTs) : "",
-      serviceCharge: sc,
-      subtotal: round2(payrollFee + sc),
+      serviceCharge,
+      serviceAlreadyBilled,
+      subtotal: round2(payrollFee + serviceCharge),
     };
   });
 
   const totalPayrollFees = round2(feeRows.reduce((a, r) => a + r.payrollFee, 0));
   const totalServiceCharge = round2(feeRows.reduce((a, r) => a + r.serviceCharge, 0));
+  const serviceChargeCount = chargedServiceMonths.length;
 
   const grandTotal = round2(
     grossWages + totalTaxWithheld + totalPayrollFees + totalServiceCharge,
@@ -202,6 +230,15 @@ export function calculateServiceFee(inp: ServiceFeeInputs): CalculationResult {
     totalPayrollFees,
     totalServiceCharge,
     grandTotal,
+    inputStartDate: formatUS(rangeStart),
+    inputStartDateISO: toISO(rangeStart),
+    inputEndDate: formatUS(rangeEnd),
+    inputEndDateISO: toISO(rangeEnd),
+    actualEndDate: formatUS(parseDate(actualEndDateISO)),
+    actualEndDateISO,
+    chargedPayrollMonths,
+    chargedServiceMonths,
+    billedTaxWeeks,
     workWeeks,
     feeRows,
     inputs: inp,

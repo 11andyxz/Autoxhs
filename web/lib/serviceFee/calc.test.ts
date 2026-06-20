@@ -146,6 +146,78 @@ describe("工时(首周/末周)仍正确", () => {
   });
 });
 
+describe("Actual End Date(末周顺延)", () => {
+  it("06/29 – 06/30 → Actual End Date = 2026-07-05;Input End 不变", () => {
+    const r = calculateServiceFee({ ...base, startDate: "2026-06-29", endDate: "2026-06-30" });
+    expect(r.inputEndDateISO).toBe("2026-06-30");
+    expect(r.actualEndDateISO).toBe("2026-07-05");
+  });
+  it("无顺延时 Actual End = 该周周日", () => {
+    const r = calculateServiceFee({ ...base, startDate: "2026-06-01", endDate: "2026-06-30" });
+    expect(r.actualEndDateISO).toBe("2026-07-05"); // 06/30 周二 -> 周日 07/05
+  });
+});
+
+describe("跨记录去重(Tax 按周 / Payroll & Service 按月)", () => {
+  it("无 prior 时与默认一致", () => {
+    const a = calculateServiceFee(base);
+    const b = calculateServiceFee(base, { payrollMonths: [], serviceMonths: [], taxWeeks: [] });
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  it("Payroll 已收月份置 0", () => {
+    const r = calculateServiceFee(base, {
+      payrollMonths: ["2026-06"],
+      serviceMonths: [],
+      taxWeeks: [],
+    });
+    expect(r.totalPayrollFees).toBe(0);
+    expect(r.feeRows[0].payrollAlreadyBilled).toBe(true);
+    expect(r.chargedPayrollMonths).toEqual([]);
+  });
+
+  it("Service 已收月份置 0", () => {
+    const r = calculateServiceFee(base, {
+      payrollMonths: [],
+      serviceMonths: ["2026-06"],
+      taxWeeks: [],
+    });
+    expect(r.totalServiceCharge).toBe(0);
+    expect(r.serviceChargeCount).toBe(0);
+  });
+
+  it("Tax 已收的周不再计费", () => {
+    // June 工作周 mondays: 06/01,06/08,06/15,06/22,06/29;收过前两周
+    const r = calculateServiceFee(base, {
+      payrollMonths: [],
+      serviceMonths: [],
+      taxWeeks: ["2026-06-01", "2026-06-08"],
+    });
+    // 新增周 = 06/15,06/22,06/29 共 3 周 -> ceil(3/2)=2 次 -> 200
+    expect(r.totalTaxWithheld).toBe(200);
+    expect(r.taxChargeCount).toBe(2);
+    expect(r.workWeeks[0].taxAlreadyBilled).toBe(true);
+    expect(r.workWeeks[1].taxAlreadyBilled).toBe(true);
+    expect(r.billedTaxWeeks).toEqual(["2026-06-15", "2026-06-22", "2026-06-29"]);
+  });
+
+  it("连续计费场景(§5):record2 只收新增的月/周", () => {
+    const r1 = calculateServiceFee({ ...base, startDate: "2026-02-17", endDate: "2026-03-17" });
+    // record2 用 record1 已收的键作为 prior
+    const r2 = calculateServiceFee(
+      { ...base, startDate: "2026-03-17", endDate: "2026-04-17" },
+      {
+        payrollMonths: r1.chargedPayrollMonths,
+        serviceMonths: r1.chargedServiceMonths,
+        taxWeeks: r1.billedTaxWeeks,
+      },
+    );
+    expect(r2.totalPayrollFees).toBe(92); // 只有 4 月(3 月已收)
+    expect(r2.totalServiceCharge).toBe(120); // 只有 04/17(03/17 已收)
+    expect(r2.totalTaxWithheld).toBe(200); // 03/16 已收, 新增 4 周 -> 2 次
+  });
+});
+
 describe("确定性", () => {
   it("相同输入两次一致", () => {
     expect(JSON.stringify(calculateServiceFee(base))).toBe(JSON.stringify(calculateServiceFee(base)));
