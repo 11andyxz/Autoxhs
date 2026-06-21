@@ -38,13 +38,27 @@ type HistoryRecord = {
   createdAt: string;
   result: CalculationResult;
 };
+type ClientListItem = {
+  id: number;
+  displayName: string;
+  recordCount: number;
+  lastInputStart: string | null;
+  lastInputEnd: string | null;
+  lastActualEnd: string | null;
+};
 type ClientInfo = {
   exists: boolean;
+  clientId?: number;
   displayName?: string;
   suggestedNextStartDate: string | null;
   history: HistoryRecord[];
 };
-type Committed = { result: CalculationResult; clientName: string; priorCharges: PriorCharges };
+type Committed = {
+  result: CalculationResult;
+  clientName: string;
+  clientId: number | null;
+  priorCharges: PriorCharges;
+};
 
 function todayMonthDefaults() {
   const now = new Date();
@@ -57,6 +71,8 @@ function todayMonthDefaults() {
 export default function ServiceFeePage() {
   const [clientName, setClientName] = useState("");
   const [clientInfo, setClientInfo] = useState<ClientInfo | null>(null);
+  const [clients, setClients] = useState<ClientListItem[]>([]);
+  const [comboOpen, setComboOpen] = useState(false);
 
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -80,6 +96,7 @@ export default function ServiceFeePage() {
     const { first, last } = todayMonthDefaults();
     setStartDate(first);
     setEndDate(last);
+    loadClients();
   }, []);
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
 
@@ -87,6 +104,16 @@ export default function ServiceFeePage() {
     setToast(msg);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2600);
+  }
+
+  async function loadClients() {
+    try {
+      const res = await fetch("/api/clients/list");
+      const json = await res.json();
+      if (json.success) setClients(json.clients as ClientListItem[]);
+    } catch {
+      /* ignore */
+    }
   }
 
   const currentInputs: ServiceFeeInputs = useMemo(
@@ -120,45 +147,61 @@ export default function ServiceFeePage() {
     );
   }, [committed, currentInputs, clientName]);
 
-  async function lookupClient(name: string, range?: { start: string; end: string }) {
+  type LookupResp = {
+    success: boolean;
+    exists: boolean;
+    clientId?: number;
+    displayName?: string;
+    priorCharges: PriorCharges;
+    suggestedNextStartDate: string | null;
+    history: HistoryRecord[];
+  };
+  async function lookupClient(opts: {
+    clientId?: number;
+    name?: string;
+    range?: { start: string; end: string };
+  }): Promise<LookupResp> {
     const res = await fetch("/api/clients/lookup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name,
-        inputStartDate: range?.start,
-        inputEndDate: range?.end,
+        clientId: opts.clientId,
+        name: opts.name,
+        inputStartDate: opts.range?.start,
+        inputEndDate: opts.range?.end,
       }),
     });
     if (!res.ok) throw new Error("lookup failed");
-    return (await res.json()) as {
-      success: boolean;
-      exists: boolean;
-      displayName?: string;
-      priorCharges: PriorCharges;
-      suggestedNextStartDate: string | null;
-      history: HistoryRecord[];
-    };
+    return (await res.json()) as LookupResp;
   }
 
-  async function onClientBlur() {
-    const name = clientName.trim();
-    if (!name) {
-      setClientInfo(null);
-      return;
-    }
+  function applyClientInfo(data: LookupResp) {
+    setClientInfo({
+      exists: data.exists,
+      clientId: data.clientId,
+      displayName: data.displayName,
+      suggestedNextStartDate: data.suggestedNextStartDate,
+      history: data.history ?? [],
+    });
+  }
+
+  async function loadClientInfo(clientId: number) {
     try {
-      const data = await lookupClient(name);
-      setClientInfo({
-        exists: data.exists,
-        displayName: data.displayName,
-        suggestedNextStartDate: data.suggestedNextStartDate,
-        history: data.history ?? [],
-      });
+      applyClientInfo(await lookupClient({ clientId }));
     } catch {
-      // 查不到也不阻塞,留空
       setClientInfo(null);
     }
+  }
+
+  function selectClient(c: ClientListItem) {
+    setClientName(c.displayName);
+    setComboOpen(false);
+    loadClientInfo(c.id);
+  }
+
+  function chooseNewClient() {
+    setComboOpen(false);
+    setClientInfo({ exists: false, suggestedNextStartDate: null, history: [] });
   }
 
   async function onCalculate() {
@@ -170,21 +213,19 @@ export default function ServiceFeePage() {
 
     setCalculating(true);
     try {
+      const matched = clients.find((c) => c.displayName.trim().toLowerCase() === name.toLowerCase());
       let prior = EMPTY_PRIOR;
+      let clientId: number | null = matched?.id ?? null;
       try {
-        const data = await lookupClient(name, { start: startDate, end: endDate });
+        const data = await lookupClient({ clientId: matched?.id, name, range: { start: startDate, end: endDate } });
         prior = data.priorCharges ?? EMPTY_PRIOR;
-        setClientInfo({
-          exists: data.exists,
-          displayName: data.displayName,
-          suggestedNextStartDate: data.suggestedNextStartDate,
-          history: data.history ?? [],
-        });
+        clientId = data.exists ? (data.clientId ?? clientId) : null;
+        applyClientInfo(data);
       } catch {
         showToast("未能加载客户历史(数据库不可用),本次未去重");
       }
       const result = calculateServiceFee(currentInputs, prior);
-      setCommitted({ result, clientName: name, priorCharges: prior });
+      setCommitted({ result, clientName: name, clientId, priorCharges: prior });
     } finally {
       setCalculating(false);
     }
@@ -208,6 +249,10 @@ export default function ServiceFeePage() {
 
   async function onSave() {
     if (!committed || stale) return;
+    // 新客户(未匹配到已有 client_id)保存前确认,避免误建重复客户
+    if (committed.clientId == null) {
+      if (!window.confirm(`未找到同名客户,确定创建新客户「${committed.clientName}」并保存?`)) return;
+    }
     setSaving(true);
     setErrors([]);
     try {
@@ -215,7 +260,12 @@ export default function ServiceFeePage() {
         const res = await fetch("/api/service-fee/save", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: committed.clientName, inputs: committed.result.inputs, force }),
+          body: JSON.stringify({
+            clientId: committed.clientId ?? undefined,
+            name: committed.clientName,
+            inputs: committed.result.inputs,
+            force,
+          }),
         });
         return (await res.json()) as { success: boolean; duplicate?: boolean; updated?: boolean; error?: string };
       };
@@ -232,15 +282,15 @@ export default function ServiceFeePage() {
         return;
       }
       showToast(json.updated ? "已更新数据库记录" : "已保存到数据库");
-      // 刷新历史
+      await loadClients();
       try {
-        const data = await lookupClient(committed.clientName);
-        setClientInfo({
-          exists: data.exists,
-          displayName: data.displayName,
-          suggestedNextStartDate: data.suggestedNextStartDate,
-          history: data.history ?? [],
-        });
+        const data = await lookupClient(
+          committed.clientId ? { clientId: committed.clientId } : { name: committed.clientName },
+        );
+        applyClientInfo(data);
+        if (data.clientId && committed.clientId == null) {
+          setCommitted({ ...committed, clientId: data.clientId });
+        }
       } catch {
         /* ignore */
       }
@@ -304,6 +354,12 @@ export default function ServiceFeePage() {
   const result = committed?.result ?? null;
   const canAct = !!result && !stale;
 
+  const clientQuery = clientName.trim().toLowerCase();
+  const filteredClients = clientQuery
+    ? clients.filter((c) => c.displayName.toLowerCase().includes(clientQuery))
+    : clients;
+  const exactClientMatch = clients.some((c) => c.displayName.trim().toLowerCase() === clientQuery);
+
   return (
     <main className="min-h-screen bg-slate-50">
       <div className="mx-auto max-w-5xl px-4 py-10">
@@ -317,30 +373,62 @@ export default function ServiceFeePage() {
           </p>
         </header>
 
-        {/* 客户 */}
+        {/* 客户选择器 */}
         <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-sm font-semibold text-slate-800">客户 Client</h2>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <Field label="Client Name / 客户姓名">
+            <div className="relative">
+              <span className="mb-1 block text-xs font-medium text-slate-600">Client Name / 客户姓名(可搜索选择)</span>
               <input
                 type="text"
                 value={clientName}
-                onChange={(e) => setClientName(e.target.value)}
-                onBlur={onClientBlur}
-                placeholder="例如 John Smith"
+                onChange={(e) => { setClientName(e.target.value); setComboOpen(true); }}
+                onFocus={() => setComboOpen(true)}
+                onBlur={() => setTimeout(() => setComboOpen(false), 150)}
+                placeholder={`输入或选择客户(共 ${clients.length} 个)`}
+                autoComplete="off"
                 className={inputCls}
               />
-            </Field>
+              {comboOpen && (
+                <div className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-slate-200 bg-white shadow-lg">
+                  {filteredClients.map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onMouseDown={(e) => { e.preventDefault(); selectClient(c); }}
+                      className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
+                    >
+                      <span className="font-medium text-slate-800">{c.displayName}</span>
+                      <span className="ml-2 text-[11px] text-slate-400">
+                        {c.recordCount} 条{c.lastInputStart ? ` · 最近 ${c.lastInputStart} ~ ${c.lastInputEnd}` : ""}
+                      </span>
+                    </button>
+                  ))}
+                  {clientName.trim() && !exactClientMatch && (
+                    <button
+                      type="button"
+                      onMouseDown={(e) => { e.preventDefault(); chooseNewClient(); }}
+                      className="block w-full border-t border-slate-100 px-3 py-2 text-left text-sm text-emerald-700 hover:bg-emerald-50"
+                    >
+                      + 新增客户「{clientName.trim()}」
+                    </button>
+                  )}
+                  {filteredClients.length === 0 && !clientName.trim() && (
+                    <div className="px-3 py-2 text-xs text-slate-400">暂无客户,输入名字以新增</div>
+                  )}
+                </div>
+              )}
+            </div>
             {clientInfo && (
               <div className="flex flex-col justify-center text-xs text-slate-500">
                 {clientInfo.exists ? (
                   <span className="text-emerald-700">已有客户「{clientInfo.displayName}」· {clientInfo.history.length} 条历史记录</span>
                 ) : (
-                  <span>新客户(暂无历史记录)</span>
+                  <span>新客户(保存时创建)</span>
                 )}
                 {clientInfo.suggestedNextStartDate && (
                   <div className="mt-1 flex items-center gap-2">
-                    <span>建议下次开始日期:<b className="text-slate-700">{clientInfo.suggestedNextStartDate}</b></span>
+                    <span>建议下次开始:<b className="text-slate-700">{clientInfo.suggestedNextStartDate}</b></span>
                     <button
                       type="button"
                       onClick={() => setStartDate(clientInfo.suggestedNextStartDate!)}

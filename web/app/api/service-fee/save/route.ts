@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 
 import { calculateServiceFee } from "@/lib/serviceFee/calc";
-import { getOrCreateClient, getPriorCharges } from "@/lib/serviceFee/clients";
+import { getClientById, getOrCreateClient, getPriorCharges } from "@/lib/serviceFee/clients";
 import { ensureSchema, getPool } from "@/lib/serviceFee/db";
 import type { ServiceFeeInputs } from "@/lib/serviceFee/types";
 import { validateInputs } from "@/lib/serviceFee/validate";
@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  let body: { name?: string; inputs?: ServiceFeeInputs; force?: boolean };
+  let body: { clientId?: number; name?: string; inputs?: ServiceFeeInputs; force?: boolean };
   try {
     body = await req.json();
   } catch {
@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
   }
 
   const name = (body.name ?? "").trim();
-  if (!name) {
+  if (!body.clientId && !name) {
     return NextResponse.json({ success: false, error: "请先填写客户姓名。" }, { status: 400 });
   }
   if (!body.inputs) {
@@ -37,7 +37,17 @@ export async function POST(req: NextRequest) {
   const conn = await getPool().getConnection();
   try {
     await conn.beginTransaction();
-    const client = await getOrCreateClient(conn, name);
+    let client;
+    if (body.clientId) {
+      const existing = await getClientById(body.clientId);
+      if (!existing) {
+        await conn.rollback();
+        return NextResponse.json({ success: false, error: "客户不存在。" }, { status: 400 });
+      }
+      client = existing;
+    } else {
+      client = await getOrCreateClient(conn, name);
+    }
 
     // 去重键:排除「与本区间完全相同」的旧记录,保证重算/更新同区间时本区间费用完整计入
     const prior = await getPriorCharges(client.id, inputs.startDate, inputs.endDate);

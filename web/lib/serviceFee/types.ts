@@ -13,7 +13,9 @@ export interface ServiceFeeInputs {
 export interface PriorCharges {
   payrollMonths: string[]; // 'YYYY-MM'
   serviceMonths: string[]; // 'YYYY-MM'
-  taxWeeks: string[]; // 'YYYY-MM-DD'(工作周的周一)
+  taxWeeks: string[]; // 'YYYY-MM-DD'(已收过的工作周的周一)
+  /** 该客户「第一个计费工作周」的周一(双周配对网格的锚点);无历史时为空 */
+  taxAnchor?: string | null;
 }
 
 export type PayrollFeeType = "Monthly Payroll Fee" | "None";

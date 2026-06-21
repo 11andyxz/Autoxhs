@@ -1,7 +1,49 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 
+import { addDays, dayOfWeek, parseDate, toISO } from "./dateUtils";
 import { getPool, normalizeName } from "./db";
 import type { PriorCharges } from "./types";
+
+export async function getClientById(id: number): Promise<ClientRow | null> {
+  const p = getPool();
+  const [rows] = await p.query<RowDataPacket[]>(
+    "SELECT id, display_name FROM clients WHERE id = ? LIMIT 1",
+    [id],
+  );
+  if (!rows.length) return null;
+  return { id: rows[0].id as number, displayName: rows[0].display_name as string };
+}
+
+export interface ClientListItem {
+  id: number;
+  displayName: string;
+  recordCount: number;
+  lastInputStart: string | null;
+  lastInputEnd: string | null;
+  lastActualEnd: string | null;
+}
+
+/** 全部客户 + 最近一次计算区间(用于客户选择器) */
+export async function listClients(): Promise<ClientListItem[]> {
+  const p = getPool();
+  const [rows] = await p.query<RowDataPacket[]>(
+    `SELECT c.id, c.display_name,
+        (SELECT COUNT(*) FROM fee_records WHERE client_id = c.id) AS record_count,
+        (SELECT input_start_date FROM fee_records WHERE client_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1) AS last_start,
+        (SELECT input_end_date   FROM fee_records WHERE client_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1) AS last_end,
+        (SELECT actual_end_date  FROM fee_records WHERE client_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1) AS last_actual
+     FROM clients c
+     ORDER BY c.display_name ASC`,
+  );
+  return rows.map((r) => ({
+    id: r.id as number,
+    displayName: r.display_name as string,
+    recordCount: Number(r.record_count),
+    lastInputStart: (r.last_start as string) ?? null,
+    lastInputEnd: (r.last_end as string) ?? null,
+    lastActualEnd: (r.last_actual as string) ?? null,
+  }));
+}
 
 export interface ClientRow {
   id: number;
@@ -64,10 +106,16 @@ export async function getPriorCharges(
     `SELECT week_monday FROM billed_tax_weeks WHERE client_id = ?${exclude ? notIn : ""}`,
     args,
   );
+  // 锚点 = 该客户「全部」已收工作周里最早的那个周一(不排除当前区间,保证网格稳定)
+  const [anchorRows] = await p.query<RowDataPacket[]>(
+    "SELECT MIN(week_monday) AS anchor FROM billed_tax_weeks WHERE client_id = ?",
+    [clientId],
+  );
   return {
     payrollMonths: pm.map((r) => r.month as string),
     serviceMonths: sm.map((r) => r.month as string),
     taxWeeks: tw.map((r) => r.week_monday as string),
+    taxAnchor: (anchorRows[0]?.anchor as string) ?? null,
   };
 }
 
@@ -115,12 +163,15 @@ export async function getHistory(clientId: number): Promise<HistoryRecord[]> {
   });
 }
 
-/** 最近一次保存记录的 Actual End Date(作为建议下次开始日期) */
+/** 建议下次开始日期 = 最近一次记录的 Actual End Date + 1 天(若落在周末则顺延到周一) */
 export async function getSuggestedNextStart(clientId: number): Promise<string | null> {
   const p = getPool();
   const [rows] = await p.query<RowDataPacket[]>(
     "SELECT actual_end_date FROM fee_records WHERE client_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
     [clientId],
   );
-  return rows.length ? (rows[0].actual_end_date as string) : null;
+  if (!rows.length) return null;
+  let ts = addDays(parseDate(rows[0].actual_end_date as string), 1);
+  while (dayOfWeek(ts) === 0 || dayOfWeek(ts) === 6) ts = addDays(ts, 1);
+  return toISO(ts);
 }

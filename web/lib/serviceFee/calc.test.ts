@@ -203,18 +203,36 @@ describe("跨记录去重(Tax 按周 / Payroll & Service 按月)", () => {
 
   it("连续计费场景(§5):record2 只收新增的月/周", () => {
     const r1 = calculateServiceFee({ ...base, startDate: "2026-02-17", endDate: "2026-03-17" });
-    // record2 用 record1 已收的键作为 prior
     const r2 = calculateServiceFee(
       { ...base, startDate: "2026-03-17", endDate: "2026-04-17" },
       {
         payrollMonths: r1.chargedPayrollMonths,
         serviceMonths: r1.chargedServiceMonths,
         taxWeeks: r1.billedTaxWeeks,
+        taxAnchor: r1.billedTaxWeeks[0], // 2026-02-16
       },
     );
     expect(r2.totalPayrollFees).toBe(92); // 只有 4 月(3 月已收)
     expect(r2.totalServiceCharge).toBe(120); // 只有 04/17(03/17 已收)
-    expect(r2.totalTaxWithheld).toBe(200); // 03/16 已收, 新增 4 周 -> 2 次
+    expect(r2.totalTaxWithheld).toBe(200); // 新增 2 个双周
+  });
+
+  it("回归(用户 bug):03/23–03/29 属于已收双周,Tax 收 0", () => {
+    const r1 = calculateServiceFee({ ...base, startDate: "2026-02-17", endDate: "2026-03-17" });
+    expect(r1.billedTaxWeeks[0]).toBe("2026-02-16");
+    const r2 = calculateServiceFee(
+      { ...base, startDate: "2026-03-23", endDate: "2026-03-29" },
+      {
+        payrollMonths: r1.chargedPayrollMonths,
+        serviceMonths: r1.chargedServiceMonths,
+        taxWeeks: r1.billedTaxWeeks,
+        taxAnchor: r1.billedTaxWeeks[0], // 锚 = 02/16
+      },
+    );
+    expect(r2.workWeekCount).toBe(1);
+    expect(r2.totalTaxWithheld).toBe(0); // 03/16–03/22 已收过,03/23 是同一双周第二周
+    expect(r2.taxChargeCount).toBe(0);
+    expect(r2.workWeeks[0].taxAlreadyBilled).toBe(true);
   });
 });
 

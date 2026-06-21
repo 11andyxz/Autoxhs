@@ -103,8 +103,14 @@ export function calculateServiceFee(
   const lastMon = mondayOf(rangeEnd);
   const workWeekCount = diffDays(firstMon, lastMon) / 7 + 1;
 
+  // 双周配对:以「客户第一个计费工作周」为锚(无历史则取本区间首个工作周),
+  // 每 2 个连续工作周为一个双周;每个双周每客户只收一次 Tax。
+  const anchorMonday = prior.taxAnchor ? mondayOf(parseDate(prior.taxAnchor)) : firstMon;
+  const pairIndexOf = (mondayTs: number) => Math.floor(diffDays(anchorMonday, mondayTs) / 14);
+  const chargedPairs = new Set<number>();
+  for (const wIso of prior.taxWeeks) chargedPairs.add(pairIndexOf(parseDate(wIso)));
+  const chargedThisCalc = new Set<number>();
   const billedTaxWeeks: string[] = []; // 本次新覆盖的周(用于持久化)
-  let newWeekCount = 0;
 
   const workWeeks: WeekRow[] = [];
   for (let i = 0; i < workWeekCount; i++) {
@@ -126,13 +132,14 @@ export function calculateServiceFee(
     else if (adjustedWorkingDays === 5) adjustmentType = "Full Work Week";
     else adjustmentType = "No Adjustment";
 
-    const taxAlreadyBilled = priorTaxWeeks.has(weekMondayISO);
+    const pairIndex = pairIndexOf(weekMon);
+    const taxAlreadyBilled = chargedPairs.has(pairIndex); // 该双周在之前的记录里已收过
     let taxWithheld = 0;
-    if (!taxAlreadyBilled) {
-      newWeekCount += 1;
-      billedTaxWeeks.push(weekMondayISO);
-      taxWithheld = newWeekCount % 2 === 1 ? round2(inp.taxWithheldPerPayroll) : 0;
+    if (!taxAlreadyBilled && !chargedThisCalc.has(pairIndex)) {
+      chargedThisCalc.add(pairIndex);
+      taxWithheld = round2(inp.taxWithheldPerPayroll);
     }
+    if (!priorTaxWeeks.has(weekMondayISO)) billedTaxWeeks.push(weekMondayISO);
 
     workWeeks.push({
       index: i + 1,

@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import {
+  getClientById,
   getClientByName,
   getHistory,
   getPriorCharges,
@@ -11,10 +12,10 @@ import { ensureSchema } from "@/lib/serviceFee/db";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const EMPTY = { payrollMonths: [], serviceMonths: [], taxWeeks: [] };
+const EMPTY = { payrollMonths: [], serviceMonths: [], taxWeeks: [], taxAnchor: null };
 
 export async function POST(req: NextRequest) {
-  let body: { name?: string; inputStartDate?: string; inputEndDate?: string };
+  let body: { clientId?: number; name?: string; inputStartDate?: string; inputEndDate?: string };
   try {
     body = await req.json();
   } catch {
@@ -22,13 +23,15 @@ export async function POST(req: NextRequest) {
   }
 
   const name = (body.name ?? "").trim();
-  if (!name) {
-    return NextResponse.json({ success: false, error: "请填写客户姓名。" }, { status: 400 });
+  if (!body.clientId && !name) {
+    return NextResponse.json({ success: false, error: "请提供客户。" }, { status: 400 });
   }
 
   try {
     await ensureSchema();
-    const client = await getClientByName(name);
+    const client = body.clientId
+      ? await getClientById(body.clientId)
+      : await getClientByName(name);
     if (!client) {
       return NextResponse.json({
         success: true,
@@ -46,6 +49,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       exists: true,
+      clientId: client.id,
       displayName: client.displayName,
       priorCharges,
       suggestedNextStartDate,
@@ -53,9 +57,6 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     console.error("[clients/lookup] 失败", { name: (err as Error)?.name });
-    return NextResponse.json(
-      { success: false, error: "查询客户失败,请稍后重试。" },
-      { status: 500 },
-    );
+    return NextResponse.json({ success: false, error: "查询客户失败,请稍后重试。" }, { status: 500 });
   }
 }
