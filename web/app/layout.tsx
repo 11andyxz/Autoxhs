@@ -13,8 +13,10 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
+  // suppressHydrationWarning: 容忍浏览器扩展(如沉浸式翻译)在 React 接管前往 <html> 注入属性,
+  // 造成的 hydration 不一致(只豁免 <html> 自身属性,不影响子树)。
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" suppressHydrationWarning>
       <body>{children}</body>
     </html>
   );
