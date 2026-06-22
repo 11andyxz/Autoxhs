@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import { calculateServiceFee, round2 } from "@/lib/serviceFee/calc";
-import { parseDate } from "@/lib/serviceFee/dateUtils";
+import { addDays, mondayOf, parseDate, toISO } from "@/lib/serviceFee/dateUtils";
 import { exportFileName } from "@/lib/serviceFee/filename";
 import type { CalculationResult, PriorCharges, ServiceFeeInputs } from "@/lib/serviceFee/types";
 import { validateInputs } from "@/lib/serviceFee/validate";
@@ -229,6 +229,12 @@ export default function ServiceFeePage() {
     } finally {
       setCalculating(false);
     }
+  }
+
+  // 双周:End = 起始周的「第 2 个工作周」的周日(= 本周一 + 13 天),正好一个双周期
+  function onSetBiweekly() {
+    if (!startDate) return;
+    setEndDate(toISO(addDays(mondayOf(parseDate(startDate)), 13)));
   }
 
   function onReset() {
@@ -487,6 +493,17 @@ export default function ServiceFeePage() {
             <Field label="Input End Date" hint={preview ? `Actual End Date(顺延后)= ${preview.actualEndDate}` : undefined}>
               <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className={inputCls} />
             </Field>
+          </div>
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={onSetBiweekly}
+              disabled={!startDate}
+              title="把结束日设为「从 Start 起一个双周(2 个工作周)」的结束日"
+              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              双周 · 自动设结束日(从 Start 起一个双周)
+            </button>
           </div>
           <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-5">
             <Stat label="总天数" value={preview ? preview.totalCalendarDays : "—"} />
