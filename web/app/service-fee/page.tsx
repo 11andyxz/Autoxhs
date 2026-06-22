@@ -351,6 +351,40 @@ export default function ServiceFeePage() {
     }
   }
 
+  async function onDeleteHistory(rec: HistoryRecord) {
+    if (
+      !window.confirm(
+        `确定删除该记录(${rec.inputStartDate} ~ ${rec.inputEndDate})?\n将从数据库永久删除,无法撤销。`,
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch("/api/service-fee/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recordId: rec.id }),
+      });
+      const json = (await res.json()) as { success: boolean; error?: string };
+      if (!json.success) {
+        showToast(json.error ?? "删除失败,请稍后重试。");
+        return;
+      }
+      showToast("已删除该记录");
+      if (openDetail === rec.id) setOpenDetail(null);
+      await loadClients();
+      const cid = clientInfo?.clientId;
+      try {
+        const data = await lookupClient(cid ? { clientId: cid } : { name: clientName.trim() });
+        applyClientInfo(data);
+      } catch {
+        /* ignore */
+      }
+    } catch {
+      showToast("删除失败,请稍后重试。");
+    }
+  }
+
   const result = committed?.result ?? null;
   const canAct = !!result && !stale;
 
@@ -667,6 +701,7 @@ export default function ServiceFeePage() {
                         <td className="whitespace-nowrap px-3 py-2">
                           <button type="button" onClick={() => setOpenDetail(openDetail === rec.id ? null : rec.id)} className="text-slate-500 hover:text-slate-800">View</button>
                           <button type="button" onClick={() => onExportHistory(rec)} className="ml-3 text-emerald-700 hover:underline">Excel</button>
+                          <button type="button" onClick={() => onDeleteHistory(rec)} className="ml-3 text-red-500 hover:underline">删除</button>
                         </td>
                       </tr>
                       {openDetail === rec.id && (
