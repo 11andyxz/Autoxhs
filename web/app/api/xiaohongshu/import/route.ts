@@ -15,7 +15,7 @@ type NoteDetail = {
   comment?: string;
   type?: string;
   image_count?: number;
-  images?: Array<{ url?: string }>;
+  images?: Array<{ url?: string; width?: number; height?: number }>;
 };
 
 /**
@@ -76,7 +76,11 @@ export async function POST(req: NextRequest) {
       );
     }
     const d = json.detail;
-    const images = (d.images ?? []).map((im) => im.url).filter((u): u is string => !!u);
+    const images = (d.images ?? []).flatMap((image) =>
+      image.url
+        ? [{ url: image.url, width: image.width, height: image.height }]
+        : [],
+    );
     return NextResponse.json({
       success: true,
       data: {

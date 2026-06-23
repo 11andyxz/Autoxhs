@@ -19,11 +19,22 @@ type ApiResponse = {
   error?: string;
 };
 
+type PublishFeedback = {
+  tone: "info" | "success" | "error";
+  message: string;
+};
+
+type ImportedImage = {
+  url: string;
+  width?: number;
+  height?: number;
+};
+
 export default function XiaohongshuPage() {
   const [input, setInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [importing, setImporting] = useState(false);
-  const [noteImages, setNoteImages] = useState<string[]>([]);
+  const [noteImages, setNoteImages] = useState<ImportedImage[]>([]);
   const [ocring, setOcring] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,6 +43,9 @@ export default function XiaohongshuPage() {
   const [selectedTitleIndex, setSelectedTitleIndex] = useState(0);
   const [editedBody, setEditedBody] = useState("");
   const [isEditingBody, setIsEditingBody] = useState(false);
+  const [publishingAction, setPublishingAction] = useState<"dry-run" | "post" | null>(null);
+  const [publishFeedback, setPublishFeedback] = useState<PublishFeedback | null>(null);
+  const [awaitingPostConfirmation, setAwaitingPostConfirmation] = useState(false);
 
   const [hintIndex, setHintIndex] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
@@ -79,7 +93,7 @@ export default function XiaohongshuPage() {
       const json = (await res.json().catch(() => null)) as
         | {
             success: boolean;
-            data?: { title?: string; desc?: string; images?: string[]; imageCount?: number };
+            data?: { title?: string; desc?: string; images?: ImportedImage[]; imageCount?: number };
             error?: string;
           }
         | null;
@@ -111,7 +125,7 @@ export default function XiaohongshuPage() {
       const res = await fetch("/api/xiaohongshu/ocr", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageUrls: noteImages }),
+        body: JSON.stringify({ imageUrls: noteImages.map((image) => image.url) }),
       });
       const json = (await res.json().catch(() => null)) as
         | { success: boolean; text?: string; error?: string }
@@ -189,15 +203,89 @@ export default function XiaohongshuPage() {
     showToast(ok ? successMessage : "复制失败,请手动选择文案进行复制。");
   }
 
+  async function handlePublish(confirm: boolean) {
+    if (!selectedTitle.trim() || !editedBody.trim()) {
+      const message = "请先生成并保留标题和正文。";
+      setError(message);
+      setPublishFeedback({ tone: "error", message });
+      return;
+    }
+
+    setPublishingAction(confirm ? "post" : "dry-run");
+    setAwaitingPostConfirmation(false);
+    setPublishFeedback({
+      tone: "info",
+      message: confirm ? "正在提交到小红书，请勿关闭页面……" : "正在执行 Dry Run，请稍候……",
+    });
+    setError(null);
+    try {
+      const res = await fetch("/api/xiaohongshu/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: selectedTitle,
+          body: editedBody,
+          tags: result?.tags ?? [],
+          images: noteImages,
+          confirm,
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success: boolean; dryRun?: boolean; published?: boolean; error?: string }
+        | null;
+      if (!json?.success) {
+        const message = json?.error ?? "发布请求失败，请稍后重试。";
+        setError(message);
+        setPublishFeedback({ tone: "error", message });
+        return;
+      }
+      setPublishFeedback({
+        tone: "success",
+        message: json.published ? "发布成功：已提交到当前登录的小红书账号。" : "Dry Run 完成：已验证发布请求，未实际发布。",
+      });
+    } catch {
+      const message = "网络连接失败，请稍后重试。";
+      setError(message);
+      setPublishFeedback({ tone: "error", message });
+    } finally {
+      setPublishingAction(null);
+    }
+  }
+
+  function requestPostConfirmation() {
+    if (!selectedTitle.trim() || !editedBody.trim()) {
+      const message = "请先生成并保留标题和正文。";
+      setError(message);
+      setPublishFeedback({ tone: "error", message });
+      return;
+    }
+    if (!noteImages.length) {
+      const message = "真实发布需要图片。请先通过“从链接导入”加载一篇带图片的笔记。";
+      setError(message);
+      setPublishFeedback({ tone: "error", message });
+      return;
+    }
+    setError(null);
+    setAwaitingPostConfirmation(true);
+    setPublishFeedback({
+      tone: "info",
+      message: `即将真实发布到当前登录的小红书账号，并上传导入笔记的 ${noteImages.length} 张图片。请确认后继续。`,
+    });
+  }
+
   function handleClear() {
     if (!input && !result) return;
     if (window.confirm("确定要清空所有内容吗?清空后无法恢复。")) {
       setInput("");
+      setUrlInput("");
+      setNoteImages([]);
       setResult(null);
       setError(null);
       setSelectedTitleIndex(0);
       setEditedBody("");
       setIsEditingBody(false);
+      setPublishFeedback(null);
+      setAwaitingPostConfirmation(false);
     }
   }
 
@@ -462,7 +550,76 @@ export default function XiaohongshuPage() {
                 >
                   清空内容
                 </button>
+                <button
+                  type="button"
+                  onClick={() => handlePublish(false)}
+                  disabled={
+                    publishingAction !== null ||
+                    awaitingPostConfirmation ||
+                    !selectedTitle.trim() ||
+                    !editedBody.trim()
+                  }
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-800 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {publishingAction === "dry-run" && (
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-amber-800/30 border-t-amber-800" />
+                  )}
+                  {publishingAction === "dry-run" ? "Dry Run 中…" : "Dry Run"}
+                </button>
+                <button
+                  type="button"
+                  onClick={requestPostConfirmation}
+                  disabled={
+                    publishingAction !== null ||
+                    awaitingPostConfirmation ||
+                    !selectedTitle.trim() ||
+                    !editedBody.trim()
+                  }
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-xhs px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-xhs-dark disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {publishingAction === "post" && (
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                  )}
+                  {publishingAction === "post" ? "发布中…" : "Post"}
+                </button>
               </div>
+
+              {(awaitingPostConfirmation || publishFeedback) && (
+                <div
+                  className={`mt-4 rounded-xl border px-4 py-3 text-sm ${
+                    publishFeedback?.tone === "error"
+                      ? "border-red-200 bg-red-50 text-red-700"
+                      : publishFeedback?.tone === "success"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                        : "border-amber-200 bg-amber-50 text-amber-900"
+                  }`}
+                  role="status"
+                  aria-live="polite"
+                >
+                  <p>{publishFeedback?.message}</p>
+                  {awaitingPostConfirmation && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handlePublish(true)}
+                        className="rounded-lg bg-xhs px-3 py-2 text-sm font-semibold text-white transition hover:bg-xhs-dark"
+                      >
+                        确认发布
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAwaitingPostConfirmation(false);
+                          setPublishFeedback({ tone: "info", message: "已取消发布。" });
+                        }}
+                        className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </section>
           </div>
         )}
