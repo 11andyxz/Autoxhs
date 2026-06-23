@@ -76,6 +76,51 @@ async function callModel(
   return normalizeRewrite(json);
 }
 
+const OCR_PROMPT =
+  "请提取这些图片中的所有文字,按图片顺序、从上到下输出,尽量保留原有换行与分段。" +
+  "只输出文字本身,不要翻译、不要总结、不要添加任何解释或标注。";
+const MAX_OCR_IMAGES = 12;
+
+/** 下载图片并转为 data URL(供多模态输入);失败的跳过 */
+async function fetchImageAsDataUrl(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+    if (!res.ok) return null;
+    const ct = res.headers.get("content-type") || "image/webp";
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!buf.length) return null;
+    return `data:${ct};base64,${buf.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+/** OCR:把若干图片里的文字用多模态模型提取出来(返回纯文本) */
+export async function extractTextFromImages(imageUrls: string[]): Promise<string> {
+  const client = getClient();
+  const dataUrls: string[] = [];
+  for (const url of imageUrls.slice(0, MAX_OCR_IMAGES)) {
+    const d = await fetchImageAsDataUrl(url);
+    if (d) dataUrls.push(d);
+  }
+  if (!dataUrls.length) throw new Error("没有可用的图片(下载失败或已过期)");
+
+  const content = [
+    { type: "input_text" as const, text: OCR_PROMPT },
+    ...dataUrls.map((image_url) => ({
+      type: "input_image" as const,
+      image_url,
+      detail: "auto" as const,
+    })),
+  ];
+
+  const response = await client.responses.create({
+    model: getModel(),
+    input: [{ role: "user", content }],
+  });
+  return (response.output_text ?? "").trim();
+}
+
 function isZodError(err: unknown): boolean {
   return (
     !!err &&

@@ -13,6 +13,9 @@ type NoteDetail = {
   liked?: string;
   collected?: string;
   comment?: string;
+  type?: string;
+  image_count?: number;
+  images?: Array<{ url?: string }>;
 };
 
 /**
@@ -73,6 +76,7 @@ export async function POST(req: NextRequest) {
       );
     }
     const d = json.detail;
+    const images = (d.images ?? []).map((im) => im.url).filter((u): u is string => !!u);
     return NextResponse.json({
       success: true,
       data: {
@@ -83,6 +87,9 @@ export async function POST(req: NextRequest) {
         liked: d.liked,
         collected: d.collected,
         comment: d.comment,
+        type: d.type ?? "normal",
+        imageCount: d.image_count ?? images.length,
+        images,
       },
     });
   } catch (err) {

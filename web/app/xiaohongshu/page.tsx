@@ -23,6 +23,8 @@ export default function XiaohongshuPage() {
   const [input, setInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [importing, setImporting] = useState(false);
+  const [noteImages, setNoteImages] = useState<string[]>([]);
+  const [ocring, setOcring] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -75,7 +77,11 @@ export default function XiaohongshuPage() {
         body: JSON.stringify({ url }),
       });
       const json = (await res.json().catch(() => null)) as
-        | { success: boolean; data?: { title?: string; desc?: string }; error?: string }
+        | {
+            success: boolean;
+            data?: { title?: string; desc?: string; images?: string[]; imageCount?: number };
+            error?: string;
+          }
         | null;
       if (!json || !json.success || !json.data) {
         setError(json?.error ?? "导入失败,请确认本地 rednote 服务在运行。");
@@ -86,11 +92,45 @@ export default function XiaohongshuPage() {
         .join("\n\n")
         .slice(0, MAX_CHARS);
       setInput(text);
-      showToast("已从链接导入");
+      const imgs = json.data.images ?? [];
+      setNoteImages(imgs);
+      showToast(imgs.length ? `已导入(含 ${imgs.length} 张图,可识别图片文字)` : "已从链接导入");
     } catch {
       setError("导入失败,请确认本地 rednote 服务在运行。");
     } finally {
       setImporting(false);
+    }
+  }
+
+  // OCR:把导入笔记的图片文字识别出来,追加到参考文案
+  async function onOcrImages() {
+    if (!noteImages.length) return;
+    setOcring(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/xiaohongshu/ocr", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageUrls: noteImages }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success: boolean; text?: string; error?: string }
+        | null;
+      if (!json || !json.success || !json.text) {
+        setError(json?.error ?? "图片文字识别失败,请重试。");
+        return;
+      }
+      setInput((prev) => {
+        const merged = prev.trim()
+          ? `${prev.trim()}\n\n【图片文字】\n${json.text}`
+          : (json.text as string);
+        return merged.slice(0, MAX_CHARS);
+      });
+      showToast("已识别图片文字并加入");
+    } catch {
+      setError("图片文字识别失败,请重试。");
+    } finally {
+      setOcring(false);
     }
   }
 
@@ -204,6 +244,16 @@ export default function XiaohongshuPage() {
             <p className="mt-1.5 text-[11px] text-gray-400">
               通过你本地的 rednote 服务读取笔记正文并填入下方;需该服务运行且浏览器已登录。
             </p>
+            {noteImages.length > 0 && (
+              <button
+                type="button"
+                onClick={onOcrImages}
+                disabled={ocring}
+                className="mt-2 inline-flex items-center gap-1 rounded-lg border border-xhs/40 bg-white px-3 py-1.5 text-xs font-medium text-xhs transition hover:bg-xhs/5 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {ocring ? "识别中……" : `📷 识别 ${noteImages.length} 张图片中的文字`}
+              </button>
+            )}
           </div>
 
           <div className="flex items-center justify-between">
