@@ -24,17 +24,11 @@ type PublishFeedback = {
   message: string;
 };
 
-type ImportedImage = {
-  url: string;
-  width?: number;
-  height?: number;
-};
-
 export default function XiaohongshuPage() {
   const [input, setInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [importing, setImporting] = useState(false);
-  const [noteImages, setNoteImages] = useState<ImportedImage[]>([]);
+  const [noteImages, setNoteImages] = useState<string[]>([]);
   const [ocring, setOcring] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -93,7 +87,7 @@ export default function XiaohongshuPage() {
       const json = (await res.json().catch(() => null)) as
         | {
             success: boolean;
-            data?: { title?: string; desc?: string; images?: ImportedImage[]; imageCount?: number };
+            data?: { title?: string; desc?: string; images?: string[]; imageCount?: number };
             error?: string;
           }
         | null;
@@ -125,7 +119,7 @@ export default function XiaohongshuPage() {
       const res = await fetch("/api/xiaohongshu/ocr", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageUrls: noteImages.map((image) => image.url) }),
+        body: JSON.stringify({ imageUrls: noteImages }),
       });
       const json = (await res.json().catch(() => null)) as
         | { success: boolean; text?: string; error?: string }
@@ -215,7 +209,9 @@ export default function XiaohongshuPage() {
     setAwaitingPostConfirmation(false);
     setPublishFeedback({
       tone: "info",
-      message: confirm ? "正在提交到小红书，请勿关闭页面……" : "正在执行 Dry Run，请稍候……",
+      message: confirm
+        ? "正在按正文生成长文图片并提交到小红书，请勿关闭页面……"
+        : "正在生成长文图片；Dry Run 不会公开发布，请稍候……",
     });
     setError(null);
     try {
@@ -226,12 +222,11 @@ export default function XiaohongshuPage() {
           title: selectedTitle,
           body: editedBody,
           tags: result?.tags ?? [],
-          images: noteImages,
           confirm,
         }),
       });
       const json = (await res.json().catch(() => null)) as
-        | { success: boolean; dryRun?: boolean; published?: boolean; error?: string }
+        | { success: boolean; dryRun?: boolean; published?: boolean; cards?: number; error?: string }
         | null;
       if (!json?.success) {
         const message = json?.error ?? "发布请求失败，请稍后重试。";
@@ -241,7 +236,9 @@ export default function XiaohongshuPage() {
       }
       setPublishFeedback({
         tone: "success",
-        message: json.published ? "发布成功：已提交到当前登录的小红书账号。" : "Dry Run 完成：已验证发布请求，未实际发布。",
+        message: json.published
+          ? `发布成功：已生成 ${json.cards ?? 0} 张长文图片并提交到当前登录的小红书账号。`
+          : `Dry Run 完成：已生成 ${json.cards ?? 0} 张长文图片，未实际发布。`,
       });
     } catch {
       const message = "网络连接失败，请稍后重试。";
@@ -259,17 +256,11 @@ export default function XiaohongshuPage() {
       setPublishFeedback({ tone: "error", message });
       return;
     }
-    if (!noteImages.length) {
-      const message = "真实发布需要图片。请先通过“从链接导入”加载一篇带图片的笔记。";
-      setError(message);
-      setPublishFeedback({ tone: "error", message });
-      return;
-    }
     setError(null);
     setAwaitingPostConfirmation(true);
     setPublishFeedback({
       tone: "info",
-      message: `即将真实发布到当前登录的小红书账号，并上传导入笔记的 ${noteImages.length} 张图片。请确认后继续。`,
+      message: "即将按正文自动生成长文图片，并真实发布到当前登录的小红书账号。请确认后继续。",
     });
   }
 
