@@ -291,12 +291,14 @@ export default function XiaohongshuPage() {
         setPublishedNoteId(json.noteId ?? null);
         setPublishedShareLink(json.shareLink ?? null);
         let message = `发布成功：已生成 ${count} 张长文图片并提交到当前登录的小红书账号。`;
-        // 选择了「仅自己可见」→ 发布后自动把这篇笔记设为私密
-        if (visibility === 1 && json.noteId) {
-          const r = await applyPrivacy(json.noteId, 1);
+        // /auto 发布的默认可见性是「仅自己可见」，所以这里必须显式按所选可见性设定（0=公开/1=仅自己可见）
+        if (json.noteId) {
+          const r = await applyPrivacy(json.noteId, visibility);
           message += r.ok
-            ? " 已设为仅自己可见。"
-            : ` 但设为仅自己可见失败（${r.error ?? "请在下方重试"}）。`;
+            ? visibility === 1
+              ? " 已设为仅自己可见。"
+              : " 已设为公开。"
+            : ` 但可见性设置失败（${r.error ?? "请用下方开关重试"}），当前可能仍为发布默认（仅自己可见）。`;
         }
         setPublishFeedback({ tone: "success", message });
       } else {
