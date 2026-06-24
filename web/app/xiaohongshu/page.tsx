@@ -40,6 +40,13 @@ export default function XiaohongshuPage() {
   const [publishingAction, setPublishingAction] = useState<"dry-run" | "post" | null>(null);
   const [publishFeedback, setPublishFeedback] = useState<PublishFeedback | null>(null);
   const [awaitingPostConfirmation, setAwaitingPostConfirmation] = useState(false);
+  // 可见性：0=公开，1=仅自己可见。发布前为意向，发布后即时作用于该笔记（可逆）。
+  const [visibility, setVisibility] = useState<0 | 1>(0);
+  const [publishedNoteId, setPublishedNoteId] = useState<string | null>(null);
+  const [publishedShareLink, setPublishedShareLink] = useState<string | null>(null);
+  const [settingPrivacy, setSettingPrivacy] = useState(false);
+  // 每张图约多少字：越大单张图字越多、图越少。实测一张图约 380~450 字填满。
+  const [charsPerCard, setCharsPerCard] = useState(380);
 
   const [hintIndex, setHintIndex] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
@@ -184,6 +191,9 @@ export default function XiaohongshuPage() {
       setSelectedTitleIndex(0);
       setEditedBody(json.data.body);
       setIsEditingBody(false);
+      // 新内容 = 新的一篇,清掉上一篇已发布笔记的可见性上下文
+      setPublishedNoteId(null);
+      setPublishedShareLink(null);
     } catch {
       setError("网络连接失败,请稍后重试。");
     } finally {
@@ -195,6 +205,38 @@ export default function XiaohongshuPage() {
     if (!text) return;
     const ok = await copyToClipboard(text);
     showToast(ok ? successMessage : "复制失败,请手动选择文案进行复制。");
+  }
+
+  // 调用本地服务设置某篇已发布笔记的可见性
+  async function applyPrivacy(noteId: string, privacy: 0 | 1) {
+    setSettingPrivacy(true);
+    try {
+      const res = await fetch("/api/xiaohongshu/privacy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ noteId, privacy }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success: boolean; label?: string; error?: string }
+        | null;
+      return { ok: !!json?.success, label: json?.label, error: json?.error };
+    } catch {
+      return { ok: false, error: "网络连接失败。" };
+    } finally {
+      setSettingPrivacy(false);
+    }
+  }
+
+  // 点击可见性：未发布时仅记录意向；已发布时即时改变该笔记的可见性
+  async function onSelectVisibility(next: 0 | 1) {
+    setVisibility(next);
+    if (!publishedNoteId || settingPrivacy) return;
+    const r = await applyPrivacy(publishedNoteId, next);
+    setPublishFeedback(
+      r.ok
+        ? { tone: "success", message: `已将这篇笔记设为「${next === 1 ? "仅自己可见" : "公开"}」。` }
+        : { tone: "error", message: r.error ?? "设置可见性失败。" },
+    );
   }
 
   async function handlePublish(confirm: boolean) {
@@ -223,10 +265,20 @@ export default function XiaohongshuPage() {
           body: editedBody,
           tags: result?.tags ?? [],
           confirm,
+          charsPerCard,
         }),
       });
       const json = (await res.json().catch(() => null)) as
-        | { success: boolean; dryRun?: boolean; published?: boolean; cards?: number; error?: string }
+        | {
+            success: boolean;
+            dryRun?: boolean;
+            published?: boolean;
+            cards?: number;
+            imageCount?: number;
+            noteId?: string | null;
+            shareLink?: string | null;
+            error?: string;
+          }
         | null;
       if (!json?.success) {
         const message = json?.error ?? "发布请求失败，请稍后重试。";
@@ -234,12 +286,25 @@ export default function XiaohongshuPage() {
         setPublishFeedback({ tone: "error", message });
         return;
       }
-      setPublishFeedback({
-        tone: "success",
-        message: json.published
-          ? `发布成功：已生成 ${json.cards ?? 0} 张长文图片并提交到当前登录的小红书账号。`
-          : `Dry Run 完成：已生成 ${json.cards ?? 0} 张长文图片，未实际发布。`,
-      });
+      const count = json.imageCount ?? json.cards ?? 0;
+      if (json.published) {
+        setPublishedNoteId(json.noteId ?? null);
+        setPublishedShareLink(json.shareLink ?? null);
+        let message = `发布成功：已生成 ${count} 张长文图片并提交到当前登录的小红书账号。`;
+        // 选择了「仅自己可见」→ 发布后自动把这篇笔记设为私密
+        if (visibility === 1 && json.noteId) {
+          const r = await applyPrivacy(json.noteId, 1);
+          message += r.ok
+            ? " 已设为仅自己可见。"
+            : ` 但设为仅自己可见失败（${r.error ?? "请在下方重试"}）。`;
+        }
+        setPublishFeedback({ tone: "success", message });
+      } else {
+        setPublishFeedback({
+          tone: "success",
+          message: `Dry Run 完成：已生成 ${count} 张长文图片，未实际发布。`,
+        });
+      }
     } catch {
       const message = "网络连接失败，请稍后重试。";
       setError(message);
@@ -277,6 +342,9 @@ export default function XiaohongshuPage() {
       setIsEditingBody(false);
       setPublishFeedback(null);
       setAwaitingPostConfirmation(false);
+      setVisibility(0);
+      setPublishedNoteId(null);
+      setPublishedShareLink(null);
     }
   }
 
@@ -497,6 +565,58 @@ export default function XiaohongshuPage() {
                 className="mt-3 min-h-[280px] w-full resize-y whitespace-pre-wrap rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm leading-7 text-gray-800 outline-none"
               />
 
+              {/* 可见性：发布前选意向,发布后即时切换（可逆） */}
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <span className="text-sm font-medium text-gray-700">可见性</span>
+                <div className="inline-flex overflow-hidden rounded-lg border border-gray-200">
+                  {([0, 1] as const).map((v) => {
+                    const active = visibility === v;
+                    return (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() => onSelectVisibility(v)}
+                        disabled={settingPrivacy || publishingAction !== null}
+                        aria-pressed={active}
+                        className={`px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                          active ? "bg-xhs text-white" : "bg-white text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        {v === 0 ? "公开" : "仅自己可见"}
+                      </button>
+                    );
+                  })}
+                </div>
+                {settingPrivacy ? (
+                  <span className="text-xs text-gray-400">正在设置可见性…</span>
+                ) : (
+                  <span className="text-xs text-gray-400">
+                    {publishedNoteId
+                      ? "已发布,切换即可实时改变这篇笔记的可见性。"
+                      : "发布后将按此设置笔记可见性。"}
+                  </span>
+                )}
+              </div>
+
+              {/* 每张图字数：控制图片数量/密度（越大单张字越多、图越少，更贴近人工长文） */}
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <span className="text-sm font-medium text-gray-700">每张图字数</span>
+                <input
+                  type="range"
+                  min={120}
+                  max={500}
+                  step={20}
+                  value={charsPerCard}
+                  onChange={(e) => setCharsPerCard(Number(e.target.value))}
+                  disabled={publishingAction !== null}
+                  className="h-1.5 w-40 cursor-pointer accent-xhs disabled:cursor-not-allowed"
+                />
+                <span className="text-xs text-gray-500">
+                  约 {charsPerCard} 字/张 · 预计 {Math.max(1, Math.ceil(editedBody.length / charsPerCard)) + 1} 张图
+                </span>
+                <span className="text-[11px] text-gray-400">越大单张字越多、图越少（约 380~450 填满一张）</span>
+              </div>
+
               <div className="mt-4 flex flex-wrap gap-3">
                 <button
                   type="button"
@@ -574,6 +694,17 @@ export default function XiaohongshuPage() {
                   {publishingAction === "post" ? "发布中…" : "Post"}
                 </button>
               </div>
+
+              {publishedShareLink && (
+                <a
+                  href={publishedShareLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-3 inline-block text-sm text-xhs underline transition hover:text-xhs-dark"
+                >
+                  查看已发布的笔记 →
+                </a>
+              )}
 
               {(awaitingPostConfirmation || publishFeedback) && (
                 <div

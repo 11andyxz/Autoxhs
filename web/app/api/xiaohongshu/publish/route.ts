@@ -11,7 +11,13 @@ type PublishRequest = {
   body?: string;
   tags?: string[];
   confirm?: boolean;
+  charsPerCard?: number;
 };
+
+// 每张图约多少字（分页粒度）。实测一张图约 380~450 字填满，默认偏密以贴近人工长文；夹紧防溢出。
+const DEFAULT_CHARS_PER_CARD = 380;
+const MIN_CHARS_PER_CARD = 120;
+const MAX_CHARS_PER_CARD = 500;
 
 type RednoteAutoResponse = {
   ok?: boolean;
@@ -19,6 +25,8 @@ type RednoteAutoResponse = {
   published?: boolean;
   cards?: unknown;
   file_ids?: unknown;
+  note_id?: unknown;
+  share_link?: unknown;
   error?: unknown;
   message?: unknown;
   msg?: unknown;
@@ -81,8 +89,13 @@ export async function POST(req: NextRequest) {
   }
 
   const confirm = request.confirm === true;
+  const rawChars = Number(request.charsPerCard);
+  const charsPerCard = Number.isFinite(rawChars)
+    ? Math.min(MAX_CHARS_PER_CARD, Math.max(MIN_CHARS_PER_CARD, Math.round(rawChars)))
+    : DEFAULT_CHARS_PER_CARD;
   const endpoint = new URL("/rednote/creator/long_text/auto", BASE);
   endpoint.searchParams.set("confirm", confirm ? "1" : "0");
+  endpoint.searchParams.set("chars_per_card", String(charsPerCard));
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AUTO_TIMEOUT_MS);
@@ -130,6 +143,8 @@ export async function POST(req: NextRequest) {
       published: result.published === true,
       cards: typeof result.cards === "number" ? result.cards : 0,
       imageCount: Array.isArray(result.file_ids) ? result.file_ids.length : 0,
+      noteId: typeof result.note_id === "string" ? result.note_id : null,
+      shareLink: typeof result.share_link === "string" ? result.share_link : null,
     });
   } catch (error) {
     const isAbort = (error as Error)?.name === "AbortError";
