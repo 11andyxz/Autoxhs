@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { CTA_LINE } from "@/lib/schema";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -12,6 +14,8 @@ type PublishRequest = {
   tags?: string[];
   confirm?: boolean;
   charsPerCard?: number;
+  coverImage?: string;
+  coverFileId?: string;
 };
 
 // 每张图约多少字（分页粒度）。实测一张图约 380~450 字填满，默认偏密以贴近人工长文；夹紧防溢出。
@@ -25,6 +29,7 @@ type RednoteAutoResponse = {
   published?: boolean;
   cards?: unknown;
   file_ids?: unknown;
+  publish_file_ids?: unknown;
   note_id?: unknown;
   share_link?: unknown;
   error?: unknown;
@@ -89,6 +94,10 @@ export async function POST(req: NextRequest) {
   }
 
   const confirm = request.confirm === true;
+  const coverFileId = typeof request.coverFileId === "string" ? request.coverFileId.trim() : "";
+  // 自传封面优先：用自己的图当第 1 张时，AI 配图(cover_image)就无意义了
+  const coverImage =
+    !coverFileId && typeof request.coverImage === "string" ? request.coverImage.trim() : "";
   const rawChars = Number(request.charsPerCard);
   const charsPerCard = Number.isFinite(rawChars)
     ? Math.min(MAX_CHARS_PER_CARD, Math.max(MIN_CHARS_PER_CARD, Math.round(rawChars)))
@@ -103,7 +112,14 @@ export async function POST(req: NextRequest) {
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, body, tags }),
+      body: JSON.stringify({
+        title,
+        body,
+        // desc(caption) = CTA + 标签：把固定 CTA 放在标签前，让 caption 里也带上引导语
+        tags: [CTA_LINE, ...tags],
+        cover_image: coverImage || undefined,
+        cover_fileid: coverFileId || undefined,
+      }),
       signal: controller.signal,
     });
     const raw = await response.text();
@@ -142,7 +158,11 @@ export async function POST(req: NextRequest) {
       dryRun: result.dry_run === true || !confirm,
       published: result.published === true,
       cards: typeof result.cards === "number" ? result.cards : 0,
-      imageCount: Array.isArray(result.file_ids) ? result.file_ids.length : 0,
+      imageCount: Array.isArray(result.publish_file_ids)
+        ? result.publish_file_ids.length
+        : Array.isArray(result.file_ids)
+          ? result.file_ids.length
+          : 0,
       noteId: typeof result.note_id === "string" ? result.note_id : null,
       shareLink: typeof result.share_link === "string" ? result.share_link : null,
     });

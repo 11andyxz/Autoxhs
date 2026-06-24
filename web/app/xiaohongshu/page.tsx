@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useRef, useState } from "react";
 
 import { copyToClipboard } from "@/lib/clipboard";
 import type { RewriteData } from "@/lib/schema";
@@ -47,6 +47,20 @@ export default function XiaohongshuPage() {
   const [settingPrivacy, setSettingPrivacy] = useState(false);
   // 每张图约多少字：越大单张图字越多、图越少。实测一张图约 380~450 字填满。
   const [charsPerCard, setCharsPerCard] = useState(380);
+  // AI 换图：封面配图候选与当前选择
+  const [coverCandidates, setCoverCandidates] = useState<string[]>([]);
+  const [coverIndex, setCoverIndex] = useState(0);
+  const [coverImage, setCoverImage] = useState<string | null>(null);
+  const [loadingCovers, setLoadingCovers] = useState(false);
+  const [coverError, setCoverError] = useState<string | null>(null);
+  // 自己上传的封面（作为发布第 1 张图，替换 AI 封面）
+  const [coverFileId, setCoverFileId] = useState<string | null>(null);
+  const [coverPreview, setCoverPreview] = useState<string | null>(null);
+  const [uploadingCover, setUploadingCover] = useState(false);
+  const coverInputRef = useRef<HTMLInputElement | null>(null);
+  // GPT 生图封面：输入主题 → 生成（默认带 @北美熊哥聊求职 水印）
+  const [coverPrompt, setCoverPrompt] = useState("");
+  const [generatingCover, setGeneratingCover] = useState(false);
 
   const [hintIndex, setHintIndex] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
@@ -191,9 +205,10 @@ export default function XiaohongshuPage() {
       setSelectedTitleIndex(0);
       setEditedBody(json.data.body);
       setIsEditingBody(false);
-      // 新内容 = 新的一篇,清掉上一篇已发布笔记的可见性上下文
+      // 新内容 = 新的一篇,清掉上一篇已发布笔记的可见性上下文 + AI 配图候选
       setPublishedNoteId(null);
       setPublishedShareLink(null);
+      clearCover();
     } catch {
       setError("网络连接失败,请稍后重试。");
     } finally {
@@ -205,6 +220,133 @@ export default function XiaohongshuPage() {
     if (!text) return;
     const ok = await copyToClipboard(text);
     showToast(ok ? successMessage : "复制失败,请手动选择文案进行复制。");
+  }
+
+  // 清掉「自己上传的封面」（含释放预览 URL）
+  function clearSelfCover() {
+    setCoverFileId(null);
+    setCoverPreview((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+  }
+
+  // 清掉「AI 换图」候选
+  function clearAiCover() {
+    setCoverCandidates([]);
+    setCoverIndex(0);
+    setCoverImage(null);
+  }
+
+  // AI 换图：首次点击拉取候选并选第一张；之后每次点击切下一张（与自传封面互斥）
+  async function onSwapCover() {
+    if (loadingCovers || uploadingCover) return;
+    clearSelfCover();
+    if (coverCandidates.length > 0) {
+      const next = (coverIndex + 1) % coverCandidates.length;
+      setCoverIndex(next);
+      setCoverImage(coverCandidates[next]);
+      return;
+    }
+    setLoadingCovers(true);
+    setCoverError(null);
+    try {
+      const res = await fetch("/api/xiaohongshu/cover-images", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ summary: `${selectedTitle}\n\n${editedBody}`.slice(0, 2000) }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success: boolean; images?: string[]; error?: string }
+        | null;
+      const imgs = json?.images ?? [];
+      if (!json?.success || imgs.length === 0) {
+        setCoverError(json?.error ?? "暂无 AI 配图候选，可补充更完整的正文后重试。");
+        return;
+      }
+      setCoverCandidates(imgs);
+      setCoverIndex(0);
+      setCoverImage(imgs[0]);
+    } catch {
+      setCoverError("获取配图失败，请重试。");
+    } finally {
+      setLoadingCovers(false);
+    }
+  }
+
+  // 上传自己的封面图 → 作为发布第 1 张（与 AI 换图互斥）
+  async function onCoverFileChange(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // 允许再次选同一文件
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setCoverError("请选择图片文件。");
+      return;
+    }
+    setUploadingCover(true);
+    setCoverError(null);
+    clearAiCover();
+    try {
+      const res = await fetch("/api/xiaohongshu/upload-cover", {
+        method: "POST",
+        headers: { "Content-Type": file.type },
+        body: file,
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success: boolean; fileId?: string; error?: string }
+        | null;
+      if (!json?.success || !json.fileId) {
+        setCoverError(json?.error ?? "封面上传失败，请重试。");
+        return;
+      }
+      setCoverFileId(json.fileId);
+      setCoverPreview((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(file);
+      });
+    } catch {
+      setCoverError("封面上传失败，请重试。");
+    } finally {
+      setUploadingCover(false);
+    }
+  }
+
+  // GPT 生图封面：输入主题 → 生成 → 直接作为发布第 1 张（与 AI 换图互斥）
+  async function onGenerateCover() {
+    const p = coverPrompt.trim();
+    if (!p || generatingCover || uploadingCover) return;
+    setGeneratingCover(true);
+    setCoverError(null);
+    clearAiCover();
+    try {
+      const res = await fetch("/api/xiaohongshu/generate-cover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: p }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success: boolean; fileId?: string; dataUrl?: string; error?: string }
+        | null;
+      if (!json?.success || !json.fileId) {
+        setCoverError(json?.error ?? "封面生成失败，请重试。");
+        return;
+      }
+      setCoverFileId(json.fileId);
+      setCoverPreview((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return json.dataUrl ?? null;
+      });
+    } catch {
+      setCoverError("封面生成失败，请重试。");
+    } finally {
+      setGeneratingCover(false);
+    }
+  }
+
+  function clearCover() {
+    clearAiCover();
+    clearSelfCover();
+    setCoverError(null);
   }
 
   // 调用本地服务设置某篇已发布笔记的可见性
@@ -266,6 +408,8 @@ export default function XiaohongshuPage() {
           tags: result?.tags ?? [],
           confirm,
           charsPerCard,
+          coverImage: coverImage ?? undefined,
+          coverFileId: coverFileId ?? undefined,
         }),
       });
       const json = (await res.json().catch(() => null)) as
@@ -347,6 +491,8 @@ export default function XiaohongshuPage() {
       setVisibility(0);
       setPublishedNoteId(null);
       setPublishedShareLink(null);
+      clearCover();
+      setCoverPrompt("");
     }
   }
 
@@ -618,6 +764,125 @@ export default function XiaohongshuPage() {
                 </span>
                 <span className="text-[11px] text-gray-400">越大单张字越多、图越少（约 380~450 填满一张）</span>
               </div>
+
+              {/* 封面：① AI 换图（AI 配图当封面背景）② 上传我的封面（直接作为发布第 1 张图，正文卡照常） */}
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <span className="text-sm font-medium text-gray-700">封面配图</span>
+                <button
+                  type="button"
+                  onClick={onSwapCover}
+                  disabled={
+                    loadingCovers ||
+                    uploadingCover ||
+                    publishingAction !== null ||
+                    !selectedTitle.trim() ||
+                    !editedBody.trim()
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-xhs/40 bg-white px-3 py-1.5 text-sm font-medium text-xhs transition hover:bg-xhs/5 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {loadingCovers && (
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-xhs/30 border-t-xhs" />
+                  )}
+                  {loadingCovers
+                    ? "获取配图中…"
+                    : coverCandidates.length
+                      ? "🎨 AI 换图（换一张）"
+                      : "🎨 AI 换图"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => coverInputRef.current?.click()}
+                  disabled={uploadingCover || loadingCovers || publishingAction !== null}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {uploadingCover && (
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600" />
+                  )}
+                  {uploadingCover ? "上传中…" : "⬆️ 上传我的封面"}
+                </button>
+                <input
+                  ref={coverInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={onCoverFileChange}
+                  className="hidden"
+                />
+                {coverFileId && coverPreview ? (
+                  <span className="inline-flex items-center gap-2">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={coverPreview}
+                      alt="我的封面预览"
+                      className="h-12 w-12 rounded-md border border-gray-200 object-cover"
+                    />
+                    <span className="text-xs text-gray-500">我的封面（第 1 张）</span>
+                    <button
+                      type="button"
+                      onClick={clearCover}
+                      className="text-xs text-gray-400 underline transition hover:text-gray-600"
+                    >
+                      移除
+                    </button>
+                  </span>
+                ) : coverImage ? (
+                  <span className="inline-flex items-center gap-2">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={coverImage}
+                      alt="AI 封面配图预览"
+                      className="h-12 w-12 rounded-md border border-gray-200 object-cover"
+                    />
+                    <span className="text-xs text-gray-500">
+                      AI 配图 第 {coverIndex + 1}/{coverCandidates.length} 张
+                    </span>
+                    <button
+                      type="button"
+                      onClick={clearCover}
+                      className="text-xs text-gray-400 underline transition hover:text-gray-600"
+                    >
+                      用默认
+                    </button>
+                  </span>
+                ) : (
+                  <span className="text-[11px] text-gray-400">
+                    不设则用系统默认 AI 封面；上传/生成后发布第 1 张就是你的图
+                  </span>
+                )}
+              </div>
+
+              {/* GPT 生图封面：按输入主题生成竖版封面（默认带 @北美熊哥聊求职 水印） */}
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  value={coverPrompt}
+                  onChange={(e) => setCoverPrompt(e.target.value)}
+                  placeholder="输入封面主题，如：STEM OPT 延期避坑"
+                  maxLength={500}
+                  disabled={generatingCover || publishingAction !== null}
+                  className="min-w-0 flex-1 rounded-lg border border-gray-200 px-3 py-1.5 text-sm outline-none transition focus:border-xhs focus:ring-1 focus:ring-xhs/40 disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onClick={onGenerateCover}
+                  disabled={
+                    generatingCover ||
+                    uploadingCover ||
+                    loadingCovers ||
+                    publishingAction !== null ||
+                    !coverPrompt.trim()
+                  }
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-xhs px-3 py-1.5 text-sm font-medium text-white transition hover:bg-xhs-dark disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {generatingCover && (
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                  )}
+                  {generatingCover ? "生成中…" : "✨ GPT 生成封面"}
+                </button>
+              </div>
+              <p className="mt-1 text-[11px] text-gray-400">
+                GPT 按主题生成竖版封面，默认带 @北美熊哥聊求职 水印；生成后即作为发布第 1 张图
+              </p>
+              {coverError && <p className="mt-1 text-xs text-amber-600">{coverError}</p>}
 
               <div className="mt-4 flex flex-wrap gap-3">
                 <button

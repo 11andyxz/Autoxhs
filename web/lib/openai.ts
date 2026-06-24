@@ -121,6 +121,42 @@ export async function extractTextFromImages(imageUrls: string[]): Promise<string
   return (response.output_text ?? "").trim();
 }
 
+// ---- GPT 生图：根据输入主题生成小红书竖版封面（默认带账号水印） ----
+const DEFAULT_IMAGE_MODEL = "gpt-image-2"; // OpenAI 生图模型；可用 OPENAI_IMAGE_MODEL 覆盖
+const COVER_HANDLE = "@北美熊哥聊求职";
+const COVER_SIZE = "1024x1536"; // 竖版 2:3，贴近小红书封面比例
+
+function getImageModel(): string {
+  return process.env.OPENAI_IMAGE_MODEL || DEFAULT_IMAGE_MODEL;
+}
+
+/** 前置条件：固定的封面生成规格 + 默认账号水印，用户输入作为主标题/主题。 */
+function buildCoverPrompt(userPrompt: string): string {
+  return [
+    "为小红书「北美留学 / 求职」博主生成一张竖版封面图（适合 3:4 / 2:3 展示）。",
+    "整体风格：简洁现代、干净留白、专业可信；浅色纯净背景配深色中文大标题；",
+    "文字排版清晰、字号大、无错别字、无乱码；不要真实人物肖像、不要二维码、不要网址、不要多余 logo。",
+    `封面主标题 / 主题（作为画面醒目的中文大标题，可适当提炼精简）：${userPrompt}`,
+    `在画面底部居中放一行低调小字账号名："${COVER_HANDLE}"（务必完整、正确、清晰可读）。`,
+  ].join("\n");
+}
+
+/**
+ * 调用 OpenAI 生图，根据用户主题生成竖版小红书封面，返回 PNG 字节。
+ * 默认在提示里要求带上账号水印 @北美熊哥聊求职。
+ */
+export async function generateCoverImage(userPrompt: string): Promise<Buffer> {
+  const client = getClient();
+  const result = await client.images.generate({
+    model: getImageModel(),
+    prompt: buildCoverPrompt(userPrompt),
+    size: COVER_SIZE,
+  });
+  const b64 = result.data?.[0]?.b64_json;
+  if (!b64) throw new Error("生图返回为空");
+  return Buffer.from(b64, "base64");
+}
+
 function isZodError(err: unknown): boolean {
   return (
     !!err &&

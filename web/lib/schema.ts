@@ -66,10 +66,13 @@ function dedupeBy<T>(arr: T[], key: (x: T) => string): T[] {
   return out;
 }
 
+/** 业务引导固定 CTA：强制作为正文最后一句（保证"最后一句一定是评论 dd"）。 */
+export const CTA_LINE = '有需要进一步咨询以及帮助的同学 可以评论"dd"';
+
 /**
  * 校验并规整模型输出:
  * - titles 去重后必须正好 8 个
- * - body 不可为空(仅去除首尾空白,保留内部换行)
+ * - body 不可为空(仅去除首尾空白,保留内部换行),并强制以固定业务引导 CTA 结尾
  * - tags 规整为以 # 开头、去空格、去重,数量 5~10
  * 不满足时抛出 SchemaValidationError。
  */
@@ -82,7 +85,26 @@ export function normalizeRewrite(input: unknown): RewriteData {
   titles = dedupeBy(titles, (t) => t.text);
   if (titles.length > 8) titles = titles.slice(0, 8);
 
-  const body = parsed.body.trim();
+  let body = parsed.body.trim();
+  if (!body) {
+    throw new SchemaValidationError("body 为空");
+  }
+  // 业务引导：强制把固定 CTA 作为正文最后一句（不依赖模型遵守提示）。
+  // 先去掉模型可能自带的、含 dd 的结尾引导行，避免重复，再统一追加。
+  const bodyLines = body.split("\n");
+  while (bodyLines.length > 0) {
+    const last = bodyLines[bodyLines.length - 1].trim();
+    if (last === "") {
+      bodyLines.pop();
+      continue;
+    }
+    if (/dd/i.test(last) && /(评论|留言|咨询|私信|扣|帮助|需要)/.test(last)) {
+      bodyLines.pop();
+      continue;
+    }
+    break;
+  }
+  body = `${bodyLines.join("\n").trimEnd()}\n\n${CTA_LINE}`;
 
   // 把所有 tag 字符串合并后按 # 重新拆分,稳健处理「缺少 #」「多个 tag 挤在一起」等情况
   const rawTags = parsed.tags.join(" ");
@@ -96,9 +118,6 @@ export function normalizeRewrite(input: unknown): RewriteData {
 
   if (titles.length !== 8) {
     throw new SchemaValidationError("titles 数量不为 8");
-  }
-  if (!body) {
-    throw new SchemaValidationError("body 为空");
   }
   if (tags.length < 5 || tags.length > 10) {
     throw new SchemaValidationError("tags 数量不在 5~10 范围");
