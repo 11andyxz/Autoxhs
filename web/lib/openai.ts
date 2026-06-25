@@ -14,15 +14,17 @@ const DEFAULT_MODEL = "gpt-5.5";
 /** OPENAI_API_KEY 未配置时抛出 */
 export class MissingApiKeyError extends Error {}
 
-function getClient(): OpenAI {
+/** 创建 OpenAI 客户端(各工具共用,统一重试与 Key 校验;超时可按任务覆盖) */
+export function getClient(timeoutMs: number = TIMEOUT_MS): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new MissingApiKeyError("OPENAI_API_KEY 未配置");
   }
-  return new OpenAI({ apiKey, timeout: TIMEOUT_MS, maxRetries: 1 });
+  return new OpenAI({ apiKey, timeout: timeoutMs, maxRetries: 1 });
 }
 
-function getModel(): string {
+/** 当前使用的模型 ID(默认 gpt-5.5,由 OPENAI_MODEL 覆盖) */
+export function getModel(): string {
   return process.env.OPENAI_MODEL || DEFAULT_MODEL;
 }
 

@@ -24,6 +24,45 @@ type PublishFeedback = {
   message: string;
 };
 
+// 清洗正文：去行尾空白、把连续多个空行合并成「最多一个空行」、去首尾空白。
+function collapseBlankLines(s: string): string {
+  return s
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// 估算分页卡片数：与服务端 build_article_content 保持一致
+// （跳过空行；中文/全角记 2、每视觉行约 28 单位；字数 chars_per_card 或视觉行数 16 任一超限即切卡）。
+const MAX_CARD_HEIGHT = 27; // 每张卡高度预算（≈填满一张），与服务端一致
+function visualLines(s: string): number {
+  let w = 0;
+  for (const ch of s) w += (ch.codePointAt(0) ?? 0) > 0x2e7f ? 2 : 1;
+  return Math.max(1, Math.ceil(w / 40));
+}
+function estimateCardCount(body: string, charsPerCard: number): number {
+  let cards = 0;
+  let curLen = 0;
+  let curHeight = 0;
+  let has = false;
+  for (const line of body.split("\n")) {
+    if (!line.trim()) continue;
+    const lh = visualLines(line) + 0.8; // 行高 + 段间距
+    if (has && (curLen + line.length > charsPerCard || curHeight + lh > MAX_CARD_HEIGHT)) {
+      cards += 1;
+      curLen = 0;
+      curHeight = 0;
+      has = false;
+    }
+    curLen += line.length + 1;
+    curHeight += lh;
+    has = true;
+  }
+  if (has) cards += 1;
+  return Math.max(1, cards);
+}
+
 export default function XiaohongshuPage() {
   const [input, setInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
@@ -121,6 +160,9 @@ export default function XiaohongshuPage() {
         .join("\n\n")
         .slice(0, MAX_CHARS);
       setInput(text);
+      // 用导入笔记的标题预填「GPT 生成封面」输入框（可再手动改）
+      const importedTitle = json.data.title?.trim();
+      if (importedTitle) setCoverPrompt(importedTitle);
       const imgs = json.data.images ?? [];
       setNoteImages(imgs);
       showToast(imgs.length ? `已导入(含 ${imgs.length} 张图,可识别图片文字)` : "已从链接导入");
@@ -168,8 +210,10 @@ export default function XiaohongshuPage() {
 
   const selectedTitle = result?.titles[selectedTitleIndex]?.text ?? "";
   const tagsLine = result ? result.tags.join(" ") : "";
+  // 清洗后的正文：预览/复制/发布/估算都用它，去掉多余空行和行尾空白
+  const cleanBody = collapseBlankLines(editedBody);
   const finalText = result
-    ? `${selectedTitle}\n\n${editedBody}\n\n${tagsLine}`
+    ? `${selectedTitle}\n\n${cleanBody}\n\n${tagsLine}`
     : "";
 
   async function handleGenerate() {
@@ -404,12 +448,13 @@ export default function XiaohongshuPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: selectedTitle,
-          body: editedBody,
+          body: cleanBody,
           tags: result?.tags ?? [],
           confirm,
           charsPerCard,
           coverImage: coverImage ?? undefined,
           coverFileId: coverFileId ?? undefined,
+          privacy: visibility,
         }),
       });
       const json = (await res.json().catch(() => null)) as
@@ -434,17 +479,12 @@ export default function XiaohongshuPage() {
       if (json.published) {
         setPublishedNoteId(json.noteId ?? null);
         setPublishedShareLink(json.shareLink ?? null);
-        let message = `发布成功：已生成 ${count} 张长文图片并提交到当前登录的小红书账号。`;
-        // /auto 发布的默认可见性是「仅自己可见」，所以这里必须显式按所选可见性设定（0=公开/1=仅自己可见）
-        if (json.noteId) {
-          const r = await applyPrivacy(json.noteId, visibility);
-          message += r.ok
-            ? visibility === 1
-              ? " 已设为仅自己可见。"
-              : " 已设为公开。"
-            : ` 但可见性设置失败（${r.error ?? "请用下方开关重试"}），当前可能仍为发布默认（仅自己可见）。`;
-        }
-        setPublishFeedback({ tone: "success", message });
+        // 已在发布时按所选可见性写入 privacy_info.type，无需发后再改（避免竞态）
+        const visLabel = visibility === 1 ? "仅自己可见" : "公开";
+        setPublishFeedback({
+          tone: "success",
+          message: `发布成功（${visLabel}）：已生成 ${count} 张长文图片并提交到当前登录的小红书账号。`,
+        });
       } else {
         setPublishFeedback({
           tone: "success",
@@ -656,7 +696,7 @@ export default function XiaohongshuPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleCopy(editedBody, "已复制正文")}
+                    onClick={() => handleCopy(cleanBody, "已复制正文")}
                     className="text-gray-500 transition hover:text-xhs"
                   >
                     复制正文
@@ -760,7 +800,7 @@ export default function XiaohongshuPage() {
                   className="h-1.5 w-40 cursor-pointer accent-xhs disabled:cursor-not-allowed"
                 />
                 <span className="text-xs text-gray-500">
-                  约 {charsPerCard} 字/张 · 预计 {Math.max(1, Math.ceil(editedBody.length / charsPerCard)) + 1} 张图
+                  约 {charsPerCard} 字/张 · 预计 {estimateCardCount(cleanBody, charsPerCard) + 1} 张图
                 </span>
                 <span className="text-[11px] text-gray-400">越大单张字越多、图越少（约 380~450 填满一张）</span>
               </div>
@@ -901,7 +941,7 @@ export default function XiaohongshuPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleCopy(editedBody, "已复制正文")}
+                  onClick={() => handleCopy(cleanBody, "已复制正文")}
                   className="rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-700 transition hover:border-gray-300"
                 >
                   复制正文

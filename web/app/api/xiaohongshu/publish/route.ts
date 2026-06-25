@@ -16,6 +16,7 @@ type PublishRequest = {
   charsPerCard?: number;
   coverImage?: string;
   coverFileId?: string;
+  privacy?: number; // 0=公开, 1=仅自己可见
 };
 
 // 每张图约多少字（分页粒度）。实测一张图约 380~450 字填满，默认偏密以贴近人工长文；夹紧防溢出。
@@ -94,6 +95,7 @@ export async function POST(req: NextRequest) {
   }
 
   const confirm = request.confirm === true;
+  const privacy = request.privacy === 1 ? 1 : 0; // 默认公开
   const coverFileId = typeof request.coverFileId === "string" ? request.coverFileId.trim() : "";
   // 自传封面优先：用自己的图当第 1 张时，AI 配图(cover_image)就无意义了
   const coverImage =
@@ -119,6 +121,7 @@ export async function POST(req: NextRequest) {
         tags: [CTA_LINE, ...tags],
         cover_image: coverImage || undefined,
         cover_fileid: coverFileId || undefined,
+        privacy,
       }),
       signal: controller.signal,
     });

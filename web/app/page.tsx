@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: "Autoxhs 内部小工具集合。",
 };
 
-type Accent = "rose" | "emerald";
+type Accent = "rose" | "emerald" | "cyan";
 
 const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string }> = {
   rose: {
@@ -18,6 +18,11 @@ const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string
     tile: "bg-emerald-50 text-emerald-600",
     hoverBorder: "hover:border-emerald-300",
     arrow: "text-emerald-600",
+  },
+  cyan: {
+    tile: "bg-cyan-50 text-cyan-600",
+    hoverBorder: "hover:border-cyan-300",
+    arrow: "text-cyan-600",
   },
 };
 
@@ -44,6 +49,14 @@ const TOOLS: Array<{
     desc: "按真实日历计算工时、工资、Payroll Fee 与 Service Charge,并导出 Excel 明细。",
     icon: "🧮",
     accent: "emerald",
+  },
+  {
+    href: "/job-hunter",
+    name: "求职神器",
+    en: "Resume Tailor",
+    desc: "上传简历 + 目标 JD,AI 按岗位重排经历、强化关键词,生成定制简历、求职信与匹配分析,导出 PDF / Word。",
+    icon: "🎯",
+    accent: "cyan",
   },
 ];
 
