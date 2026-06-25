@@ -84,7 +84,8 @@ export async function POST(req: NextRequest) {
 
   try {
     const data = await generateTailoredResume(resumeText, jdText, allowEmbellish);
-    return NextResponse.json({ success: true, data }, { status: 200 });
+    // 一并回传解析后的 JD 文本,供「专项训练」复用(简历里不含 JD)
+    return NextResponse.json({ success: true, data, jdText }, { status: 200 });
   } catch (err) {
     return NextResponse.json(
       { success: false, error: mapError(err) },

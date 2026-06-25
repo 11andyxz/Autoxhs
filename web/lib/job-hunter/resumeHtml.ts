@@ -151,9 +151,11 @@ export function buildResumeHtml(resume: TailoredResume): string {
       body { background: var(--paper); }
     }
     @media print {
-      @page { size: Letter; margin: 0.52in; }
+      /* margin:0 让浏览器打印时不再绘制默认的页眉/页脚(日期、网址、页码);
+         视觉页边距改由 .resume 的 padding 实现。 */
+      @page { size: Letter; margin: 0; }
       body { background: #fff; font-size: 10pt; line-height: 1.42; }
-      .resume { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; box-shadow: none; }
+      .resume { width: auto; margin: 0; padding: 0.5in 0.55in; border: 0; border-radius: 0; box-shadow: none; }
       header { padding-bottom: 12pt; }
       h1 { font-size: 27pt; }
       .headline { font-size: 12pt; margin-top: 4pt; }

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { buildResumeHtml } from "@/lib/job-hunter/resumeHtml";
@@ -16,6 +17,7 @@ type ApiResponse = {
   success: boolean;
   data?: JobHunterResult;
   error?: string;
+  jdText?: string;
 };
 
 type SourceMode = "file" | "text";
@@ -41,9 +43,14 @@ export default function JobHunterPage() {
   const [downloading, setDownloading] = useState<DownloadKind | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
+  const [resolvedJd, setResolvedJd] = useState("");
+  const [startingTraining, setStartingTraining] = useState(false);
+  const [trainingError, setTrainingError] = useState<string | null>(null);
+
   const [hintIndex, setHintIndex] = useState(0);
   const resultRef = useRef<HTMLDivElement | null>(null);
   const resumeFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const router = useRouter();
 
   const resumeHtml = useMemo(
     () => (result ? buildResumeHtml(result.resume) : ""),
@@ -55,6 +62,35 @@ export default function JobHunterPage() {
     if (!win) return;
     win.focus();
     win.print();
+  }
+
+  async function handleStartTraining() {
+    if (!result) return;
+    setTrainingError(null);
+    setStartingTraining(true);
+    try {
+      const res = await fetch("/api/job-hunter/interview/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resume: result.resume,
+          jd: resolvedJd,
+          weaknesses: result.analysis.missingKeywords,
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success?: boolean; sessionId?: number; error?: string }
+        | null;
+      if (!res.ok || !json?.success || !json.sessionId) {
+        setTrainingError(json?.error || "无法开始训练,请稍后重试。");
+        return;
+      }
+      router.push(`/job-hunter/interview?session=${json.sessionId}`);
+    } catch {
+      setTrainingError("网络异常,请稍后重试。");
+    } finally {
+      setStartingTraining(false);
+    }
   }
 
   useEffect(() => {
@@ -110,6 +146,7 @@ export default function JobHunterPage() {
         return;
       }
       setResult(json.data);
+      setResolvedJd(json.jdText ?? (jdMode === "text" ? jdText : ""));
     } catch {
       setError("网络异常,请稍后重试。");
     } finally {
@@ -229,6 +266,25 @@ export default function JobHunterPage() {
         {/* 结果 */}
         {result && (
           <div ref={resultRef} className="mt-10 space-y-6">
+            <div className="rounded-2xl border border-cyan-200 bg-cyan-50/60 p-5 shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-cyan-900">🎯 针对这份 JD 做专项面试训练</p>
+                  <p className="mt-1 text-xs leading-relaxed text-cyan-700">
+                    按 JD 技能出题 → 你打字作答 → AI 评分定位弱点 → 自适应补强（进度自动保存到数据库）。
+                  </p>
+                </div>
+                <button
+                  onClick={handleStartTraining}
+                  disabled={startingTraining}
+                  className="shrink-0 rounded-xl bg-cyan-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {startingTraining ? "正在准备…" : "开始训练 →"}
+                </button>
+              </div>
+              {trainingError && <p className="mt-2 text-sm text-rose-600">{trainingError}</p>}
+            </div>
+
             <ScoreBlock result={result} />
 
             <DownloadBlock
