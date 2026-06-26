@@ -4,7 +4,10 @@ import Link from "next/link";
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
 
 import { copyToClipboard } from "@/lib/clipboard";
+import { collapseBlankLines, estimateCardCount } from "@/lib/xiaohongshu/cards";
 import type { RewriteData } from "@/lib/schema";
+
+import BatchPublish from "./BatchPublish";
 
 const MAX_CHARS = 10_000;
 const LOADING_HINTS = [
@@ -12,6 +15,8 @@ const LOADING_HINTS = [
   "正在重新组织内容……",
   "正在生成标题和标签……",
 ];
+
+type Mode = "single" | "batch";
 
 type ApiResponse = {
   success: boolean;
@@ -24,46 +29,8 @@ type PublishFeedback = {
   message: string;
 };
 
-// 清洗正文：去行尾空白、把连续多个空行合并成「最多一个空行」、去首尾空白。
-function collapseBlankLines(s: string): string {
-  return s
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+$/gm, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-// 估算分页卡片数：与服务端 build_article_content 保持一致
-// （跳过空行；中文/全角记 2、每视觉行约 28 单位；字数 chars_per_card 或视觉行数 16 任一超限即切卡）。
-const MAX_CARD_HEIGHT = 27; // 每张卡高度预算（≈填满一张），与服务端一致
-function visualLines(s: string): number {
-  let w = 0;
-  for (const ch of s) w += (ch.codePointAt(0) ?? 0) > 0x2e7f ? 2 : 1;
-  return Math.max(1, Math.ceil(w / 40));
-}
-function estimateCardCount(body: string, charsPerCard: number): number {
-  let cards = 0;
-  let curLen = 0;
-  let curHeight = 0;
-  let has = false;
-  for (const line of body.split("\n")) {
-    if (!line.trim()) continue;
-    const lh = visualLines(line) + 0.8; // 行高 + 段间距
-    if (has && (curLen + line.length > charsPerCard || curHeight + lh > MAX_CARD_HEIGHT)) {
-      cards += 1;
-      curLen = 0;
-      curHeight = 0;
-      has = false;
-    }
-    curLen += line.length + 1;
-    curHeight += lh;
-    has = true;
-  }
-  if (has) cards += 1;
-  return Math.max(1, cards);
-}
-
 export default function XiaohongshuPage() {
+  const [mode, setMode] = useState<Mode>("single");
   const [input, setInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [importing, setImporting] = useState(false);
@@ -455,6 +422,8 @@ export default function XiaohongshuPage() {
           coverImage: coverImage ?? undefined,
           coverFileId: coverFileId ?? undefined,
           privacy: visibility,
+          // 若本篇是「从链接导入」来的，带上来源链接：发布成功后记入去重库
+          sourceUrl: urlInput.trim() || undefined,
         }),
       });
       const json = (await res.json().catch(() => null)) as
@@ -555,6 +524,30 @@ export default function XiaohongshuPage() {
           </p>
         </header>
 
+        {/* 模式切换：单条优化 / 批量发布（同一工具内切换） */}
+        <div className="mb-6 inline-flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
+          {([
+            ["single", "单条优化"],
+            ["batch", "批量发布"],
+          ] as const).map(([m, label]) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              aria-pressed={mode === m}
+              className={`rounded-lg px-4 py-1.5 text-sm font-medium transition ${
+                mode === m ? "bg-xhs text-white" : "text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode === "batch" ? (
+          <BatchPublish />
+        ) : (
+          <>
         {/* 2. 输入区域 */}
         <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
           {/* 从链接导入(经本地 rednote 服务读取) */}
@@ -1051,6 +1044,8 @@ export default function XiaohongshuPage() {
               )}
             </section>
           </div>
+        )}
+          </>
         )}
       </div>
 

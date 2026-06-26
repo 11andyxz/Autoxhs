@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { CTA_LINE } from "@/lib/schema";
+import { getDoneNoteIds, markPublished, parseNoteId } from "@/lib/xiaohongshu/notesDb";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,6 +18,8 @@ type PublishRequest = {
   coverImage?: string;
   coverFileId?: string;
   privacy?: number; // 0=公开, 1=仅自己可见
+  sourceUrl?: string; // 来源小红书链接：发布成功后据此把 note_id 记入去重库
+  skipIfPublished?: boolean; // 批量用：发布前先查去重库，已发布过则跳过、不重复公开（幂等保护）
 };
 
 // 每张图约多少字（分页粒度）。实测一张图约 380~450 字填满，默认偏密以贴近人工长文；夹紧防溢出。
@@ -96,6 +99,33 @@ export async function POST(req: NextRequest) {
 
   const confirm = request.confirm === true;
   const privacy = request.privacy === 1 ? 1 : 0; // 默认公开
+  const sourceNoteId = parseNoteId(request.sourceUrl ?? "");
+
+  // 幂等保护（批量）：真实发布前，若该来源 note_id 已发布过，直接跳过、绝不重复公开。
+  // 关闭了 DB 时降级放行（不阻断发布）；客户端会另有去重库不可用的提醒。
+  if (confirm && request.skipIfPublished === true && sourceNoteId) {
+    try {
+      const done = await getDoneNoteIds([sourceNoteId]);
+      if (done.has(sourceNoteId)) {
+        return NextResponse.json({
+          success: true,
+          published: false,
+          skipped: true,
+          alreadyPublished: true,
+          dryRun: false,
+          cards: 0,
+          imageCount: 0,
+          noteId: null,
+          shareLink: null,
+        });
+      }
+    } catch (e) {
+      console.error("[xiaohongshu/publish] 发布前去重检查失败(降级放行)", {
+        name: (e as Error)?.name,
+      });
+    }
+  }
+
   const coverFileId = typeof request.coverFileId === "string" ? request.coverFileId.trim() : "";
   // 自传封面优先：用自己的图当第 1 张时，AI 配图(cover_image)就无意义了
   const coverImage =
@@ -156,6 +186,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // 真实公开发布成功后，把来源 note_id 记入去重库（best-effort：失败不影响发布结果）。
+    const shareLink = typeof result.share_link === "string" ? result.share_link : undefined;
+    let dedupRecorded = false;
+    if (confirm && result.published === true && sourceNoteId) {
+      try {
+        await markPublished({ noteId: sourceNoteId, sourceUrl: request.sourceUrl, title, shareLink });
+        dedupRecorded = true;
+      } catch (e) {
+        console.error("[xiaohongshu/publish] 记录去重库失败(忽略)", {
+          name: (e as Error)?.name,
+        });
+      }
+    }
+
     return NextResponse.json({
       success: true,
       dryRun: result.dry_run === true || !confirm,
@@ -168,6 +212,8 @@ export async function POST(req: NextRequest) {
           : 0,
       noteId: typeof result.note_id === "string" ? result.note_id : null,
       shareLink: typeof result.share_link === "string" ? result.share_link : null,
+      // 是否已写入去重库：发布成功但未记录（如 DB 临时不可用）时为 false，客户端据此提醒重发风险。
+      dedupRecorded,
     });
   } catch (error) {
     const isAbort = (error as Error)?.name === "AbortError";
