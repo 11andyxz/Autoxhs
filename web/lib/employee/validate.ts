@@ -9,6 +9,8 @@ export interface EmployeeInput {
   email: string;
   address: string;
   phone: string;
+  /** 备注:任意补充信息(选填) */
+  notes?: string;
 }
 
 export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -32,6 +34,7 @@ export const MAX_NAME_LEN = 255;
 export const MAX_ADDRESS_LEN = 512;
 export const MAX_PHONE_LEN = 50;
 export const MAX_CATEGORY_LEN = 100;
+export const MAX_NOTES_LEN = 5000;
 
 /** 取文件扩展名(小写,不含点)。无扩展名返回 "" */
 export function fileExtension(name: string): string {
@@ -105,6 +108,8 @@ export function validateEmployee(e: EmployeeInput): string[] {
     errs.push("Phone 格式不正确(至少 7 位数字)。");
   }
 
+  if ((e.notes?.trim().length ?? 0) > MAX_NOTES_LEN) errs.push("备注过长(请控制在 5000 字以内)。");
+
   return errs;
 }
 
@@ -116,9 +121,27 @@ export function trimEmployee(e: EmployeeInput): EmployeeInput {
     email: e.email.trim(),
     address: e.address.trim(),
     phone: e.phone.trim(),
+    notes: (e.notes ?? "").trim(),
   };
 }
 
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+/** 归一化用于「按姓名归并雇员与收费客户」的键:去首尾空格、小写、折叠中间空白。 */
+export function nameMergeKey(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * 把单串姓名拆成 first/last:最后一个单词作为 Last Name(姓,通常一个词),
+ * 其余作为 First Name。例:"YU YAN PING" → { firstName: "YU YAN", lastName: "PING" }。
+ * 单个词时作为 First Name。
+ */
+export function splitFullName(name: string): { firstName: string; lastName: string } {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { firstName: "", lastName: "" };
+  if (parts.length === 1) return { firstName: parts[0], lastName: "" };
+  return { firstName: parts.slice(0, -1).join(" "), lastName: parts[parts.length - 1] };
 }

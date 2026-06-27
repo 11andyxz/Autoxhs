@@ -39,12 +39,13 @@ type HistoryRecord = {
   result: CalculationResult;
 };
 type ClientListItem = {
-  id: number;
+  id: number | null; // null = 仅雇员(尚无收费客户记录),选中后按新客户处理
   displayName: string;
   recordCount: number;
   lastInputStart: string | null;
   lastInputEnd: string | null;
   lastActualEnd: string | null;
+  source?: "client" | "employee";
 };
 type ClientInfo = {
   exists: boolean;
@@ -108,7 +109,8 @@ export default function ServiceFeePage() {
 
   async function loadClients() {
     try {
-      const res = await fetch("/api/clients/list");
+      // 合并端点:收费客户 + 未匹配雇员(可在收费里直接选雇员,如 Bin Meng)
+      const res = await fetch("/api/clients/selectable");
       const json = await res.json();
       if (json.success) setClients(json.clients as ClientListItem[]);
     } catch {
@@ -196,7 +198,9 @@ export default function ServiceFeePage() {
   function selectClient(c: ClientListItem) {
     setClientName(c.displayName);
     setComboOpen(false);
-    loadClientInfo(c.id);
+    // 雇员项(无 client id):按新客户处理,保存时再按名建客户
+    if (c.id != null) loadClientInfo(c.id);
+    else setClientInfo({ exists: false, suggestedNextStartDate: null, history: [] });
   }
 
   function chooseNewClient() {
@@ -217,7 +221,8 @@ export default function ServiceFeePage() {
       let prior = EMPTY_PRIOR;
       let clientId: number | null = matched?.id ?? null;
       try {
-        const data = await lookupClient({ clientId: matched?.id, name, range: { start: startDate, end: endDate } });
+        // 雇员项 matched.id 为 null → 按名查询(走新客户路径)
+        const data = await lookupClient({ clientId: matched?.id ?? undefined, name, range: { start: startDate, end: endDate } });
         prior = data.priorCharges ?? EMPTY_PRIOR;
         clientId = data.exists ? (data.clientId ?? clientId) : null;
         applyClientInfo(data);
@@ -433,14 +438,16 @@ export default function ServiceFeePage() {
                 <div className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-slate-200 bg-white shadow-lg">
                   {filteredClients.map((c) => (
                     <button
-                      key={c.id}
+                      key={c.id ?? `emp:${c.displayName}`}
                       type="button"
                       onMouseDown={(e) => { e.preventDefault(); selectClient(c); }}
                       className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
                     >
                       <span className="font-medium text-slate-800">{c.displayName}</span>
                       <span className="ml-2 text-[11px] text-slate-400">
-                        {c.recordCount} 条{c.lastInputStart ? ` · 最近 ${c.lastInputStart} ~ ${c.lastInputEnd}` : ""}
+                        {c.id == null
+                          ? "雇员 · 暂无收费记录"
+                          : `${c.recordCount} 条${c.lastInputStart ? ` · 最近 ${c.lastInputStart} ~ ${c.lastInputEnd}` : ""}`}
                       </span>
                     </button>
                   ))}

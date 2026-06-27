@@ -23,10 +23,19 @@ export function ensureEmployeeSchema(): Promise<void> {
         email VARCHAR(255) NOT NULL,
         address VARCHAR(512) NOT NULL,
         phone VARCHAR(50) NOT NULL,
+        notes TEXT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
+    // 旧库已存在 emp_employee 时,CREATE TABLE IF NOT EXISTS 不会补列;此处幂等补 notes 列
+    const [noteCol] = await p.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS n FROM information_schema.columns
+       WHERE table_schema = DATABASE() AND table_name = 'emp_employee' AND column_name = 'notes'`,
+    );
+    if (Number(noteCol[0]?.n ?? 0) === 0) {
+      await p.query("ALTER TABLE emp_employee ADD COLUMN notes TEXT NULL AFTER phone");
+    }
     await p.query(`
       CREATE TABLE IF NOT EXISTS emp_file (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -65,18 +74,54 @@ export async function upsertEmployee(
     const id = rows[0].id as number;
     await conn.query(
       `UPDATE emp_employee
-         SET legal_first_name = ?, legal_last_name = ?, email = ?, address = ?, phone = ?
+         SET legal_first_name = ?, legal_last_name = ?, email = ?, address = ?, phone = ?, notes = ?
        WHERE id = ?`,
-      [e.legalFirstName, e.legalLastName, e.email, e.address, e.phone, id],
+      [e.legalFirstName, e.legalLastName, e.email, e.address, e.phone, e.notes ?? "", id],
     );
     return { id, created: false };
   }
   const [res] = await conn.query<ResultSetHeader>(
-    `INSERT INTO emp_employee (normalized_email, legal_first_name, legal_last_name, email, address, phone)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [normalized, e.legalFirstName, e.legalLastName, e.email, e.address, e.phone],
+    `INSERT INTO emp_employee (normalized_email, legal_first_name, legal_last_name, email, address, phone, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [normalized, e.legalFirstName, e.legalLastName, e.email, e.address, e.phone, e.notes ?? ""],
   );
   return { id: res.insertId, created: true };
+}
+
+/** 事务内:该 id 的雇员是否存在。 */
+export async function employeeExists(conn: PoolConnection, id: number): Promise<boolean> {
+  const [rows] = await conn.query<RowDataPacket[]>(
+    "SELECT id FROM emp_employee WHERE id = ? LIMIT 1",
+    [id],
+  );
+  return rows.length > 0;
+}
+
+/** 事务内:某 normalized_email 是否已被「另一个」雇员占用(用于改 email 时查重)。 */
+export async function emailUsedByAnother(
+  conn: PoolConnection,
+  normalized: string,
+  excludeId: number,
+): Promise<boolean> {
+  const [rows] = await conn.query<RowDataPacket[]>(
+    "SELECT id FROM emp_employee WHERE normalized_email = ? AND id <> ? LIMIT 1",
+    [normalized, excludeId],
+  );
+  return rows.length > 0;
+}
+
+/** 事务内:按 id 精确更新雇员的全部字段(含 email / notes)。 */
+export async function updateEmployeeById(
+  conn: PoolConnection,
+  id: number,
+  e: EmployeeInput,
+): Promise<void> {
+  await conn.query(
+    `UPDATE emp_employee
+       SET normalized_email = ?, legal_first_name = ?, legal_last_name = ?, email = ?, address = ?, phone = ?, notes = ?
+     WHERE id = ?`,
+    [normalizeEmail(e.email), e.legalFirstName, e.legalLastName, e.email, e.address, e.phone, e.notes ?? "", id],
+  );
 }
 
 export interface NewFileRow {
@@ -115,6 +160,7 @@ export interface EmployeeWithFiles {
   email: string;
   address: string;
   phone: string;
+  notes: string;
   createdAt: string;
   updatedAt: string;
   files: EmployeeFileItem[];
@@ -124,7 +170,7 @@ export interface EmployeeWithFiles {
 export async function listEmployees(): Promise<EmployeeWithFiles[]> {
   const p = getPool();
   const [empRows] = await p.query<RowDataPacket[]>(
-    `SELECT id, legal_first_name, legal_last_name, email, address, phone, created_at, updated_at
+    `SELECT id, legal_first_name, legal_last_name, email, address, phone, notes, created_at, updated_at
      FROM emp_employee ORDER BY created_at DESC, id DESC`,
   );
   const [fileRows] = await p.query<RowDataPacket[]>(
@@ -154,6 +200,7 @@ export async function listEmployees(): Promise<EmployeeWithFiles[]> {
     email: r.email as string,
     address: r.address as string,
     phone: r.phone as string,
+    notes: (r.notes as string) ?? "",
     createdAt: r.created_at as string,
     updatedAt: r.updated_at as string,
     files: filesByEmp.get(r.id as number) ?? [],
