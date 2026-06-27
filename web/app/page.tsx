@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: "Autoxhs 内部小工具集合。",
 };
 
-type Accent = "rose" | "emerald" | "cyan";
+type Accent = "rose" | "emerald" | "cyan" | "violet";
 
 const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string }> = {
   rose: {
@@ -23,6 +23,11 @@ const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string
     tile: "bg-cyan-50 text-cyan-600",
     hoverBorder: "hover:border-cyan-300",
     arrow: "text-cyan-600",
+  },
+  violet: {
+    tile: "bg-violet-50 text-violet-600",
+    hoverBorder: "hover:border-violet-300",
+    arrow: "text-violet-600",
   },
 };
 
@@ -57,6 +62,14 @@ const TOOLS: Array<{
     desc: "上传简历 + 目标 JD,AI 按岗位重排经历、强化关键词,生成定制简历、求职信与匹配分析,导出 PDF / Word。",
     icon: "🎯",
     accent: "cyan",
+  },
+  {
+    href: "/employee",
+    name: "雇员信息",
+    en: "Employee Information",
+    desc: "录入雇员基本信息,上传文件并按分类(如 i983)归档,Save 后存入数据库,可随时下载。",
+    icon: "🪪",
+    accent: "violet",
   },
 ];
 

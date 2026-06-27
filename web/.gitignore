@@ -10,6 +10,9 @@
 # production
 /build
 
+# 雇员信息上传的文件(含 PII / 证件,严禁提交)
+/uploads/
+
 # misc
 .DS_Store
 *.pem
