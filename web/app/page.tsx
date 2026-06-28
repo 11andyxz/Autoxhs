@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: "Autoxhs 内部小工具集合。",
 };
 
-type Accent = "rose" | "emerald" | "cyan" | "violet";
+type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky";
 
 const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string }> = {
   rose: {
@@ -28,6 +28,11 @@ const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string
     tile: "bg-violet-50 text-violet-600",
     hoverBorder: "hover:border-violet-300",
     arrow: "text-violet-600",
+  },
+  sky: {
+    tile: "bg-sky-50 text-sky-600",
+    hoverBorder: "hover:border-sky-300",
+    arrow: "text-sky-600",
   },
 };
 
@@ -70,6 +75,14 @@ const TOOLS: Array<{
     desc: "录入雇员基本信息,上传文件并按分类(如 i983)归档,Save 后存入数据库,可随时下载。",
     icon: "🪪",
     accent: "violet",
+  },
+  {
+    href: "/indeed",
+    name: "一键投递 Indeed",
+    en: "Indeed One-Click Apply",
+    desc: "搜索 Indeed 岗位,查看雇主问题与自动答案,先预演再一键投递,并复核投递状态。需本地 Indeed 服务 + 已登录浏览器。",
+    icon: "🚀",
+    accent: "sky",
   },
 ];
 
