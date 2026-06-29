@@ -1,7 +1,12 @@
 import type { TailoredResume } from "./schema";
 
 /**
- * 把结构化简历渲染成一份独立、自带样式的 HTML 文档(用户偏好的单页 Letter 模板)。
+ * 把结构化简历渲染成一份独立、自带样式的 HTML 文档。
+ * 版式对齐用户偏好的经典 Word 模板(Times New Roman / US Letter / 0.5in 页边距):
+ *   姓名 + 职位标题居中 → 联系方式左对齐 → 下划线大写小标题 →
+ *   PROFESSIONAL SUMMARY(项目符号) → TECHNICAL SKILLS(双列表格) →
+ *   EDUCATION(项目符号) → PROFESSIONAL EXPERIENCE(蓝色公司/职位行 +
+ *   Project Description / Responsibilities / Environment) → 其它区块。
  * 同一份 HTML 既用于页面内 iframe 预览,也用于浏览器「打印另存为 PDF」。
  *
  * 安全:所有注入内容一律 HTML 转义,杜绝简历/模型内容注入标签或脚本
@@ -17,13 +22,12 @@ function esc(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function paragraphs(text: string): string {
+/** 把多段文本(空行分隔)拆成 trim 后的非空段落数组 */
+function splitParagraphs(text: string): string[] {
   return text
     .split(/\n\s*\n/)
     .map((p) => p.trim())
-    .filter(Boolean)
-    .map((p) => `<p>${esc(p).replace(/\n/g, "<br>")}</p>`)
-    .join("");
+    .filter(Boolean);
 }
 
 function bulletList(items: string[], className: string): string {
@@ -32,61 +36,101 @@ function bulletList(items: string[], className: string): string {
   return `<ul class="${className}">${lis}</ul>`;
 }
 
+function sectionTitle(text: string): string {
+  return `<p class="section-title">${esc(text)}</p>`;
+}
+
+// 区块归类:Skills 走双列表格并排在 Experience 之前;Education 同样前置;
+// 其余区块(Certifications / Projects 等)排在 Experience 之后。
+const SKILL_RE = /skill|技能/i;
+const EDU_RE = /education|教育|学历/i;
+
 function experienceBlock(exp: TailoredResume["experience"]): string {
   if (!exp.length) return "";
   const items = exp
     .map((e) => {
-      const heading = `<div class="experience-heading"><h3>${esc(e.company) || "&nbsp;"}</h3>${
-        e.dates ? `<div class="dates">${esc(e.dates)}</div>` : ""
-      }</div>`;
-      const role = e.role ? `<div class="role">${esc(e.role)}</div>` : "";
-      const desc = e.projectDescription
-        ? `<div class="project-description">${paragraphs(e.projectDescription)}</div>`
+      const company = e.company
+        ? `<p class="exp-company">${esc(e.company)}${
+            e.dates ? ` | ${esc(e.dates)}` : ""
+          }</p>`
+        : e.dates
+          ? `<p class="exp-company">${esc(e.dates)}</p>`
+          : "";
+      const role = e.role ? `<p class="exp-role">Role: ${esc(e.role)}</p>` : "";
+
+      const descParas = splitParagraphs(e.projectDescription);
+      const desc = descParas.length
+        ? descParas
+            .map((p, i) =>
+              i === 0
+                ? `<p class="exp-para"><span class="exp-label">Project Description: </span>${esc(p)}</p>`
+                : `<p class="exp-para">${esc(p)}</p>`,
+            )
+            .join("")
         : "";
+
       const resp = e.responsibilities.length
-        ? `<h4>Responsibilities</h4>${bulletList(e.responsibilities, "responsibilities")}`
+        ? `<p class="exp-para"><span class="exp-label">Responsibilities:</span></p>${bulletList(
+            e.responsibilities,
+            "responsibilities",
+          )}`
         : "";
       const env = e.environment
-        ? `<p class="environment"><strong>Environment:</strong> ${esc(e.environment)}</p>`
+        ? `<p class="exp-para"><span class="exp-label">Environment: </span>${esc(e.environment)}</p>`
         : "";
-      return `<article class="experience-item">${heading}${role}${desc}${resp}${env}</article>`;
+
+      return `<div class="exp-item">${company}${role}${desc}${resp}${env}</div>`;
     })
     .join("\n");
-  return `<section aria-labelledby="experience-heading"><h2 id="experience-heading">Professional Experience</h2>${items}</section>`;
+  return `${sectionTitle("Professional Experience")}${items}`;
 }
 
-function genericSections(sections: TailoredResume["sections"]): string {
-  return sections
-    .map((sec) => {
-      const items = sec.items
-        .map((it) => {
-          const left = [it.title, it.subtitle].filter(Boolean).map(esc).join(" · ");
-          const right = it.dateRange ? esc(it.dateRange) : "";
-          const head =
-            left || right
-              ? `<div class="experience-heading"><h3>${left || "&nbsp;"}</h3>${
-                  right ? `<div class="dates">${right}</div>` : ""
-                }</div>`
-              : "";
-          const bullets = bulletList(it.bullets, "responsibilities");
-          return `<article class="experience-item">${head}${bullets}</article>`;
-        })
-        .join("\n");
-      return `<section><h2>${esc(sec.heading)}</h2>${items}</section>`;
+/** Skills 区块:双列带边框表格(左列类别加粗 | 右列逗号分隔技能) */
+function skillsTable(section: TailoredResume["sections"][number]): string {
+  const rows = section.items
+    .map((it) => {
+      const cat = it.title;
+      const valueParts = it.bullets.length ? it.bullets : it.subtitle ? [it.subtitle] : [];
+      const values = valueParts.join(", ");
+      if (!cat && !values) return "";
+      return `<tr><td class="skills-cat">${esc(cat) || "&nbsp;"}</td><td>${
+        esc(values) || "&nbsp;"
+      }</td></tr>`;
     })
+    .filter(Boolean)
     .join("\n");
+  if (!rows) return "";
+  return `${sectionTitle(section.heading)}<table class="skills-table"><tbody>${rows}</tbody></table>`;
+}
+
+/** 通用区块(Education / Certifications / Projects 等):项目符号列表 */
+function genericSection(section: TailoredResume["sections"][number]): string {
+  const lis: string[] = [];
+  for (const it of section.items) {
+    const left = [it.title, it.subtitle].filter(Boolean).map(esc).join(" &middot; ");
+    const main = [left, it.dateRange ? esc(it.dateRange) : ""].filter(Boolean).join(" &mdash; ");
+    if (main) lis.push(`<li>${main}</li>`);
+    for (const b of it.bullets) lis.push(`<li>${esc(b)}</li>`);
+  }
+  if (!lis.length) return "";
+  return `${sectionTitle(section.heading)}<ul class="generic-list">${lis.join("\n")}</ul>`;
 }
 
 export function buildResumeHtml(resume: TailoredResume): string {
+  const skillSections = resume.sections.filter((s) => SKILL_RE.test(s.heading));
+  const eduSections = resume.sections.filter(
+    (s) => !SKILL_RE.test(s.heading) && EDU_RE.test(s.heading),
+  );
+  const otherSections = resume.sections.filter(
+    (s) => !SKILL_RE.test(s.heading) && !EDU_RE.test(s.heading),
+  );
+
   const contacts = resume.contacts
-    .map((c) => `<span>${esc(c)}</span>`)
+    .map((c) => `<p class="contact-line">${esc(c)}</p>`)
     .join("\n");
 
   const summary = resume.summary.length
-    ? `<section aria-labelledby="summary-heading"><h2 id="summary-heading">Professional Summary</h2>${bulletList(
-        resume.summary,
-        "summary-list",
-      )}</section>`
+    ? `${sectionTitle("Professional Summary")}${bulletList(resume.summary, "summary-list")}`
     : "";
 
   const title = esc(resume.name || "Resume");
@@ -98,90 +142,91 @@ export function buildResumeHtml(resume: TailoredResume): string {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${title} | Resume</title>
   <style>
-    :root {
-      --ink: #172033;
-      --muted: #5d6778;
-      --accent: #2457a6;
-      --line: #d9e0ea;
-      --paper: #ffffff;
-      --background: #eef2f7;
-    }
     * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
+    html { background: #e9e9e9; }
     body {
       margin: 0;
-      background: var(--background);
-      color: var(--ink);
-      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-      font-size: 15px;
-      line-height: 1.55;
+      background: #e9e9e9;
+      color: #000000;
+      /* Times New Roman 为主,后接 CJK 衬线兜底,中文 JD 生成的中文简历不出现方块 */
+      font-family: "Times New Roman", "Songti SC", "SimSun", "Noto Serif CJK SC", "Source Han Serif SC", serif;
+      font-size: 11pt;
+      line-height: 1.15;
       -webkit-font-smoothing: antialiased;
     }
-    .resume {
-      width: min(980px, calc(100% - 32px));
-      margin: 32px auto;
-      padding: 48px 56px;
-      background: var(--paper);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      box-shadow: 0 18px 50px rgba(28, 42, 66, 0.10);
+    .page {
+      width: 8.5in;
+      min-height: 11in;
+      margin: 24px auto;
+      padding: 0.5in;
+      background: #ffffff;
+      box-shadow: 0 2px 14px rgba(0, 0, 0, 0.18);
+      text-align: justify;
     }
-    header { padding-bottom: 24px; border-bottom: 2px solid var(--accent); }
-    h1 { margin: 0; font-size: clamp(34px, 5vw, 48px); line-height: 1.05; letter-spacing: -0.035em; }
-    .headline { margin-top: 10px; color: var(--accent); font-size: 18px; font-weight: 700; }
-    .contact { display: flex; flex-wrap: wrap; gap: 7px 18px; margin-top: 16px; color: var(--muted); font-size: 14px; }
-    section { margin-top: 30px; }
-    h2 { margin: 0 0 14px; color: var(--accent); font-size: 17px; line-height: 1.2; letter-spacing: 0.12em; text-transform: uppercase; }
-    .summary-list, .responsibilities { margin: 0; padding-left: 20px; }
-    li { margin: 5px 0; }
-    li::marker { color: var(--accent); }
-    .experience-item { padding: 23px 0 25px; border-top: 1px solid var(--line); break-inside: auto; }
-    .experience-item:first-of-type { padding-top: 4px; border-top: 0; }
-    .experience-heading { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: baseline; }
-    h3 { margin: 0; font-size: 20px; line-height: 1.25; }
-    .dates { color: var(--muted); font-size: 14px; font-weight: 650; white-space: nowrap; }
-    .role { margin: 4px 0 12px; color: var(--accent); font-weight: 750; }
-    .project-description p { margin: 8px 0; }
-    h4 { margin: 16px 0 5px; font-size: 15px; }
-    .environment { margin: 15px 0 0; padding: 11px 13px; background: #f5f7fb; border-left: 3px solid var(--accent); color: #3f4b5d; font-size: 13px; line-height: 1.5; }
-    @media (max-width: 700px) {
-      .resume { width: 100%; margin: 0; padding: 30px 22px; border: 0; border-radius: 0; box-shadow: none; }
-      .experience-heading { grid-template-columns: 1fr; gap: 2px; }
-      .dates { white-space: normal; }
-      body { background: var(--paper); }
+    .name { text-align: center; font-size: 18pt; font-weight: bold; margin: 0; line-height: 1.1; }
+    .title { text-align: center; font-size: 11pt; font-weight: bold; margin: 0 0 2pt; }
+    .contact-line { font-size: 10pt; margin: 0; line-height: 1.25; text-align: left; }
+
+    .section-title {
+      font-size: 11pt;
+      font-weight: bold;
+      text-decoration: underline;
+      text-transform: uppercase;
+      text-align: left;
+      margin: 12pt 0 5pt;
     }
+
+    ul { margin: 0; padding-left: 0.3in; }
+    li { font-size: 11pt; margin: 0 0 2pt; }
+    .generic-list, .summary-list, .responsibilities { margin: 0 0 2pt; }
+
+    .exp-item { margin: 0 0 9pt; }
+    .exp-company { color: #4472c4; font-weight: bold; font-size: 11pt; margin: 0; text-align: left; }
+    .exp-role { color: #4472c4; font-weight: bold; font-size: 11pt; margin: 0 0 2pt; text-align: left; }
+    .exp-para { font-size: 11pt; margin: 0 0 4pt; }
+    .exp-label { font-weight: bold; }
+
+    .skills-table {
+      border-collapse: collapse;
+      width: 100%;
+      table-layout: fixed;
+      margin: 2pt 0 4pt;
+    }
+    .skills-table td {
+      border: 1px solid #000000;
+      padding: 2pt 6pt;
+      font-size: 11pt;
+      vertical-align: top;
+      text-align: left;
+      overflow-wrap: anywhere;
+    }
+    .skills-table .skills-cat { width: 27%; font-weight: bold; }
+
+    @media screen and (max-width: 900px) {
+      .page { width: calc(100% - 24px); min-height: auto; margin: 12px; padding: 24px; }
+    }
+
     @media print {
-      /* margin:0 让浏览器打印时不再绘制默认的页眉/页脚(日期、网址、页码);
-         视觉页边距改由 .resume 的 padding 实现。 */
+      /* @page margin:0 让浏览器打印时不绘制默认页眉/页脚(日期、网址、页码);
+         视觉页边距改由 .page 的 0.5in padding 实现。 */
       @page { size: Letter; margin: 0; }
-      body { background: #fff; font-size: 10pt; line-height: 1.42; }
-      .resume { width: auto; margin: 0; padding: 0.5in 0.55in; border: 0; border-radius: 0; box-shadow: none; }
-      header { padding-bottom: 12pt; }
-      h1 { font-size: 27pt; }
-      .headline { font-size: 12pt; margin-top: 4pt; }
-      .contact { margin-top: 8pt; font-size: 9pt; gap: 2pt 12pt; }
-      section { margin-top: 17pt; }
-      h2 { margin-bottom: 8pt; font-size: 11pt; }
-      h3 { font-size: 12pt; }
-      .dates { font-size: 9pt; }
-      .role { margin: 2pt 0 7pt; }
-      li { margin: 2pt 0; }
-      .experience-item { padding: 11pt 0 12pt; }
-      .environment { font-size: 8.5pt; padding: 6pt 8pt; margin-top: 8pt; }
+      html, body { background: #ffffff; }
+      .page { width: auto; min-height: 0; margin: 0; padding: 0.5in; box-shadow: none; }
+      .exp-item { break-inside: avoid; }
       a { color: inherit !important; text-decoration: none !important; }
     }
   </style>
 </head>
 <body>
-  <main class="resume">
-    <header>
-      <h1>${title}</h1>
-      ${resume.headline ? `<div class="headline">${esc(resume.headline)}</div>` : ""}
-      ${contacts ? `<div class="contact" aria-label="Contact information">${contacts}</div>` : ""}
-    </header>
+  <main class="page">
+    <p class="name">${title}</p>
+    ${resume.headline ? `<p class="title">${esc(resume.headline)}</p>` : ""}
+    ${contacts}
     ${summary}
+    ${skillSections.map(skillsTable).join("\n")}
+    ${eduSections.map(genericSection).join("\n")}
     ${experienceBlock(resume.experience)}
-    ${genericSections(resume.sections)}
+    ${otherSections.map(genericSection).join("\n")}
   </main>
 </body>
 </html>`;

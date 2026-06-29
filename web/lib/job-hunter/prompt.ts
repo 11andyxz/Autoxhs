@@ -17,6 +17,7 @@ Core tasks:
    - summary: Professional Summary as a list of concise bullet points, reprioritized for this JD.
    - experience: each role as { company (company + location), dates, role, projectDescription (a short paragraph), responsibilities (achievement bullets), environment (a single technologies line, may be empty) }.
    - sections: any remaining blocks such as Education, Skills, Certifications, Projects, each as { heading, items[] }.
+     For a Skills / Technical Skills block, output ONE item per skill category: set item.title to the category name (e.g. "Programming Languages", "Cloud", "Frameworks", "AI/LLM & GenAI") and item.bullets to that category's individual technologies/skills (one per bullet). This renders as a two-column category-to-skills table. For Education/Certifications/Projects, use item.title/subtitle/dateRange and bullets normally.
 3. Write a tailored cover letter (3-4 short paragraphs) addressed to the hiring team, connecting the candidate's background to the JD's needs. Separate paragraphs with a blank line. Do not invent a hiring manager's name; use a neutral greeting.
 4. Produce an analysis: a matchScore (0-100) estimating how well the tailored resume fits the JD, addedKeywords (JD keywords now reflected in the resume), missingKeywords (JD requirements the candidate still lacks), and changeSummary (the key edits you made).
 
