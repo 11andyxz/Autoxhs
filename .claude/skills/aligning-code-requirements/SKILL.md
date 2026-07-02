@@ -1,14 +1,11 @@
 ---
-
 name: aligning-code-requirements
 description: Aligns the user's intent before implementation, then inspects the current repository to identify unresolved product decisions, business rules, edge cases, and implementation-impacting questions. Ask only questions that cannot be answered from the user's confirmed intent or the repository. Do not rewrite the request into a Promptlized implementation brief.
 when_to_use: Trigger at the start of every new feature, bug fix, refactor, UI change, database change, API integration, automation task, or other material coding requirement change. Trigger again only when the user introduces a materially different objective, conflicting requirement, or substantial scope change.
 disallowed-tools:
-
-* Write
-* Edit
-* NotebookEdit
-
+  - Write
+  - Edit
+  - NotebookEdit
 ---
 
 # Intent Alignment and Repository Question Workflow
@@ -42,6 +39,24 @@ While requirements are still being aligned:
 
 Once the user's intent is confirmed and all necessary questions have been answered, finish the alignment workflow and begin implementation using the confirmed intent and answers as the source of truth.
 
+## Asking mechanism: always use the AskUserQuestion tool
+
+Every question this skill puts to the user — both the Phase 1 initial intent question and the Phase 4 unresolved questions — must be asked by calling the `AskUserQuestion` tool, which renders clickable options. Do not ask the user with a plain-text `A / B / C` list.
+
+Rules for every `AskUserQuestion` call:
+
+* Write the explanatory context first as normal text — your current understanding, the `代码库检查结果` summary, and any short reason a question matters — then call the tool. The tool itself shows only the questions and their options.
+* One call may hold 1–4 questions. Batch closely related questions into a single call. If more than 4 questions are genuinely unavoidable, make additional calls, but prefer as few questions as possible.
+* Each question needs a short `header` (≤ 12 characters), a clear `question`, and 2–4 `options`.
+* Make the recommended option the first one and append `（推荐）` to its `label`; put the reason in that option's `description`.
+* Keep each option `label` short (about 1–5 words) and put the fuller explanation in `description`.
+* Use `multiSelect: true` only when the options are not mutually exclusive.
+* Model a yes/no confirmation as two options, e.g. `对，就是这样（推荐）` and `不对，需要调整`.
+* When a question needs a concrete value or free-form text (a date, an amount, a name, a threshold), still use the tool and rely on its built-in `Other` option for the user to type a custom answer. Do not drop back to a plain-text question for these.
+* The repository-first rule still applies: never ask about files, components, frameworks, tables, or routes.
+
+Fallback: only when the `AskUserQuestion` tool is unavailable in the current environment (for example a non-interactive or headless run) may you fall back to a plain-text list of the same options — one `A / B / C` line per option with a short description, and the recommended one marked `推荐`.
+
 ## Phase 1: Ask about the user's intent
 
 The first response to a new coding request must focus on what the user is trying to achieve.
@@ -64,30 +79,32 @@ Do not produce a rewritten implementation prompt.
 
 Ask the smallest number of questions needed to confirm the user's intended outcome.
 
-In most cases, ask one focused question.
+In most cases, ask one focused question. Ask it by calling the `AskUserQuestion` tool (see "Asking mechanism" above): state your understanding as text first, then call the tool.
 
 When the intent is already mostly clear, use a confirmation-style question instead of asking the user to explain everything again.
 
-Example:
+Example — first, as text:
 
-> 我的理解是：你希望当订单超过当前时间段容量时，只对当前购物车触发特殊处理，而不是全局修改该时间段的状态。这个理解正确吗？
+> 我的理解是：你希望当订单超过当前时间段容量时，只对当前购物车触发特殊处理，而不是全局修改该时间段的状态。
 
-When multiple genuinely different product outcomes are possible, provide clear options:
+then call `AskUserQuestion` with one question (`header`: `意图确认`) and two options:
 
-> 你希望这个功能解决的是哪一种情况？
-> A. 阻止所有超过容量的订单
-> B. 允许第一个超容量订单，但之后停止接单
-> C. 仅对特定客户或订单类型允许超容量
->
-> 推荐选择：B，因为它最符合你描述的“尽量留住客户，但避免持续超卖”。
+* `对，就是这样（推荐）` — 只对当前购物车做特殊处理，不改该时间段的全局状态。
+* `不对，需要调整` — 我想要不同的行为（用 `Other` 补充说明）。
+
+When multiple genuinely different product outcomes are possible, give the options directly. Call `AskUserQuestion` with, for example, `header`: `超容量处理` and:
+
+* `允许首单后停接（推荐）` — 允许第一个超容量订单，之后停止接单；最符合"尽量留住客户但避免持续超卖"。
+* `阻止所有超容量订单` — 任何超过容量的订单都拒绝。
+* `仅特定客户/类型允许` — 只对特定客户或订单类型放行。
 
 ### Initial question rules
 
 * Ask about the user's desired behavior, business objective, or product decision.
 * Put the highest-impact ambiguity first.
 * Prefer one question; use up to three only when the questions are tightly related.
-* Provide a recommended interpretation when useful.
-* Make the answer easy, such as yes/no, `A / B / C`, or a concrete value.
+* Provide a recommended interpretation as the first option, with `（推荐）` in its label.
+* Keep answers easy to click: 2–4 options per question; for free-form answers rely on the `Other` option.
 * Do not ask the user to identify files, components, frameworks, database tables, routes, or implementation details.
 * Do not ask questions that can later be answered by inspecting the repository.
 * Do not ask broad questions such as “还有其他需求吗？”
@@ -258,13 +275,14 @@ Ask only the questions that can materially change implementation.
 
 Question rules:
 
-* Ask between 1 and 7 questions.
+* Ask the questions by calling the `AskUserQuestion` tool (see "Asking mechanism" above), after the `代码库检查结果` summary text.
+* Ask 1–4 questions per `AskUserQuestion` call; if more are truly unavoidable, make additional calls. Use as few as possible.
 * Use fewer questions whenever possible.
 * Put the highest-impact question first.
 * Group closely related questions.
 * Briefly explain why a question matters when the reason is not obvious.
-* Give a recommended choice based on the repository and the user's confirmed intent.
-* Make answers easy, such as `A / B / C`, yes/no, or a concrete value.
+* Give a recommended choice as the first option, with `（推荐）` in its label and the reason in its description.
+* Keep answers easy to click: 2–4 options per question; for free-form answers rely on the `Other` option.
 * Do not repeat previously answered questions.
 * Do not include speculative or low-impact questions.
 * Do not ask for a second general confirmation after the user answers all necessary questions.
@@ -283,19 +301,16 @@ Briefly summarize:
 
 ### 2. 仍需确认的问题
 
-Ask only the unresolved questions.
+Ask only the unresolved questions, using the `AskUserQuestion` tool.
 
-For example:
+For example, call `AskUserQuestion` with `header`: `旧数据处理` and the recommended option first:
 
-1. 当旧数据缺少新字段时，应如何处理？
+* `默认值兼容（推荐）` — 旧数据缺字段时用默认值读取；当前代码已对其他可选字段采用兼容读取。
+* `强制一次数据迁移` — 为所有旧数据补齐该字段。
 
-   * A. 使用默认值并保持兼容
-   * B. 强制执行一次数据迁移
-   * 推荐：A，因为当前代码已经对其他可选字段采用兼容读取。
+Before the tool call, add a short line of text such as:
 
-End with:
-
-> 请回答上面的问题。你回答后，我会直接按确认后的规则实施，不再重新整理或 Promptlize 需求。
+> 回答后我会直接按确认后的规则实施，不再重新整理或 Promptlize 需求。
 
 ### When no unresolved questions exist
 
@@ -375,10 +390,10 @@ Small corrections, wording clarifications, and implementation-level feedback do 
 
 For each new coding task:
 
-1. First ask about and align the user's intent.
+1. First ask about and align the user's intent, using the `AskUserQuestion` tool.
 2. Wait for the user's answer.
 3. Inspect the repository using read-only operations.
-4. Ask only questions that the repository and confirmed intent cannot answer.
+4. Ask only questions that the repository and confirmed intent cannot answer, again via the `AskUserQuestion` tool.
 5. If there are no additional questions, do not ask any.
 6. Do not Promptlize or rewrite the user's request into a separate prompt.
 7. Once everything is clear, proceed directly with implementation.
