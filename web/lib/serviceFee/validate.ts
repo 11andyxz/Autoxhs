@@ -14,5 +14,8 @@ export function validateInputs(i: ServiceFeeInputs): string[] {
   if (!(i.taxWithheldPerPayroll >= 0)) e.push("Tax Withheld 不能小于 0。");
   if (!(i.monthlyPayrollFee >= 0)) e.push("Monthly Payroll Fee 不能小于 0。");
   if (!(i.monthlyServiceCharge >= 0)) e.push("Monthly Service Charge 不能小于 0。");
+  if (i.serviceChargeAnchorDate && Number.isNaN(parseDate(i.serviceChargeAnchorDate))) {
+    e.push("Service Fee 起算日无效。");
+  }
   return e;
 }

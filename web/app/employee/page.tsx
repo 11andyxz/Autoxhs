@@ -7,6 +7,7 @@ import {
   ALLOWED_FILE_EXTENSIONS,
   isAllowedFileName,
   MAX_FILE_BYTES,
+  sanitizeCategoryName,
   validateEmployee,
   type EmployeeInput,
 } from "@/lib/employee/validate";
@@ -56,7 +57,7 @@ type Person = {
 type EditTarget =
   | { mode: "edit"; employee: EmployeeWithFiles }
   | { mode: "create"; firstName: string; lastName: string };
-type PendingFile = { uid: number; file: File; category: string };
+type PendingFile = { uid: number; file: File; category: string; groupId: number };
 
 const usd = (n: number) => n.toLocaleString("en-US", { style: "currency", currency: "USD" });
 
@@ -84,6 +85,183 @@ function isPreviewable(mimeType: string): boolean {
   return mimeType === "application/pdf" || mimeType.startsWith("image/");
 }
 
+// folderName = 该文件所属「顶层文件夹」名(整个文件夹一次命名,含子目录的文件都归这一个分类);
+// 无 folderName 表示手动单独选的文件(各自独立成组)。
+type DroppedFile = { file: File; folderName?: string };
+
+/** 从 webkitRelativePath 取顶层文件夹名("Top/sub/file" → "Top");无文件夹返回 undefined。 */
+function topFolderOf(relativePath?: string): string | undefined {
+  if (!relativePath) return undefined;
+  const parts = relativePath.split("/").filter(Boolean);
+  return parts.length >= 2 ? parts[0] : undefined;
+}
+
+/** 逐文件校验(空 / >20MB / 非 PDF·图片·Word);默认分类 = 顶层文件夹名(无则空)。 */
+function screenFiles(items: DroppedFile[]): { accepted: { file: File; category: string }[]; rejected: string[] } {
+  const accepted: { file: File; category: string }[] = [];
+  const rejected: string[] = [];
+  for (const { file, folderName } of items) {
+    if (file.size === 0) { rejected.push(`「${file.name}」是空文件`); continue; }
+    if (file.size > MAX_FILE_BYTES) { rejected.push(`「${file.name}」超过 20MB`); continue; }
+    if (!isAllowedFileName(file.name)) { rejected.push(`「${file.name}」类型不支持`); continue; }
+    accepted.push({ file, category: folderName ? sanitizeCategoryName(folderName) : "" });
+  }
+  return { accepted, rejected };
+}
+
+/** 递归读取目录下所有文件,全部标记为同一顶层 folderName(子目录文件也归到顶层文件夹名)。 */
+async function walkDir(entry: FileSystemDirectoryEntry, folderName: string, out: DroppedFile[]): Promise<void> {
+  const reader = entry.createReader();
+  for (;;) {
+    // readEntries 分批返回,需循环读到空为止
+    const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+    if (!batch.length) break;
+    for (const child of batch) {
+      if (child.isFile) {
+        const file = await new Promise<File>((resolve, reject) => (child as FileSystemFileEntry).file(resolve, reject));
+        out.push({ file, folderName });
+      } else if (child.isDirectory) {
+        await walkDir(child as FileSystemDirectoryEntry, folderName, out);
+      }
+    }
+  }
+}
+
+/** 从拖放数据提取文件:每个顶层文件夹整体归一个 folderName,顶层散文件无 folderName。无 entry 能力时回退为仅文件。 */
+async function filesFromDataTransfer(dt: DataTransfer): Promise<DroppedFile[]> {
+  const items = dt.items;
+  // 同步快照:dt.files / entry 在事件回调返回(await)后可能失效,必须先取
+  const plainFiles: DroppedFile[] = Array.from(dt.files).map((file) => ({
+    file,
+    folderName: topFolderOf(file.webkitRelativePath),
+  }));
+  const topEntries: FileSystemEntry[] = [];
+  if (items && items.length && typeof items[0].webkitGetAsEntry === "function") {
+    for (let i = 0; i < items.length; i += 1) {
+      const e = items[i].webkitGetAsEntry();
+      if (e) topEntries.push(e);
+    }
+  }
+  if (topEntries.length) {
+    const out: DroppedFile[] = [];
+    for (const e of topEntries) {
+      if (e.isFile) {
+        const file = await new Promise<File>((resolve, reject) => (e as FileSystemFileEntry).file(resolve, reject));
+        out.push({ file, folderName: undefined });
+      } else if (e.isDirectory) {
+        await walkDir(e as FileSystemDirectoryEntry, e.name, out);
+      }
+    }
+    if (out.length) return out;
+  }
+  return plainFiles;
+}
+
+/**
+ * 给新加入的文件分配 groupId(在 setState 之外计算,避免 StrictMode 下重复自增):
+ * 有分类的文件按分类归并到同组(同一文件夹/同名分类共用一组);未填分类的各自独立成组。
+ * 直接自增传入的 uidRef/gidRef。
+ */
+function computeAdditions(
+  pending: PendingFile[],
+  accepted: { file: File; category: string }[],
+  uidRef: { current: number },
+  gidRef: { current: number },
+): PendingFile[] {
+  const groupByCat = new Map<string, number>();
+  for (const f of pending) if (f.category) groupByCat.set(f.category, f.groupId);
+  const additions: PendingFile[] = [];
+  for (const a of accepted) {
+    let groupId: number;
+    if (a.category) {
+      const existing = groupByCat.get(a.category);
+      if (existing != null) groupId = existing;
+      else { gidRef.current += 1; groupId = gidRef.current; groupByCat.set(a.category, groupId); }
+    } else {
+      gidRef.current += 1; groupId = gidRef.current; // 未分类文件各自独立成组
+    }
+    uidRef.current += 1;
+    additions.push({ uid: uidRef.current, file: a.file, category: a.category, groupId });
+  }
+  return additions;
+}
+
+/** 待上传文件列表:按 groupId 分组(同一文件夹/同分类共用一个分类名输入框,其下列出多个文件)。 */
+function PendingFiles({
+  pending,
+  onSetGroupCategory,
+  onRemove,
+  onAutofill,
+  filling,
+}: {
+  pending: PendingFile[];
+  onSetGroupCategory: (groupId: number, value: string) => void;
+  onRemove: (uid: number) => void;
+  onAutofill?: (file: File) => void;
+  filling?: boolean;
+}) {
+  if (!pending.length) return null;
+  const groups: { groupId: number; category: string; files: PendingFile[] }[] = [];
+  const idx = new Map<number, number>();
+  for (const f of pending) {
+    if (!idx.has(f.groupId)) {
+      idx.set(f.groupId, groups.length);
+      groups.push({ groupId: f.groupId, category: f.category, files: [] });
+    }
+    groups[idx.get(f.groupId)!].files.push(f);
+  }
+  return (
+    <ul className="mt-4 space-y-3">
+      {groups.map((g) => (
+        <li key={g.groupId} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium text-slate-600">
+              分类 Category(如 i983){g.files.length > 1 ? ` · 含 ${g.files.length} 个文件` : ""}
+            </span>
+            <input
+              type="text"
+              value={g.category}
+              onChange={(e) => onSetGroupCategory(g.groupId, e.target.value)}
+              placeholder="如 i983"
+              className={inputCls}
+              autoComplete="off"
+            />
+          </label>
+          <ul className="mt-2 space-y-1">
+            {g.files.map((f) => (
+              <li key={f.uid} className="flex items-center justify-between gap-3 text-xs">
+                <span className="min-w-0 truncate text-slate-700">
+                  {f.file.name} <span className="text-slate-400">({fmtSize(f.file.size)})</span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {onAutofill && isPdf(f.file) && (
+                    <button
+                      type="button"
+                      onClick={() => onAutofill(f.file)}
+                      disabled={filling}
+                      title="把此 I-983 中的雇员信息填入上方表单"
+                      className="rounded-lg border border-violet-200 px-2 py-0.5 text-violet-700 transition hover:border-violet-400 disabled:opacity-50"
+                    >
+                      📄 填表
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onRemove(f.uid)}
+                    className="rounded-lg border border-slate-200 px-2 py-0.5 text-slate-500 transition hover:border-red-300 hover:text-red-600"
+                  >
+                    移除
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function EmployeePage() {
   const [form, setForm] = useState<EmployeeInput>(EMPTY);
   const [pending, setPending] = useState<PendingFile[]>([]);
@@ -99,11 +277,16 @@ export default function EmployeePage() {
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
 
   const uidRef = useRef(0);
+  const gidRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     document.title = "雇员信息 · Employee Information";
+    // 非标准属性,只能运行时设置,使该 input 变为「选择文件夹」
+    folderInputRef.current?.setAttribute("webkitdirectory", "");
+    folderInputRef.current?.setAttribute("directory", "");
     loadPeople();
   }, []);
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
@@ -153,33 +336,24 @@ export default function EmployeePage() {
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  function onPickFiles(list: FileList | null) {
-    if (!list || !list.length) return;
-    const added: PendingFile[] = [];
-    const rejected: string[] = [];
-    for (const file of Array.from(list)) {
-      if (file.size === 0) {
-        rejected.push(`「${file.name}」是空文件`);
-        continue;
-      }
-      if (file.size > MAX_FILE_BYTES) {
-        rejected.push(`「${file.name}」超过 20MB`);
-        continue;
-      }
-      if (!isAllowedFileName(file.name)) {
-        rejected.push(`「${file.name}」类型不支持`);
-        continue;
-      }
-      uidRef.current += 1;
-      added.push({ uid: uidRef.current, file, category: "" });
-    }
-    if (added.length) {
-      setPending((p) => [...p, ...added]);
+  function addFiles(items: DroppedFile[]) {
+    const { accepted, rejected } = screenFiles(items);
+    if (accepted.length) {
+      const additions = computeAdditions(pending, accepted, uidRef, gidRef);
+      setPending((p) => [...p, ...additions]);
       // 新增的 PDF 自动尝试按 I-983 解析回填表单(非 I-983 静默跳过)
-      added.filter((a) => isPdf(a.file)).forEach((a) => void autofillFromI983(a.file, { silent: true }));
+      accepted.filter((a) => isPdf(a.file)).forEach((a) => void autofillFromI983(a.file, { silent: true }));
     }
     if (rejected.length) setErrors([`以下文件未添加:${rejected.join(";")}`]);
+  }
+  function setGroupCategory(groupId: number, value: string) {
+    setPending((p) => p.map((f) => (f.groupId === groupId ? { ...f, category: value } : f)));
+  }
+  function onPickFiles(list: FileList | null) {
+    if (!list || !list.length) return;
+    addFiles(Array.from(list).map((f) => ({ file: f, folderName: topFolderOf(f.webkitRelativePath) })));
     if (fileInputRef.current) fileInputRef.current.value = "";
+    if (folderInputRef.current) folderInputRef.current.value = "";
   }
 
   /** 把一个 I-983 PDF 交给服务端解析,识别成功则回填表单(覆盖能识别的字段)。 */
@@ -219,9 +393,6 @@ export default function EmployeePage() {
     }
   }
 
-  function setCategory(uid: number, category: string) {
-    setPending((p) => p.map((f) => (f.uid === uid ? { ...f, category } : f)));
-  }
   function removePending(uid: number) {
     setPending((p) => p.filter((f) => f.uid !== uid));
   }
@@ -234,10 +405,10 @@ export default function EmployeePage() {
     // 只在真正离开拖放区(而非移到其子元素)时取消高亮
     if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
   }
-  function onDrop(e: React.DragEvent) {
+  async function onDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragging(false);
-    onPickFiles(e.dataTransfer.files); // 复用点击选择的同一套校验/列表逻辑
+    addFiles(await filesFromDataTransfer(e.dataTransfer)); // 支持拖入文件夹(递归)
   }
 
   function onReset() {
@@ -376,63 +547,35 @@ export default function EmployeePage() {
               onChange={(e) => onPickFiles(e.target.files)}
               className="hidden"
             />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="rounded-xl border border-dashed border-slate-300 bg-white px-5 py-2.5 text-sm font-medium text-slate-600 transition hover:border-violet-400 hover:text-violet-700"
-            >
-              + 选择文件(可多选)
-            </button>
+            <input ref={folderInputRef} type="file" multiple onChange={(e) => onPickFiles(e.target.files)} className="hidden" />
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="rounded-xl border border-dashed border-slate-300 bg-white px-5 py-2.5 text-sm font-medium text-slate-600 transition hover:border-violet-400 hover:text-violet-700"
+              >
+                + 选择文件(可多选)
+              </button>
+              <button
+                type="button"
+                onClick={() => folderInputRef.current?.click()}
+                className="rounded-xl border border-dashed border-slate-300 bg-white px-5 py-2.5 text-sm font-medium text-slate-600 transition hover:border-violet-400 hover:text-violet-700"
+              >
+                + 选择文件夹
+              </button>
+            </div>
             <span className="text-[11px] text-slate-400">
-              {dragging ? "松开即可添加文件" : "或把文件拖拽到此处 · 支持 PDF / 图片 / Word,单个 ≤ 20MB"}
+              {dragging ? "松开即可添加(支持文件夹)" : "或把文件 / 文件夹拖拽到此处 · 整个文件夹归为一个分类(用文件夹名) · 支持 PDF / 图片 / Word,单个 ≤ 20MB"}
             </span>
           </div>
 
-          {pending.length > 0 && (
-            <ul className="mt-4 space-y-3">
-              {pending.map((f) => (
-                <li key={f.uid} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-slate-800">{f.file.name}</p>
-                      <p className="text-[11px] text-slate-400">{fmtSize(f.file.size)}</p>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      {isPdf(f.file) && (
-                        <button
-                          type="button"
-                          onClick={() => autofillFromI983(f.file, { silent: false })}
-                          disabled={filling}
-                          title="把此 I-983 中的雇员信息填入上方表单"
-                          className="rounded-lg border border-violet-200 px-2.5 py-1 text-xs text-violet-700 transition hover:border-violet-400 disabled:opacity-50"
-                        >
-                          📄 用此 I-983 填表
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => removePending(f.uid)}
-                        className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-red-300 hover:text-red-600"
-                      >
-                        移除
-                      </button>
-                    </div>
-                  </div>
-                  <label className="mt-2 block">
-                    <span className="mb-1 block text-[11px] font-medium text-slate-600">分类 Category(该文件归入哪个分类,如 i983)</span>
-                    <input
-                      type="text"
-                      value={f.category}
-                      onChange={(e) => setCategory(f.uid, e.target.value)}
-                      placeholder="如 i983"
-                      className={inputCls}
-                      autoComplete="off"
-                    />
-                  </label>
-                </li>
-              ))}
-            </ul>
-          )}
+          <PendingFiles
+            pending={pending}
+            onSetGroupCategory={setGroupCategory}
+            onRemove={removePending}
+            onAutofill={(file) => autofillFromI983(file, { silent: false })}
+            filling={filling}
+          />
         </section>
 
         {/* 按钮 */}
@@ -697,7 +840,9 @@ function EditEmployeeModal({
   const [errors, setErrors] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const uidRef = useRef(0);
+  const gidRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!target) return;
@@ -716,6 +861,8 @@ function EditEmployeeModal({
     }
     setPending([]);
     setErrors([]);
+    folderInputRef.current?.setAttribute("webkitdirectory", "");
+    folderInputRef.current?.setAttribute("directory", "");
   }, [target]);
 
   useEffect(() => {
@@ -736,20 +883,25 @@ function EditEmployeeModal({
   function setField<K extends keyof EmployeeInput>(key: K, value: string) {
     setForm((f) => ({ ...f, [key]: value }));
   }
+  function addFiles(items: DroppedFile[]) {
+    const { accepted, rejected } = screenFiles(items);
+    if (accepted.length) {
+      const additions = computeAdditions(pending, accepted, uidRef, gidRef);
+      setPending((p) => [...p, ...additions]);
+    }
+    if (rejected.length) setErrors([`以下文件未添加:${rejected.join(";")}`]);
+  }
+  function setGroupCategory(groupId: number, value: string) {
+    setPending((p) => p.map((f) => (f.groupId === groupId ? { ...f, category: value } : f)));
+  }
+  function removeFile(uid: number) {
+    setPending((p) => p.filter((f) => f.uid !== uid));
+  }
   function onPick(list: FileList | null) {
     if (!list || !list.length) return;
-    const added: PendingFile[] = [];
-    const rejected: string[] = [];
-    for (const file of Array.from(list)) {
-      if (file.size === 0) { rejected.push(`「${file.name}」是空文件`); continue; }
-      if (file.size > MAX_FILE_BYTES) { rejected.push(`「${file.name}」超过 20MB`); continue; }
-      if (!isAllowedFileName(file.name)) { rejected.push(`「${file.name}」类型不支持`); continue; }
-      uidRef.current += 1;
-      added.push({ uid: uidRef.current, file, category: "" });
-    }
-    if (added.length) setPending((p) => [...p, ...added]);
-    if (rejected.length) setErrors([`以下文件未添加:${rejected.join(";")}`]);
+    addFiles(Array.from(list).map((f) => ({ file: f, folderName: topFolderOf(f.webkitRelativePath) })));
     if (fileInputRef.current) fileInputRef.current.value = "";
+    if (folderInputRef.current) folderInputRef.current.value = "";
   }
   function onDragOver(e: React.DragEvent) {
     e.preventDefault();
@@ -758,10 +910,10 @@ function EditEmployeeModal({
   function onDragLeave(e: React.DragEvent) {
     if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
   }
-  function onDrop(e: React.DragEvent) {
+  async function onDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragging(false);
-    onPick(e.dataTransfer.files);
+    addFiles(await filesFromDataTransfer(e.dataTransfer));
   }
 
   async function onSubmit() {
@@ -857,6 +1009,7 @@ function EditEmployeeModal({
               onChange={(e) => onPick(e.target.files)}
               className="hidden"
             />
+            <input ref={folderInputRef} type="file" multiple onChange={(e) => onPick(e.target.files)} className="hidden" />
             <div
               onDragEnter={onDragOver}
               onDragOver={onDragOver}
@@ -866,43 +1019,27 @@ function EditEmployeeModal({
                 dragging ? "border-violet-400 bg-violet-50" : "border-slate-300"
               }`}
             >
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="rounded-xl border border-dashed border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-violet-400 hover:text-violet-700"
-              >
-                + 追加文件
-              </button>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="rounded-xl border border-dashed border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-violet-400 hover:text-violet-700"
+                >
+                  + 追加文件
+                </button>
+                <button
+                  type="button"
+                  onClick={() => folderInputRef.current?.click()}
+                  className="rounded-xl border border-dashed border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-violet-400 hover:text-violet-700"
+                >
+                  + 选择文件夹
+                </button>
+              </div>
               <span className="text-[11px] text-slate-400">
-                {dragging ? "松开即可添加文件" : "或把文件拖拽到此处 · PDF / 图片 / Word,单个 ≤ 20MB"}
+                {dragging ? "松开即可添加(支持文件夹)" : "或把文件 / 文件夹拖拽到此处 · 整个文件夹归为一个分类(用文件夹名) · PDF / 图片 / Word,单个 ≤ 20MB"}
               </span>
             </div>
-            {pending.length > 0 && (
-              <ul className="mt-3 space-y-3">
-                {pending.map((f) => (
-                  <li key={f.uid} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-slate-800">{f.file.name}</p>
-                        <p className="text-[11px] text-slate-400">{fmtSize(f.file.size)}</p>
-                      </div>
-                      <button type="button" onClick={() => setPending((p) => p.filter((x) => x.uid !== f.uid))} className="shrink-0 rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-red-300 hover:text-red-600">移除</button>
-                    </div>
-                    <label className="mt-2 block">
-                      <span className="mb-1 block text-[11px] font-medium text-slate-600">分类 Category(如 i983)</span>
-                      <input
-                        type="text"
-                        value={f.category}
-                        onChange={(e) => setPending((p) => p.map((x) => (x.uid === f.uid ? { ...x, category: e.target.value } : x)))}
-                        placeholder="如 i983"
-                        className={inputCls}
-                        autoComplete="off"
-                      />
-                    </label>
-                  </li>
-                ))}
-              </ul>
-            )}
+            <PendingFiles pending={pending} onSetGroupCategory={setGroupCategory} onRemove={removeFile} />
           </div>
 
           {errors.length > 0 && (

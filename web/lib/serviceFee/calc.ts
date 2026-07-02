@@ -36,18 +36,25 @@ function daysInYearMonth(y: number, m: number): number {
   return new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
 }
 
-/** Service Charge 收费日:从 Start Date 当天起每月同一天(月末日不存在取当月最后一天),仅保留落在 [start,end] 内的 */
-function serviceChargeDates(startTs: number, endTs: number): number[] {
-  const sd = new Date(startTs);
-  const day = sd.getUTCDate();
-  let y = sd.getUTCFullYear();
-  let m = sd.getUTCMonth();
+/**
+ * Service Charge 收费日:每月同一「日」(月末日不存在取当月最后一天),仅保留落在 [start,end] 内的。
+ * anchorTs(可选)= Service Fee 起算日/首次收费日:取其「日」为每月收费日,且此日之前不收(下限);
+ * 不传时与原行为一致(锚定 Start Date 的日、下限为 Start)。
+ */
+function serviceChargeDates(startTs: number, endTs: number, anchorTs?: number | null): number[] {
+  const dayDate = new Date(anchorTs ?? startTs);
+  const day = dayDate.getUTCDate();
+  const floor = anchorTs != null ? Math.max(startTs, anchorTs) : startTs; // 首次收费日之前不收
+  // 从 floor 所在月开始迭代:floor 之前的收费日都会被跳过,无需更早起步(也避免锚定日过早时耗尽迭代上限)
+  const iterFrom = new Date(floor);
+  let y = iterFrom.getUTCFullYear();
+  let m = iterFrom.getUTCMonth();
   const out: number[] = [];
   for (let i = 0; i < 1200; i++) {
     const d = Math.min(day, daysInYearMonth(y, m));
     const ts = Date.UTC(y, m, d);
     if (ts > endTs) break;
-    if (ts >= startTs) out.push(ts);
+    if (ts >= floor) out.push(ts);
     m += 1;
     if (m > 11) {
       m = 0;
@@ -171,7 +178,8 @@ export function calculateServiceFee(
   const actualEndDateISO = workWeeks[workWeeks.length - 1].workWeekEndISO;
 
   // ================= 费用(每个自然月一行,带去重) =================
-  const scDates = serviceChargeDates(rangeStart, rangeEnd);
+  const anchorTs = inp.serviceChargeAnchorDate ? parseDate(inp.serviceChargeAnchorDate) : null;
+  const scDates = serviceChargeDates(rangeStart, rangeEnd, anchorTs);
   const scByMonth = new Map<string, number>();
   for (const dts of scDates) scByMonth.set(monthKey(dts), dts);
 

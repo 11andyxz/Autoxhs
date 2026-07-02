@@ -7,6 +7,8 @@ export interface ServiceFeeInputs {
   taxWithheldPerPayroll: number; // 每个双周(每 2 个工作周)收一次
   monthlyPayrollFee: number; // 每个自然月收一次(默认 92)
   monthlyServiceCharge: number; // 每个月度周年日收一次(默认 120)
+  /** 选填:Service Fee 起算日/首次收费日('YYYY-MM-DD')。取其「日」为每月收费日,且此日之前不收;留空=按 Start Date 的日 */
+  serviceChargeAnchorDate?: string;
 }
 
 /** 该客户「已经保存(收过)」的费用键,用于跨记录去重 */

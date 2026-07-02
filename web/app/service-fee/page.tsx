@@ -82,6 +82,7 @@ export default function ServiceFeePage() {
   const [taxWithheld, setTaxWithheld] = useState(DEFAULTS.taxWithheld);
   const [payrollFee, setPayrollFee] = useState(DEFAULTS.payrollFee);
   const [serviceCharge, setServiceCharge] = useState(DEFAULTS.serviceCharge);
+  const [serviceChargeAnchor, setServiceChargeAnchor] = useState(""); // 选填:Service Fee 起算日
 
   const [committed, setCommitted] = useState<Committed | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
@@ -127,8 +128,9 @@ export default function ServiceFeePage() {
       taxWithheldPerPayroll: num(taxWithheld, 100),
       monthlyPayrollFee: num(payrollFee, 92),
       monthlyServiceCharge: num(serviceCharge, 120),
+      serviceChargeAnchorDate: serviceChargeAnchor || undefined,
     }),
-    [startDate, endDate, weeklyWorkHours, hourlyWage, taxWithheld, payrollFee, serviceCharge],
+    [startDate, endDate, weeklyWorkHours, hourlyWage, taxWithheld, payrollFee, serviceCharge, serviceChargeAnchor],
   );
 
   const datesOk = !!startDate && !!endDate && parseDate(endDate) >= parseDate(startDate);
@@ -253,6 +255,7 @@ export default function ServiceFeePage() {
     setTaxWithheld(DEFAULTS.taxWithheld);
     setPayrollFee(DEFAULTS.payrollFee);
     setServiceCharge(DEFAULTS.serviceCharge);
+    setServiceChargeAnchor("");
     setCommitted(null);
     setErrors([]);
     setOpenDetail(null);
@@ -539,6 +542,9 @@ export default function ServiceFeePage() {
             </Field>
             <Field label="Monthly Service Charge ($)" hint="每月同一天收一次">
               <input type="number" min={0} step="0.01" value={serviceCharge} onChange={(e) => setServiceCharge(e.target.value)} className={inputCls} />
+            </Field>
+            <Field label="Service Fee 起算日(选填)" hint="首次收费日;留空=按 Start Date 的日。之后每月同一天收一次">
+              <input type="date" value={serviceChargeAnchor} onChange={(e) => setServiceChargeAnchor(e.target.value)} className={inputCls} />
             </Field>
           </div>
         </section>
