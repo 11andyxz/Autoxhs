@@ -76,6 +76,14 @@ const TOOLS: Array<{
     icon: "🪪",
     accent: "violet",
   },
+  {
+    href: "/business-expense",
+    name: "Business 花费",
+    en: "Business Expense Ledger",
+    desc: "公司支出记账本:记录每笔花费、归档发票/凭证,自动按月与类别汇总,可导出 Excel。",
+    icon: "💰",
+    accent: "sky",
+  },
 ];
 
 export default function Home() {
