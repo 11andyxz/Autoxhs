@@ -1,18 +1,22 @@
 ---
 name: aligning-code-requirements
 description: Aligns the user's intent before implementation, then inspects the current repository to identify unresolved product decisions, business rules, edge cases, and implementation-impacting questions. Ask only questions that cannot be answered from the user's confirmed intent or the repository. Do not rewrite the request into a Promptlized implementation brief.
-when_to_use: Trigger at the start of every new feature, bug fix, refactor, UI change, database change, API integration, automation task, or other material coding requirement change. Trigger again only when the user introduces a materially different objective, conflicting requirement, or substantial scope change.
-disallowed-tools:
-  - Write
-  - Edit
-  - NotebookEdit
+when_to_use: Trigger only when a new coding request is genuinely ambiguous — when it could lead to substantially different implementations, or hinges on an unresolved product/business decision. Skip it when the intended outcome is already clear. Trigger again only when the user introduces a materially different objective, conflicting requirement, or substantial scope change.
 ---
 
 # Intent Alignment and Repository Question Workflow
 
 ## Core rule
 
-For every new coding request or material requirement change, follow this sequence before implementation:
+This skill is a lightweight intent check, not a mandatory gate on every task. Default to implementing directly. Use it only when the request is genuinely ambiguous or hinges on an unresolved product/business decision.
+
+When the intended outcome is already clear from the user's message, the conversation, the repository, or established project conventions:
+
+* Do not ask an intent-confirmation question.
+* Do not ask for a second confirmation.
+* Proceed directly to (read-only) inspection and implementation.
+
+Only when a request is genuinely ambiguous — it could lead to substantially different implementations, or a real product/business decision is unresolved — follow this sequence before implementation:
 
 1. Ask the user about their intended outcome.
 2. Confirm the business or product intent.
@@ -20,6 +24,8 @@ For every new coding request or material requirement change, follow this sequenc
 4. Determine whether any implementation-impacting questions remain.
 5. Ask only the unresolved questions.
 6. If no unresolved questions remain, do not ask additional questions and proceed with implementation.
+
+Ask the fewest questions possible — one focused question is usually enough, and often none is needed. Never re-ask something already answered in the conversation or discoverable in the repository.
 
 Do not Promptlize, rewrite, or convert the user's request into a separate implementation prompt.
 
@@ -59,7 +65,9 @@ Fallback: only when the `AskUserQuestion` tool is unavailable in the current env
 
 ## Phase 1: Ask about the user's intent
 
-The first response to a new coding request must focus on what the user is trying to achieve.
+This phase applies **only when the request is genuinely ambiguous** (see Core rule). When the intended outcome is already clear, skip Phase 1 entirely and go straight to inspection/implementation — do not ask an intent-confirmation question.
+
+When the request *is* ambiguous, the first response should focus on what the user is trying to achieve.
 
 ### 1. Infer the likely intent
 
@@ -388,9 +396,11 @@ Small corrections, wording clarifications, and implementation-level feedback do 
 
 ## Required behavior summary
 
-For each new coding task:
+When the intended outcome is already clear: skip straight to read-only inspection and implementation — ask nothing.
 
-1. First ask about and align the user's intent, using the `AskUserQuestion` tool.
+Only when a coding task is genuinely ambiguous:
+
+1. Ask one focused intent question, using the `AskUserQuestion` tool.
 2. Wait for the user's answer.
 3. Inspect the repository using read-only operations.
 4. Ask only questions that the repository and confirmed intent cannot answer, again via the `AskUserQuestion` tool.

@@ -3,6 +3,14 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
+import {
+  clearHandoff,
+  readHandoff,
+  resumeExportFilename,
+  type ResumeExportKind,
+  type ResumeHandoff,
+} from "@/lib/job-hunter/handoff";
+
 // ---------- 类型（对齐 app/api/indeed/* 归一化后的响应） ----------
 
 type ApiResponse<T> = {
@@ -155,7 +163,57 @@ export default function IndeedPage() {
   const [checkingApplied, setCheckingApplied] = useState(false);
   const [appliedError, setAppliedError] = useState<string | null>(null);
 
+  // 从求职神器带入的定制简历（客户端交接，见 lib/job-hunter/handoff）。
+  const [carried, setCarried] = useState<ResumeHandoff | null>(null);
+  const [carriedDownloading, setCarriedDownloading] = useState<ResumeExportKind | null>(null);
+  const [carriedError, setCarriedError] = useState<string | null>(null);
+
   const selectedJob = jobs.find((j) => j.jk === selectedJk) ?? null;
+
+  // 挂载时读取带入的定制简历；若搜索词为空，用简历标题预填，方便直接搜岗位。
+  useEffect(() => {
+    const h = readHandoff();
+    if (!h) return;
+    setCarried(h);
+    setQ((prev) => prev || h.result.resume.headline || "");
+  }, []);
+
+  async function handleDownloadCarried(kind: ResumeExportKind) {
+    if (!carried) return;
+    setCarriedError(null);
+    setCarriedDownloading(kind);
+    try {
+      const res = await fetch("/api/job-hunter/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, result: carried.result }),
+      });
+      if (!res.ok) {
+        const json = (await res.json().catch(() => null)) as { error?: string } | null;
+        setCarriedError(json?.error || "下载失败，请稍后重试。");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = resumeExportFilename(kind, carried.result);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setCarriedError("下载失败，请稍后重试。");
+    } finally {
+      setCarriedDownloading(null);
+    }
+  }
+
+  function handleClearCarried() {
+    clearHandoff();
+    setCarried(null);
+    setCarriedError(null);
+  }
 
   const loadHealth = useCallback(async () => {
     setHealthLoading(true);
@@ -319,6 +377,58 @@ export default function IndeedPage() {
             Indeed 服务在运行、AdsPower 浏览器已打开并登录。
           </p>
         </header>
+
+        {/* 从求职神器带入的定制简历 */}
+        {carried && (
+          <section className="mb-6 rounded-xl border border-cyan-200 bg-cyan-50/60 p-4 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-cyan-900">🎯 已带入定制简历</p>
+                <p className="mt-1 text-xs text-cyan-700">
+                  {carried.result.resume.name}
+                  {carried.result.resume.headline ? ` · ${carried.result.resume.headline}` : ""}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleClearCarried}
+                className="text-xs text-slate-400 hover:text-slate-600"
+              >
+                清除带入
+              </button>
+            </div>
+            <p className="mt-3 text-xs leading-relaxed text-amber-700">
+              ⚠️ 一键投递用的是你 Indeed 账号里保存的简历。请先下载这份定制简历，更新到 Indeed
+              账号（或在投递弹窗中附加），确保投出的是定制版。
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => handleDownloadCarried("resume-docx")}
+                disabled={carriedDownloading !== null}
+                className={`${btnBase} bg-cyan-600 text-white hover:bg-cyan-700`}
+              >
+                {carriedDownloading === "resume-docx" ? "生成中…" : "下载定制简历 Word"}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDownloadCarried("cover-pdf")}
+                disabled={carriedDownloading !== null}
+                className={`${btnBase} border border-cyan-200 bg-white text-cyan-700 hover:bg-cyan-50`}
+              >
+                {carriedDownloading === "cover-pdf" ? "生成中…" : "下载求职信 PDF"}
+              </button>
+              <Link href="/job-hunter" className={`${btnBase} bg-slate-100 text-slate-700 hover:bg-slate-200`}>
+                重新定制
+              </Link>
+            </div>
+            {carriedError && (
+              <div className="mt-2">
+                <Banner tone="error">{carriedError}</Banner>
+              </div>
+            )}
+          </section>
+        )}
 
         {/* 服务状态 */}
         <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">

@@ -4,6 +4,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import {
+  clearHandoff,
+  resumeExportFilename,
+  saveHandoff,
+  type ResumeExportKind,
+} from "@/lib/job-hunter/handoff";
 import { buildResumeHtml } from "@/lib/job-hunter/resumeHtml";
 import type { JobHunterResult } from "@/lib/job-hunter/schema";
 
@@ -21,8 +27,7 @@ type ApiResponse = {
 };
 
 type SourceMode = "file" | "text";
-// 简历 PDF 走浏览器打印,不在此列;这里是服务端导出的文件类型。
-type DownloadKind = "resume-docx" | "cover-pdf" | "analysis-pdf";
+type DownloadKind = ResumeExportKind;
 
 const ACCEPT = ".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
@@ -91,6 +96,19 @@ export default function JobHunterPage() {
     } finally {
       setStartingTraining(false);
     }
+  }
+
+  // 带着定制简历 + JD 进入投递步骤（客户端交接，见 lib/job-hunter/handoff）。
+  function handleGoApply() {
+    if (!result) return;
+    saveHandoff({ result, jdText: resolvedJd, savedAt: Date.now() });
+    router.push("/indeed");
+  }
+
+  // 跳过定制，直接去投递：清掉任何旧的交接，避免投递页残留上一次的定制简历。
+  function handleSkipToApply() {
+    clearHandoff();
+    router.push("/indeed");
   }
 
   useEffect(() => {
@@ -173,7 +191,7 @@ export default function JobHunterPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = filenameFor(kind, result);
+      a.download = resumeExportFilename(kind, result);
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -200,7 +218,17 @@ export default function JobHunterPage() {
             一键把简历改写成「为这份 JD 定制」
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-500">
-            上传你的简历，再贴上目标岗位的 JD，AI 会按岗位重排经历、强化关键词，并生成求职信和匹配分析，导出 PDF / Word。
+            上传你的简历，再贴上目标岗位的 JD，AI 会按岗位重排经历、强化关键词，并生成求职信和匹配分析，导出 PDF / Word；生成后可直接带着这份简历去投递 Indeed。
+          </p>
+          <p className="mt-2 text-xs text-slate-400">
+            已经有满意的简历了？
+            <button
+              type="button"
+              onClick={handleSkipToApply}
+              className="font-medium text-sky-600 hover:text-sky-700"
+            >
+              跳过定制，直接去投递 Indeed →
+            </button>
           </p>
         </header>
 
@@ -266,6 +294,23 @@ export default function JobHunterPage() {
         {/* 结果 */}
         {result && (
           <div ref={resultRef} className="mt-10 space-y-6">
+            <div className="rounded-2xl border border-sky-200 bg-sky-50/60 p-5 shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-sky-900">🚀 带这份定制简历去投递 Indeed</p>
+                  <p className="mt-1 text-xs leading-relaxed text-sky-700">
+                    会把这份定制简历和 JD 带到投递页；投递前记得把它下载并更新到你的 Indeed 账号简历，确保投出的是定制版。
+                  </p>
+                </div>
+                <button
+                  onClick={handleGoApply}
+                  className="shrink-0 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-700"
+                >
+                  去投递 Indeed →
+                </button>
+              </div>
+            </div>
+
             <div className="rounded-2xl border border-cyan-200 bg-cyan-50/60 p-5 shadow-sm">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
@@ -303,18 +348,6 @@ export default function JobHunterPage() {
       </div>
     </main>
   );
-}
-
-function filenameFor(kind: DownloadKind, result: JobHunterResult): string {
-  const name = result.resume.name.trim().replace(/\s+/g, "_") || "candidate";
-  switch (kind) {
-    case "resume-docx":
-      return `Resume_${name}.docx`;
-    case "cover-pdf":
-      return `Cover_Letter_${name}.pdf`;
-    case "analysis-pdf":
-      return "Match_Report.pdf";
-  }
 }
 
 /* ---------- 子组件 ---------- */

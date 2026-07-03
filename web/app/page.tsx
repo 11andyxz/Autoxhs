@@ -62,9 +62,9 @@ const TOOLS: Array<{
   },
   {
     href: "/job-hunter",
-    name: "求职神器",
-    en: "Resume Tailor",
-    desc: "上传简历 + 目标 JD,AI 按岗位重排经历、强化关键词,生成定制简历、求职信与匹配分析,导出 PDF / Word。",
+    name: "求职投递一条龙",
+    en: "Tailor & Apply",
+    desc: "上传简历 + 目标 JD,AI 定制简历、求职信与匹配分析;再带着这份定制简历直接一键投递 Indeed。投递需本地 Indeed 服务 + 已登录浏览器。",
     icon: "🎯",
     accent: "cyan",
   },
@@ -75,14 +75,6 @@ const TOOLS: Array<{
     desc: "录入雇员基本信息,上传文件并按分类(如 i983)归档,Save 后存入数据库,可随时下载。",
     icon: "🪪",
     accent: "violet",
-  },
-  {
-    href: "/indeed",
-    name: "一键投递 Indeed",
-    en: "Indeed One-Click Apply",
-    desc: "搜索 Indeed 岗位,查看雇主问题与自动答案,先预演再一键投递,并复核投递状态。需本地 Indeed 服务 + 已登录浏览器。",
-    icon: "🚀",
-    accent: "sky",
   },
 ];
 
