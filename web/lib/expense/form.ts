@@ -68,6 +68,8 @@ export function parseExpenseForm(form: FormData): ParsedExpenseForm {
     return typeof v === "string" ? v : "";
   };
   const expense = trimExpense({
+    businessId: str("businessId"),
+    type: str("type"),
     spentOn: str("spentOn"),
     amount: str("amount"),
     category: str("category"),

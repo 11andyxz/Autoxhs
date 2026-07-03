@@ -16,10 +16,27 @@ export const dynamic = "force-dynamic";
 const DRY_RUN_TIMEOUT_MS = 90_000;
 const CONFIRM_TIMEOUT_MS = 120_000;
 
+type ApplyAnswer = { questionId: string; value: string };
+
 type ApplyRequest = {
   jk?: string;
   confirm?: boolean;
+  answers?: ApplyAnswer[];
 };
+
+/** 清洗客户端传来的答案:只保留 {questionId, value:string}。 */
+function sanitizeAnswers(raw: unknown): ApplyAnswer[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw
+    .map((item) => {
+      const a = (item ?? {}) as Record<string, unknown>;
+      const questionId = typeof a.questionId === "string" ? a.questionId : "";
+      if (!questionId) return null;
+      return { questionId, value: a.value == null ? "" : String(a.value) };
+    })
+    .filter((a): a is ApplyAnswer => a !== null);
+  return out.length ? out : undefined;
+}
 
 /** submit_fields（dry-run 里被服务截断为 24 字符，仅供展示）。 */
 function normalizeSubmitFields(raw: unknown) {
@@ -72,10 +89,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: "缺少岗位 jk。" }, { status: 400 });
   }
   const confirm = body.confirm === true;
+  const answers = sanitizeAnswers(body.answers);
 
   const result = await callIndeed("/indeed/apply", {
     method: "POST",
     query: { jk, confirm: confirm ? "1" : "0" },
+    // 把用户/知识库确认过的答案带给本地服务;不传则服务侧仍走默认自动答。
+    ...(answers ? { body: { answers } } : {}),
     timeoutMs: confirm ? CONFIRM_TIMEOUT_MS : DRY_RUN_TIMEOUT_MS,
   });
   if (result.kind !== "ok") {

@@ -45,6 +45,7 @@ export async function callIndeed(
   opts: {
     method?: "GET" | "POST";
     query?: Record<string, string | number | undefined>;
+    body?: unknown;
     timeoutMs: number;
   },
 ): Promise<IndeedCallResult> {
@@ -56,7 +57,14 @@ export async function callIndeed(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
   try {
-    const res = await fetch(url, { method: opts.method ?? "GET", signal: controller.signal });
+    const hasBody = opts.body !== undefined;
+    const res = await fetch(url, {
+      method: opts.method ?? (hasBody ? "POST" : "GET"),
+      signal: controller.signal,
+      ...(hasBody
+        ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(opts.body) }
+        : {}),
+    });
     const text = await res.text();
     try {
       return { kind: "ok", status: res.status, json: JSON.parse(text) as ServiceJson };

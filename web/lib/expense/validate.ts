@@ -6,23 +6,31 @@
  * 这里也复制通用的文件名工具,保持 expense 功能与其他功能解耦。
  */
 
+/** 收支类型 */
+export type ExpenseType = "expense" | "income";
+export const EXPENSE_TYPES: ExpenseType[] = ["expense", "income"];
+
 export interface ExpenseInput {
-  /** 花费日期(YYYY-MM-DD) */
+  /** 所属 business(大分类)的 id,表单里是字符串 */
+  businessId: string;
+  /** 收支类型:expense=支出,income=收入 */
+  type: string;
+  /** 花费/收入日期(YYYY-MM-DD) */
   spentOn: string;
-  /** 金额(USD),表单里是字符串,落库前用 parseAmount 归一为数字 */
+  /** 金额(USD,恒为正),表单里是字符串,落库前用 parseAmount 归一为数字 */
   amount: string;
-  /** 类别,如「办公用品」「差旅交通」 */
+  /** 类别,如「办公用品」「服务收入」 */
   category: string;
-  /** 收款方 / 商家(选填) */
+  /** 收款方 / 付款方 / 商家(选填) */
   vendor: string;
-  /** 付款方式,如「信用卡」「现金」(选填) */
+  /** 付款方式,如「信用卡」「银行转账」(选填) */
   paymentMethod: string;
   /** 备注(选填) */
   note: string;
 }
 
-/** 类别候选(datalist 提示,不强制) */
-export const CATEGORY_PRESETS = [
+/** 支出类别候选(datalist 提示,不强制) */
+export const EXPENSE_CATEGORY_PRESETS = [
   "办公用品",
   "差旅交通",
   "软件订阅",
@@ -34,6 +42,18 @@ export const CATEGORY_PRESETS = [
   "水电房租",
   "专业服务",
   "税费",
+  "其他",
+] as const;
+
+/** 收入类别候选(datalist 提示,不强制) */
+export const INCOME_CATEGORY_PRESETS = [
+  "服务收入",
+  "产品销售",
+  "咨询费",
+  "佣金",
+  "利息",
+  "退款/返还",
+  "投资",
   "其他",
 ] as const;
 
@@ -67,6 +87,7 @@ export const MAX_CATEGORY_LEN = 100;
 export const MAX_VENDOR_LEN = 255;
 export const MAX_PAYMENT_LEN = 50;
 export const MAX_NOTE_LEN = 2000;
+export const MAX_BUSINESS_LEN = 255;
 /** 金额上限:99,999,999.99(DECIMAL(12,2) 内的合理业务上限) */
 export const MAX_AMOUNT = 99_999_999.99;
 
@@ -124,21 +145,34 @@ export function parseAmount(raw: string): number | null {
   return Math.round(n * 100) / 100;
 }
 
-/** 校验花费记录,返回中文错误列表(空数组=通过)。客户端与服务端都调用。 */
+/** 把 business id 字符串解析成正整数,非法返回 null。 */
+export function parseBusinessId(raw: string): number | null {
+  const n = Number((raw ?? "").trim());
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+export function isExpenseType(t: string): t is ExpenseType {
+  return t === "expense" || t === "income";
+}
+
+/** 校验收支记录,返回中文错误列表(空数组=通过)。客户端与服务端都调用。 */
 export function validateExpense(e: ExpenseInput): string[] {
   const errs: string[] = [];
 
-  if (!e.spentOn?.trim()) errs.push("请选择花费日期。");
-  else if (!isValidDateStr(e.spentOn.trim())) errs.push("花费日期格式不正确(应为 YYYY-MM-DD)。");
+  if (parseBusinessId(e.businessId) === null) errs.push("请选择所属 business。");
+  if (!isExpenseType(e.type)) errs.push("请选择类型(支出 / 收入)。");
+
+  if (!e.spentOn?.trim()) errs.push("请选择日期。");
+  else if (!isValidDateStr(e.spentOn.trim())) errs.push("日期格式不正确(应为 YYYY-MM-DD)。");
 
   if (!e.amount?.trim()) errs.push("请填写金额。");
   else if (parseAmount(e.amount) === null) errs.push("金额不正确(需为大于 0 且不超过 99,999,999.99 的数字,最多两位小数)。");
 
   const category = e.category?.trim() ?? "";
-  if (!category) errs.push("请填写类别(如 办公用品)。");
+  if (!category) errs.push("请填写类别。");
   else if (category.length > MAX_CATEGORY_LEN) errs.push("类别过长。");
 
-  if ((e.vendor?.trim().length ?? 0) > MAX_VENDOR_LEN) errs.push("收款方过长。");
+  if ((e.vendor?.trim().length ?? 0) > MAX_VENDOR_LEN) errs.push("收款方/付款方过长。");
   if ((e.paymentMethod?.trim().length ?? 0) > MAX_PAYMENT_LEN) errs.push("付款方式过长。");
   if ((e.note?.trim().length ?? 0) > MAX_NOTE_LEN) errs.push("备注过长(请控制在 2000 字以内)。");
 
@@ -148,6 +182,8 @@ export function validateExpense(e: ExpenseInput): string[] {
 /** trim 各字段(用于落库前归一)。 */
 export function trimExpense(e: ExpenseInput): ExpenseInput {
   return {
+    businessId: e.businessId.trim(),
+    type: e.type.trim(),
     spentOn: e.spentOn.trim(),
     amount: e.amount.trim(),
     category: e.category.trim(),
@@ -155,4 +191,17 @@ export function trimExpense(e: ExpenseInput): ExpenseInput {
     paymentMethod: (e.paymentMethod ?? "").trim(),
     note: (e.note ?? "").trim(),
   };
+}
+
+/** business 名归一化:去首尾空格 + 小写(用于唯一识别)。 */
+export function normalizeBusinessName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/** 校验 business 名,返回中文错误(通过返回 null)。 */
+export function validateBusinessName(name: string): string | null {
+  const n = (name ?? "").trim();
+  if (!n) return "请填写 business 名称。";
+  if (n.length > MAX_BUSINESS_LEN) return "business 名称过长。";
+  return null;
 }

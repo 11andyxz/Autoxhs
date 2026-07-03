@@ -1,10 +1,10 @@
 /**
- * 把花费记账本导出为 Excel(仅服务器端)。
- * Sheet1 明细 / Sheet2 按类别汇总 / Sheet3 按月汇总。样式沿用收费计算器导出的风格。
+ * 把记账本导出为 Excel(仅服务器端)。
+ * Sheet1 明细 / Sheet2 按 business / Sheet3 按类别 / Sheet4 按月。样式沿用收费计算器导出的风格。
  */
 import ExcelJS from "exceljs";
 
-import type { ExpenseSummary, ExpenseWithFiles } from "./repo";
+import type { BusinessTotal, ExpenseSummary, ExpenseWithFiles } from "./repo";
 
 const MONEY_FMT = '"$"#,##0.00';
 const DATE_FMT = "yyyy-mm-dd";
@@ -13,6 +13,10 @@ const HEADER_BG = "FF334155";
 function xlDate(iso: string): Date {
   const [y, m, d] = iso.split("-").map(Number);
   return new Date(y, m - 1, d);
+}
+
+function typeLabel(t: string): string {
+  return t === "income" ? "收入" : "支出";
 }
 
 function styleSheet(ws: ExcelJS.Worksheet, headerLen: number, moneyCols: number[], dateCols: number[]) {
@@ -38,10 +42,11 @@ function styleSheet(ws: ExcelJS.Worksheet, headerLen: number, moneyCols: number[
   });
 }
 
-/** 由花费列表 + 汇总生成工作簿。 */
+/** 由收支列表 + 汇总生成工作簿。 */
 export async function buildExpenseWorkbook(
   expenses: ExpenseWithFiles[],
   summary: ExpenseSummary,
+  businessTotals: BusinessTotal[],
   generatedAt: string,
 ): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
@@ -50,10 +55,12 @@ export async function buildExpenseWorkbook(
   // ---------------- Sheet 1: 明细 ----------------
   const detail = wb.addWorksheet("明细 Detail");
   detail.columns = [
+    { header: "Business", key: "business" },
+    { header: "类型 Type", key: "type" },
     { header: "日期 Date", key: "date" },
     { header: "金额 Amount", key: "amount" },
     { header: "类别 Category", key: "category" },
-    { header: "收款方 Vendor", key: "vendor" },
+    { header: "对方 Vendor", key: "vendor" },
     { header: "付款方式 Payment", key: "payment" },
     { header: "备注 Note", key: "note" },
     { header: "凭证 Receipts", key: "receipts" },
@@ -61,6 +68,8 @@ export async function buildExpenseWorkbook(
   ];
   for (const e of expenses) {
     detail.addRow({
+      business: e.businessName,
+      type: typeLabel(e.type),
       date: xlDate(e.spentOn),
       amount: e.amount,
       category: e.category,
@@ -71,36 +80,63 @@ export async function buildExpenseWorkbook(
       createdAt: e.createdAt,
     });
   }
-  // 合计行
-  const totalRow = detail.addRow({ date: undefined, amount: summary.grandTotal, category: "合计 Total" });
+  const totalRow = detail.addRow({
+    business: "合计 Total",
+    type: `收入 ${summary.income} / 支出 ${summary.expense}`,
+    amount: summary.net,
+    category: "净额 Net",
+  });
   totalRow.font = { bold: true };
-  styleSheet(detail, 8, [2], [1]);
+  styleSheet(detail, 10, [4], [3]);
 
-  // ---------------- Sheet 2: 按类别 ----------------
+  // ---------------- Sheet 2: 按 business ----------------
+  const byBiz = wb.addWorksheet("按 business");
+  byBiz.columns = [
+    { header: "Business", key: "business" },
+    { header: "笔数 Count", key: "count" },
+    { header: "收入 Income", key: "income" },
+    { header: "支出 Expense", key: "expense" },
+    { header: "净额 Net", key: "net" },
+  ];
+  for (const b of businessTotals) {
+    byBiz.addRow({ business: b.businessName, count: b.count, income: b.income, expense: b.expense, net: b.net });
+  }
+  styleSheet(byBiz, 5, [3, 4, 5], []);
+
+  // ---------------- Sheet 3: 按类别 ----------------
   const byCat = wb.addWorksheet("按类别 By Category");
   byCat.columns = [
+    { header: "类型 Type", key: "type" },
     { header: "类别 Category", key: "category" },
     { header: "笔数 Count", key: "count" },
     { header: "合计 Total", key: "total" },
   ];
-  for (const c of summary.byCategory) {
-    byCat.addRow({ category: c.category, count: c.count, total: c.total });
+  for (const c of summary.byCategory.expense) {
+    byCat.addRow({ type: "支出", category: c.category, count: c.count, total: c.total });
   }
-  styleSheet(byCat, 3, [3], []);
+  for (const c of summary.byCategory.income) {
+    byCat.addRow({ type: "收入", category: c.category, count: c.count, total: c.total });
+  }
+  styleSheet(byCat, 4, [4], []);
 
-  // ---------------- Sheet 3: 按月 ----------------
+  // ---------------- Sheet 4: 按月 ----------------
   const byMonth = wb.addWorksheet("按月 By Month");
   byMonth.columns = [
     { header: "月份 Month", key: "month" },
-    { header: "笔数 Count", key: "count" },
-    { header: "合计 Total", key: "total" },
+    { header: "收入 Income", key: "income" },
+    { header: "支出 Expense", key: "expense" },
+    { header: "净额 Net", key: "net" },
   ];
   for (const m of summary.byMonth) {
-    byMonth.addRow({ month: m.month, count: m.count, total: m.total });
+    byMonth.addRow({
+      month: m.month,
+      income: m.income,
+      expense: m.expense,
+      net: Math.round((m.income - m.expense) * 100) / 100,
+    });
   }
-  styleSheet(byMonth, 3, [3], []);
+  styleSheet(byMonth, 4, [2, 3, 4], []);
 
-  // 页脚说明
   const foot = byMonth.addRow({ month: `导出于 ${generatedAt}` });
   foot.font = { italic: true, color: { argb: "FF94A3B8" } };
 

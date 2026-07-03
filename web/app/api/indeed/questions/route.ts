@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { matchQuestions } from "@/lib/indeed/kb";
 import {
   callIndeed,
   extractServiceError,
@@ -37,6 +38,8 @@ export async function GET(req: NextRequest) {
   }
 
   const questions = normalizeQuestions(json.questions);
+  // 附上知识库命中(精确/相似),供前端预填答案;KB 出错不影响问题本身返回。
+  const matches = await matchQuestions(questions);
   return NextResponse.json({
     success: true,
     data: {
@@ -44,6 +47,7 @@ export async function GET(req: NextRequest) {
       draftId: typeof json.draft_id === "string" ? json.draft_id : "",
       count: questions.length,
       questions,
+      matches,
     },
   });
 }

@@ -78,9 +78,9 @@ const TOOLS: Array<{
   },
   {
     href: "/business-expense",
-    name: "Business 花费",
-    en: "Business Expense Ledger",
-    desc: "公司支出记账本:记录每笔花费、归档发票/凭证,自动按月与类别汇总,可导出 Excel。",
+    name: "Business 记账本",
+    en: "Business Ledger",
+    desc: "多 business 分账的收支记账本:记录收入/支出、归档发票凭证,自动汇总收支净额与按月/类别分布,可导出 Excel。",
     icon: "💰",
     accent: "sky",
   },

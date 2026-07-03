@@ -8,6 +8,7 @@ import {
   readCappedFormData,
 } from "@/lib/expense/form";
 import {
+  businessExists,
   deleteExpenseById,
   ensureExpenseSchema,
   expenseExists,
@@ -55,6 +56,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   if (!parsed.ok) return bad(parsed.error);
 
   await ensureExpenseSchema();
+  if (!(await businessExists(Number(parsed.expense.businessId)))) {
+    return bad("所选 business 不存在,请重新选择。");
+  }
   const conn = await getPool().getConnection();
   const writtenPaths: string[] = [];
   try {
@@ -71,6 +75,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     await conn.rollback().catch(() => {});
     await Promise.all(writtenPaths.map((p) => removeFileSafe(p)));
     const code = (err as { code?: string } | null)?.code;
+    if (code === "ER_NO_REFERENCED_ROW_2" || code === "ER_NO_REFERENCED_ROW") {
+      return bad("所选 business 不存在,请重新选择。");
+    }
     if (typeof code === "string" && (code.startsWith("ER_") || code === "ECONNREFUSED" || code === "PROTOCOL_CONNECTION_LOST")) {
       console.error("[expense/update] DB 错误", { code });
       return bad("数据库暂时不可用,请稍后重试。", 503);

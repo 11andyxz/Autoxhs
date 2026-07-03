@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   clearHandoff,
@@ -46,6 +46,14 @@ type Question = {
 };
 
 type Answer = { questionId: string; value: string };
+
+type KbMatch = {
+  questionId: string;
+  source: "exact" | "similar";
+  value: string;
+  valueLabel: string | null;
+  confidence: number;
+};
 
 type DryRun = {
   jk: string;
@@ -126,6 +134,65 @@ function Banner({ tone, children }: { tone: "info" | "success" | "error"; childr
 const btnBase =
   "inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50";
 
+/** 知识库命中徽章：精确 / 相似 / 需你填写。 */
+function KbBadge({ match }: { match: KbMatch | undefined }) {
+  if (!match) {
+    return (
+      <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+        需你填写
+      </span>
+    );
+  }
+  if (match.source === "exact") {
+    return (
+      <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+        知识库 · 自动
+      </span>
+    );
+  }
+  return (
+    <span className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
+      类似 · 请确认（{Math.round(match.confidence * 100)}%）
+    </span>
+  );
+}
+
+/** 单题作答输入：有选项 → 下拉；否则文本/数字输入。 */
+function AnswerInput({
+  q,
+  value,
+  onChange,
+}: {
+  q: Question;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const cls =
+    "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-400";
+  if (q.options && q.options.length > 0) {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={cls}>
+        <option value="">请选择…</option>
+        {q.options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  const numeric = /number|numeric|integer/i.test(q.type);
+  return (
+    <input
+      type={numeric ? "number" : "text"}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder="请输入你的答案"
+      className={cls}
+    />
+  );
+}
+
 // ---------- 页面 ----------
 
 export default function IndeedPage() {
@@ -167,6 +234,12 @@ export default function IndeedPage() {
   const [carried, setCarried] = useState<ResumeHandoff | null>(null);
   const [carriedDownloading, setCarriedDownloading] = useState<ResumeExportKind | null>(null);
   const [carriedError, setCarriedError] = useState<string | null>(null);
+
+  // 雇主问题作答 + 知识库预填
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [matches, setMatches] = useState<Record<string, KbMatch>>({});
+  const [savingKb, setSavingKb] = useState(false);
+  const panelRef = useRef<HTMLElement | null>(null);
 
   const selectedJob = jobs.find((j) => j.jk === selectedJk) ?? null;
 
@@ -231,9 +304,19 @@ export default function IndeedPage() {
     void loadHealth();
   }, [loadHealth]);
 
+  // 选中岗位后自动读取雇主问题 + 知识库预填,并滚动到投递面板。
+  useEffect(() => {
+    if (!selectedJk) return;
+    void handleLoadQuestions(selectedJk);
+    panelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedJk]);
+
   function resetSelectionState() {
     setQuestions(null);
     setQuestionsError(null);
+    setAnswers({});
+    setMatches({});
     setDryRun(null);
     setPreviewError(null);
     setPreviewedJk(null);
@@ -276,16 +359,87 @@ export default function IndeedPage() {
     setSearching(false);
   }
 
-  async function handleLoadQuestions() {
-    if (!selectedJk || questionsLoading) return;
+  async function handleLoadQuestions(jkArg?: string) {
+    const jk = jkArg ?? selectedJk;
+    if (!jk || questionsLoading) return;
     setQuestionsLoading(true);
     setQuestionsError(null);
-    const res = await callApi<{ questions: Question[] }>(
-      `/api/indeed/questions?jk=${encodeURIComponent(selectedJk)}`,
+    const res = await callApi<{ questions: Question[]; matches?: Record<string, KbMatch> }>(
+      `/api/indeed/questions?jk=${encodeURIComponent(jk)}`,
     );
-    if (res.success && res.data) setQuestions(res.data.questions);
-    else setQuestionsError(res.error ?? "读取雇主问题失败。");
+    if (res.success && res.data) {
+      setQuestions(res.data.questions);
+      const m = res.data.matches ?? {};
+      setMatches(m);
+      // 用知识库命中预填答案(精确+相似都预填;相似会在 UI 标注请你确认)。
+      const init: Record<string, string> = {};
+      for (const qq of res.data.questions) {
+        const hit = m[qq.id];
+        if (hit) init[qq.id] = hit.value;
+      }
+      setAnswers(init);
+    } else {
+      setQuestionsError(res.error ?? "读取雇主问题失败。");
+    }
     setQuestionsLoading(false);
+  }
+
+  function setAnswer(qid: string, value: string) {
+    setAnswers((prev) => ({ ...prev, [qid]: value }));
+  }
+
+  /** 当前面板要提交/入库的题目集合。 */
+  function currentQuestions(): Question[] {
+    return questions ?? [];
+  }
+
+  /** 传给投递接口的答案(只带已填的;空的留给服务端默认自动答)。 */
+  function answersPayload(): Answer[] {
+    return currentQuestions()
+      .map((qq) => ({ questionId: qq.id, value: (answers[qq.id] ?? "").toString() }))
+      .filter((a) => a.questionId && a.value.trim().length > 0);
+  }
+
+  /** 未回答的必填题(用于禁用预演)。 */
+  const requiredUnanswered = currentQuestions().filter(
+    (qq) => qq.required && !(answers[qq.id] ?? "").toString().trim(),
+  );
+
+  /** 保存到知识库:把每道题连同当前答案(含选项 label)写库,仅存有值的。 */
+  async function saveAnswersToKb() {
+    const items = currentQuestions()
+      .map((qq) => {
+        const value = (answers[qq.id] ?? "").toString();
+        const valueLabel = qq.options?.find((o) => o.value === value)?.label ?? null;
+        return { label: qq.label, type: qq.type, options: qq.options, value, valueLabel };
+      })
+      .filter((it) => it.value.trim().length > 0);
+    if (!items.length) return;
+    setSavingKb(true);
+    // 尽力而为:入库失败不阻断投递(答案仍会随预演发给服务)。
+    await callApi("/api/indeed/kb/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items }),
+    });
+    setSavingKb(false);
+  }
+
+  /** 卡片上的「一键投递」入口:选中岗位(触发自动读题/预填)。 */
+  function startApplyForJob(jk: string) {
+    if (jk === selectedJk) {
+      void handleLoadQuestions(jk);
+      panelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    selectJob(jk); // selectedJk 变化会触发上面的 effect 自动读题 + 滚动
+  }
+
+  /** ① 保存答案入库 → 预演。 */
+  async function handleSaveAndPreview() {
+    if (!selectedJk || previewing || savingKb) return;
+    await saveAnswersToKb();
+    await handlePreview();
   }
 
   async function handlePreview() {
@@ -300,7 +454,7 @@ export default function IndeedPage() {
     const res = await callApi<DryRun>("/api/indeed/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jk: selectedJk, confirm: false }),
+      body: JSON.stringify({ jk: selectedJk, confirm: false, answers: answersPayload() }),
     });
     if (res.success && res.data) {
       setDryRun(res.data);
@@ -325,7 +479,7 @@ export default function IndeedPage() {
     const res = await callApi<SubmitResult>("/api/indeed/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jk: selectedJk, confirm: true }),
+      body: JSON.stringify({ jk: selectedJk, confirm: true, answers: answersPayload() }),
     });
     if (res.success && res.data) {
       setSubmitResult(res.data);
@@ -498,21 +652,24 @@ export default function IndeedPage() {
               <input
                 type="number"
                 min={1}
-                max={30}
+                max={1000}
                 value={limit}
                 onChange={(e) => setLimit(Number(e.target.value) || 10)}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-400"
               />
             </div>
           </div>
-          <div className="mt-3">
+          <div className="mt-3 flex flex-wrap items-center gap-3">
             <button
               type="submit"
               disabled={searching || !q.trim()}
               className={`${btnBase} bg-sky-600 text-white hover:bg-sky-700`}
             >
-              {searching ? "搜索中…" : "搜索岗位"}
+              {searching ? "搜索中…（数量大时可能较久）" : "搜索岗位"}
             </button>
+            <span className="text-xs text-slate-400">
+              数量最多 1000；服务端按页抓取，数量越大越慢（上百条可能要 1–2 分钟），也更易触发反爬。
+            </span>
           </div>
           {searchError && (
             <div className="mt-3">
@@ -531,16 +688,14 @@ export default function IndeedPage() {
             {jobs.map((job) => {
               const isSelected = job.jk === selectedJk;
               return (
-                <button
+                <div
                   key={job.jk}
-                  type="button"
                   onClick={() => job.indeedApply && selectJob(job.jk)}
-                  disabled={!job.indeedApply}
                   className={`w-full rounded-xl border p-4 text-left transition ${
                     isSelected
                       ? "border-sky-400 bg-sky-50 shadow-sm"
                       : job.indeedApply
-                        ? "border-slate-200 bg-white hover:border-sky-300 hover:shadow-sm"
+                        ? "cursor-pointer border-slate-200 bg-white hover:border-sky-300 hover:shadow-sm"
                         : "border-slate-200 bg-slate-50 opacity-70"
                   }`}
                 >
@@ -553,16 +708,28 @@ export default function IndeedPage() {
                       </p>
                     </div>
                     {job.indeedApply ? (
-                      <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                        可一键投递
-                      </span>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                          可一键投递
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            startApplyForJob(job.jk);
+                          }}
+                          className={`${btnBase} bg-sky-600 px-3 py-1.5 text-white hover:bg-sky-700`}
+                        >
+                          {isSelected ? "投递中 ↓" : "一键投递 →"}
+                        </button>
+                      </div>
                     ) : (
                       <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-500">
                         不支持
                       </span>
                     )}
                   </div>
-                </button>
+                </div>
               );
             })}
           </div>
@@ -570,59 +737,72 @@ export default function IndeedPage() {
 
         {/* 选中岗位的投递面板 */}
         {selectedJob && (
-          <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <section ref={panelRef} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
             <h2 className="text-lg font-semibold text-slate-900">{selectedJob.title}</h2>
             <p className="text-sm text-slate-500">
               {selectedJob.company}
               {selectedJob.location ? ` · ${selectedJob.location}` : ""} · jk: {selectedJob.jk}
             </p>
 
-            {/* 雇主问题（只读） */}
+            {/* 雇主问题（作答 + 知识库预填） */}
             <div className="mt-4">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-800">雇主问题</p>
                 <button
                   type="button"
-                  onClick={handleLoadQuestions}
+                  onClick={() => handleLoadQuestions()}
                   disabled={questionsLoading}
-                  className={`${btnBase} bg-slate-100 text-slate-700 hover:bg-slate-200`}
+                  className="text-xs text-slate-400 hover:text-slate-600 disabled:opacity-50"
                 >
-                  {questionsLoading ? "读取中…" : "查看雇主问题"}
+                  {questionsLoading ? "读取中…" : "重新读取"}
                 </button>
-                <span className="text-xs text-slate-400">
-                  自动答案由本地服务按默认策略生成，仅供查看，不可在此编辑。
-                </span>
               </div>
+              <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                知识库会自动预填：<span className="text-emerald-600">精确命中</span>直接填、
+                <span className="text-sky-600">相似命中</span>请你过目确认、其余需你填写。点「保存并预演」时会把答案存入知识库，下次自动作答。
+              </p>
               {questionsError && (
                 <div className="mt-2">
                   <Banner tone="error">{questionsError}</Banner>
                 </div>
               )}
-              {questions && (
+              {questionsLoading && !questions && (
+                <p className="mt-3 text-xs text-slate-400">正在读取雇主问题…</p>
+              )}
+              {questions && questions.length === 0 && !questionsLoading && (
                 <div className="mt-3">
-                  {questions.length === 0 ? (
-                    <Banner tone="info">该岗位没有额外的雇主问题。</Banner>
-                  ) : (
-                    <ul className="space-y-2">
-                      {questions.map((qq, i) => (
-                        <li key={qq.id || i} className="rounded-lg border border-slate-200 p-3 text-sm">
-                          <p className="font-medium text-slate-800">
-                            {qq.label}{" "}
-                            <span className="text-xs font-normal text-slate-400">
-                              [{qq.type}
-                              {qq.required ? " · 必填" : ""}]
-                            </span>
-                          </p>
-                          <p className="mt-1 text-slate-600">
-                            自动答案：
-                            <span className="font-medium text-sky-700">
-                              {answerLabel(qq, qq.autoAnswer ?? "")}
-                            </span>
-                          </p>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                  <Banner tone="info">该岗位没有额外的雇主问题，可直接预演。</Banner>
                 </div>
+              )}
+              {questions && questions.length > 0 && (
+                <ul className="mt-3 space-y-3">
+                  {questions.map((qq, i) => (
+                    <li key={qq.id || i} className="rounded-lg border border-slate-200 p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-sm font-medium text-slate-800">
+                          {qq.label}{" "}
+                          <span className="text-xs font-normal text-slate-400">
+                            [{qq.type}
+                            {qq.required ? " · 必填" : ""}]
+                          </span>
+                        </p>
+                        <KbBadge match={matches[qq.id]} />
+                      </div>
+                      <div className="mt-2">
+                        <AnswerInput
+                          q={qq}
+                          value={answers[qq.id] ?? ""}
+                          onChange={(v) => setAnswer(qq.id, v)}
+                        />
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {requiredUnanswered.length > 0 && (
+                <p className="mt-2 text-xs text-amber-600">
+                  还有 {requiredUnanswered.length} 道必填题未回答，回答后才能预演。
+                </p>
               )}
             </div>
 
@@ -631,11 +811,17 @@ export default function IndeedPage() {
               <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
-                  onClick={handlePreview}
-                  disabled={previewing}
+                  onClick={handleSaveAndPreview}
+                  disabled={previewing || savingKb || questionsLoading || requiredUnanswered.length > 0}
                   className={`${btnBase} bg-slate-800 text-white hover:bg-slate-900`}
                 >
-                  {previewing ? "预演中…（最长 90 秒）" : "① 预演（不投递）"}
+                  {savingKb
+                    ? "保存答案中…"
+                    : previewing
+                      ? "预演中…（最长 90 秒）"
+                      : questions && questions.length > 0
+                        ? "① 保存答案并预演"
+                        : "① 预演（不投递）"}
                 </button>
                 <button
                   type="button"

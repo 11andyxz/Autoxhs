@@ -11,7 +11,7 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const MAX_LIMIT = 30;
+const MAX_LIMIT = 1000;
 
 type ServiceJob = {
   jk?: unknown;
@@ -33,7 +33,9 @@ function normalizeJob(raw: ServiceJob) {
 
 /**
  * GET /api/indeed/search?q=&l=&limit= —— 转发 GET /indeed/search 搜岗位。
- * q 必填；l(地点)可空；limit 默认 10、上限 30。只有 indeedApply=true 的岗位能一键投递。
+ * q 必填；l(地点)可空；limit 默认 10、上限 1000。本地服务按页抓取(每页约 15 条)，
+ * limit 越大越慢(可能翻数十页)、也更易触发反爬；Indeed 没有更多岗位时会提前收敛。
+ * 只有 indeedApply=true 的岗位能一键投递。
  */
 export async function GET(req: NextRequest) {
   const limited = rateLimitedResponse(req);
@@ -55,7 +57,8 @@ export async function GET(req: NextRequest) {
 
   const result = await callIndeed("/indeed/search", {
     query: { q, l: l || undefined, limit },
-    timeoutMs: 40_000,
+    // 大 limit 会在本地服务侧翻多页，放宽超时以容纳深翻页（服务无更多结果时会提前返回）。
+    timeoutMs: 180_000,
   });
   if (result.kind !== "ok") return transportErrorResponse(result, "搜索超时，请重试。");
 
