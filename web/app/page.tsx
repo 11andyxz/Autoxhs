@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: "Autoxhs 内部小工具集合。",
 };
 
-type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky";
+type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky" | "amber";
 
 const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string }> = {
   rose: {
@@ -33,6 +33,11 @@ const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string
     tile: "bg-sky-50 text-sky-600",
     hoverBorder: "hover:border-sky-300",
     arrow: "text-sky-600",
+  },
+  amber: {
+    tile: "bg-amber-50 text-amber-600",
+    hoverBorder: "hover:border-amber-300",
+    arrow: "text-amber-600",
   },
 };
 
@@ -83,6 +88,14 @@ const TOOLS: Array<{
     desc: "多 business 分账的收支记账本:记录收入/支出、归档发票凭证,自动汇总收支净额与按月/类别分布,可导出 Excel。",
     icon: "💰",
     accent: "sky",
+  },
+  {
+    href: "/work-email",
+    name: "工作邮件自动发送",
+    en: "Work Email Auto-Send",
+    desc: "上传上一封「周报工作计划」邮件,AI 顺着上周进度生成下一封;先预览、可修改,确认后从 adxztech Gmail 发给指定收件人(收件人来自雇员库)。",
+    icon: "📧",
+    accent: "amber",
   },
 ];
 
