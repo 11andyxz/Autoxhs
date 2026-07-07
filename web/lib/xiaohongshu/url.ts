@@ -11,3 +11,20 @@ export function parseNoteId(raw: string): string | null {
     return null;
   }
 }
+
+/**
+ * 从小红书笔记链接解析 { noteId, xsecToken }。
+ * 看笔记详情/读正文需要 xsec_token，故两者都必须存在，否则返回 null。
+ */
+export function parseNoteRef(raw: string): { noteId: string; xsecToken: string } | null {
+  try {
+    const u = new URL((raw ?? "").trim());
+    const parts = u.pathname.split("/").filter(Boolean);
+    const noteId = parts[parts.length - 1] ?? "";
+    const xsecToken = u.searchParams.get("xsec_token") ?? "";
+    if (!noteId || !xsecToken) return null;
+    return { noteId, xsecToken };
+  } catch {
+    return null;
+  }
+}

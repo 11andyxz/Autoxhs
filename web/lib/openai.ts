@@ -7,6 +7,14 @@ import {
   normalizeRewrite,
   type RewriteData,
 } from "./schema";
+import {
+  COMMENT_JSON_SCHEMA,
+  COMMENT_SYSTEM_PROMPT,
+  CommentValidationError,
+  buildNoteContext,
+  normalizeComment,
+} from "./xiaohongshu/comment";
+import { MAX_STYLE_HINT } from "./xiaohongshu/engage";
 
 const TIMEOUT_MS = 60_000;
 const DEFAULT_MODEL = "gpt-5.5";
@@ -178,6 +186,87 @@ export async function rewriteCopy(content: string): Promise<RewriteData> {
   } catch (err) {
     if (err instanceof SchemaValidationError || isZodError(err)) {
       return await callModel(client, content, true);
+    }
+    throw err;
+  }
+}
+
+// ---- 「互动助手」：为一篇笔记生成一条正向且相关的评论 ----
+
+async function callCommentModel(
+  client: OpenAI,
+  noteContext: string,
+  styleHint: string,
+  repair: boolean,
+): Promise<string> {
+  const input: Array<{ role: ChatRole; content: string }> = [
+    { role: "system", content: COMMENT_SYSTEM_PROMPT },
+  ];
+
+  const hint = styleHint.trim().slice(0, MAX_STYLE_HINT);
+  if (hint) {
+    // 操作者偏好（我们自己的开发者指令，不是笔记作者的内容）；仍受上面铁律约束。
+    input.push({
+      role: "system",
+      content: `操作者的额外风格偏好（在不违背上述铁律的前提下参考）：${hint}`,
+    });
+  }
+
+  if (repair) {
+    input.push({
+      role: "system",
+      content:
+        "上一次输出不符合要求。请只输出一条 8~40 字、正向且与该笔记具体内容相关的评论，不要空、不要解释、不要引号。",
+    });
+  }
+
+  input.push({ role: "user", content: noteContext });
+
+  const response = await client.responses.create({
+    model: getModel(),
+    input,
+    text: {
+      format: {
+        type: "json_schema",
+        name: "xhs_comment",
+        strict: true,
+        schema: COMMENT_JSON_SCHEMA as unknown as Record<string, unknown>,
+      },
+    },
+  });
+
+  const text = response.output_text;
+  if (!text) {
+    throw new CommentValidationError("模型输出为空");
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new CommentValidationError("模型输出不是合法 JSON");
+  }
+  return normalizeComment(json);
+}
+
+/**
+ * 根据笔记(标题+正文)生成一条「正向且相关」的小红书评论。
+ * 仅在输出格式不符合要求时自动重试一次；鉴权/限流等错误直接抛出，交路由映射为提示。
+ */
+export async function generateComment(
+  note: { title?: string; desc?: string },
+  styleHint = "",
+): Promise<string> {
+  const client = getClient();
+  const noteContext = buildNoteContext(note);
+  if (!noteContext) {
+    // 没有任何标题/正文可参考——无法保证「相关」，直接判失败而不是硬编一句万能评论。
+    throw new CommentValidationError("笔记内容为空，无法生成相关评论");
+  }
+  try {
+    return await callCommentModel(client, noteContext, styleHint, false);
+  } catch (err) {
+    if (err instanceof CommentValidationError || isZodError(err)) {
+      return await callCommentModel(client, noteContext, styleHint, true);
     }
     throw err;
   }

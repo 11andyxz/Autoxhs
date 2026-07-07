@@ -6,6 +6,7 @@ import {
   isValidEmail,
   sendWorkEmail,
 } from "@/lib/workEmail/gmail";
+import { insertWorkEmailLog } from "@/lib/workEmail/log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,6 +50,13 @@ export async function POST(req: NextRequest) {
   const subject = typeof b.subject === "string" ? b.subject.trim() : "";
   const body = typeof b.body === "string" ? b.body : "";
   const ccRaw = Array.isArray(b.cc) ? b.cc : [];
+  // 关联的雇员(选自数据库时才有);自定义收件人则为 null
+  const employeeId =
+    typeof b.employeeId === "number" && Number.isFinite(b.employeeId)
+      ? Math.trunc(b.employeeId)
+      : null;
+  const recipientName =
+    typeof b.recipientName === "string" ? b.recipientName.trim().slice(0, 200) : "";
 
   if (!isValidEmail(to)) return bad("请填写有效的收件人邮箱。");
   if (!subject) return bad("请填写邮件主题。");
@@ -67,6 +75,21 @@ export async function POST(req: NextRequest) {
 
   try {
     const result = await sendWorkEmail({ to, cc, subject, body });
+    // 记录为「工作邮件记录」(work record)。邮件已发出,记录失败不影响结果。
+    try {
+      await insertWorkEmailLog({
+        employeeId,
+        toEmail: result.to,
+        recipientName,
+        cc: result.cc,
+        fromEmail: result.from,
+        subject,
+        body,
+        messageId: result.messageId ?? null,
+      });
+    } catch (logErr) {
+      console.error("[work-email/send] 记录工作邮件失败", { name: (logErr as Error)?.name });
+    }
     return NextResponse.json({ success: true, result }, { status: 200 });
   } catch (err) {
     if (err instanceof GmailNotConfiguredError) {

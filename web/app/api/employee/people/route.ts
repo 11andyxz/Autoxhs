@@ -4,6 +4,7 @@ import { ensureEmployeeSchema, listEmployees, type EmployeeWithFiles } from "@/l
 import { nameMergeKey, splitFullName } from "@/lib/employee/validate";
 import { getHistory, listClients, type HistoryRecord } from "@/lib/serviceFee/clients";
 import { ensureSchema } from "@/lib/serviceFee/db";
+import { listWorkEmailsByEmployee, type WorkEmailLogItem } from "@/lib/workEmail/log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +29,7 @@ interface Person {
   employee: EmployeeWithFiles | null;
   feeClientName: string | null;
   feeHistory: FeeRecord[];
+  workEmails: WorkEmailLogItem[];
 }
 
 function mapFee(h: HistoryRecord): FeeRecord {
@@ -54,7 +56,11 @@ function mapFee(h: HistoryRecord): FeeRecord {
 export async function GET() {
   try {
     await Promise.all([ensureEmployeeSchema(), ensureSchema()]);
-    const [employees, clients] = await Promise.all([listEmployees(), listClients()]);
+    const [employees, clients, workEmailsByEmp] = await Promise.all([
+      listEmployees(),
+      listClients(),
+      listWorkEmailsByEmployee(),
+    ]);
     // 单个客户历史解析失败(如 result_json 损坏)只降级为空,不连累整个列表
     const histories = await Promise.all(clients.map((c) => getHistory(c.id).catch(() => [])));
 
@@ -82,6 +88,7 @@ export async function GET() {
         employee: emp,
         feeClientName: match?.displayName ?? null,
         feeHistory: match?.history ?? [],
+        workEmails: workEmailsByEmp.get(emp.id) ?? [],
       });
     }
 
@@ -95,6 +102,7 @@ export async function GET() {
         employee: null,
         feeClientName: c.displayName,
         feeHistory: c.history,
+        workEmails: [],
       });
     }
 

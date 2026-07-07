@@ -12,6 +12,7 @@ import {
   type EmployeeInput,
 } from "@/lib/employee/validate";
 import { exportFileName } from "@/lib/serviceFee/filename";
+import { renderEmailHtml } from "@/lib/workEmail/render";
 
 type EmployeeFileItem = {
   id: number;
@@ -45,6 +46,16 @@ type FeeRecord = {
   createdAt: string;
   result: unknown;
 };
+type WorkEmailItem = {
+  id: number;
+  subject: string;
+  toEmail: string;
+  recipientName: string;
+  cc: string[];
+  fromEmail: string;
+  body: string;
+  sentAt: string;
+};
 /** 统一人员 = 雇员 ∪ 收费客户(按姓名归并)。employee 为 null 表示仅收费客户。 */
 type Person = {
   displayName: string;
@@ -53,6 +64,7 @@ type Person = {
   employee: EmployeeWithFiles | null;
   feeClientName: string | null;
   feeHistory: FeeRecord[];
+  workEmails: WorkEmailItem[];
 };
 type EditTarget =
   | { mode: "edit"; employee: EmployeeWithFiles }
@@ -667,6 +679,10 @@ export default function EmployeePage() {
                     {p.feeHistory.length > 0 && (
                       <FeeHistory records={p.feeHistory} clientName={p.feeClientName ?? p.displayName} onExport={onExportFee} />
                     )}
+
+                    {emp && p.workEmails.length > 0 && (
+                      <WorkEmailHistory records={p.workEmails} />
+                    )}
                   </li>
                 );
               })}
@@ -776,6 +792,49 @@ function FeeHistory({
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+/** 该雇员收到的「工作邮件」发送记录(只读);点标题可展开看正文。 */
+function WorkEmailHistory({ records }: { records: WorkEmailItem[] }) {
+  const [openId, setOpenId] = useState<number | null>(null);
+  return (
+    <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">
+        工作邮件记录 Work Emails
+      </p>
+      <ul className="mt-1 space-y-1">
+        {records.map((m) => {
+          const open = openId === m.id;
+          return (
+            <li key={m.id} className="rounded-md bg-white px-2 py-1.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setOpenId(open ? null : m.id)}
+                className="flex w-full items-center justify-between gap-3 text-left"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium text-slate-800">{m.subject}</span>
+                  <span className="block truncate text-slate-400">
+                    发往 {m.toEmail}
+                    {m.cc.length > 0 ? ` · 抄送 ${m.cc.join(", ")}` : ""} · {m.sentAt}
+                  </span>
+                </span>
+                <span className="shrink-0 font-medium text-amber-700">
+                  {open ? "收起" : "查看正文"}
+                </span>
+              </button>
+              {open && (
+                <div
+                  className="mt-2 border-t border-slate-100 pt-2"
+                  dangerouslySetInnerHTML={{ __html: renderEmailHtml(m.body) }}
+                />
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: "Autoxhs 内部小工具集合。",
 };
 
-type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky" | "amber";
+type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky" | "amber" | "fuchsia";
 
 const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string }> = {
   rose: {
@@ -38,6 +38,11 @@ const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string
     tile: "bg-amber-50 text-amber-600",
     hoverBorder: "hover:border-amber-300",
     arrow: "text-amber-600",
+  },
+  fuchsia: {
+    tile: "bg-fuchsia-50 text-fuchsia-600",
+    hoverBorder: "hover:border-fuchsia-300",
+    arrow: "text-fuchsia-600",
   },
 };
 
@@ -96,6 +101,14 @@ const TOOLS: Array<{
     desc: "上传上一封「周报工作计划」邮件,AI 顺着上周进度生成下一封;先预览、可修改,确认后从 adxztech Gmail 发给指定收件人(收件人来自雇员库)。",
     icon: "📧",
     accent: "amber",
+  },
+  {
+    href: "/xhs-engage",
+    name: "小红书互动助手",
+    en: "Xiaohongshu Engagement",
+    desc: "按关键词/推荐/链接选定笔记,AI 读懂正文后生成「正向且相关」的评论;预览确认后批量发评论、给自己评论点赞、给帖子点赞。需本地 rednote 服务 + 已登录浏览器。",
+    icon: "💬",
+    accent: "fuchsia",
   },
 ];
 

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { renderEmailHtml } from "@/lib/workEmail/render";
-import { defaultTargetWeek } from "@/lib/workEmail/week";
+import { defaultTargetWeek, detectNextWeekFromText } from "@/lib/workEmail/week";
 import type { Recipient } from "@/lib/workEmail/recipients";
 
 const LOADING_HINTS = [
@@ -43,6 +43,8 @@ export default function WorkEmailPage() {
   const [customEmail, setCustomEmail] = useState("");
 
   const [targetWeek, setTargetWeek] = useState("");
+  const [weekNote, setWeekNote] = useState<string | null>(null);
+  const weekTouchedRef = useRef(false); // 用户是否手动改过目标周(改过就不再自动覆盖)
 
   // 生成
   const [loading, setLoading] = useState(false);
@@ -135,6 +137,42 @@ export default function WorkEmailPage() {
     [cc],
   );
 
+  // 上传文件后:让服务端解析出上一封邮件覆盖的周,自动把「目标周」填成它的下一周。
+  async function detectWeekFromFile(file: File) {
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/work-email/detect-week", { method: "POST", body: fd });
+      const json = (await res.json().catch(() => null)) as
+        | { success?: boolean; targetWeek?: string | null }
+        | null;
+      if (json?.success && json.targetWeek && !weekTouchedRef.current) {
+        setTargetWeek(json.targetWeek);
+        setWeekNote("已根据上一封邮件自动识别");
+      }
+    } catch {
+      /* 识别失败就保留默认目标周,不打扰用户 */
+    }
+  }
+
+  function handlePriorFile(f: File | null) {
+    setPriorFile(f);
+    setWeekNote(null);
+    if (f) detectWeekFromFile(f);
+  }
+
+  // 粘贴文本时在前端直接识别(文本已在手,无需再请求服务端)。
+  function handlePriorText(v: string) {
+    setPriorText(v);
+    if (!weekTouchedRef.current) {
+      const detected = detectNextWeekFromText(v, new Date().getFullYear());
+      if (detected) {
+        setTargetWeek(detected);
+        setWeekNote("已根据粘贴内容自动识别");
+      }
+    }
+  }
+
   function validateGenerate(): string | null {
     if (priorMode === "file" ? !priorFile : !priorText.trim()) {
       return "请提供上一封工作邮件（上传 PDF / DOCX 或粘贴文本）。";
@@ -217,7 +255,15 @@ export default function WorkEmailPage() {
       const res = await fetch("/api/work-email/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to: toEmail, cc: ccList, subject: subject.trim(), body }),
+        body: JSON.stringify({
+          to: toEmail,
+          cc: ccList,
+          subject: subject.trim(),
+          body,
+          // 选自雇员库时带上 employeeId,让这封邮件记到该雇员名下(自定义收件人则为 null)
+          employeeId: isCustom ? null : selectedRecipient?.id ?? null,
+          recipientName,
+        }),
       });
       const json = (await res.json().catch(() => null)) as
         | { success?: boolean; result?: SendResult; error?: string }
@@ -288,7 +334,7 @@ export default function WorkEmailPage() {
                 type="file"
                 accept={ACCEPT}
                 className="hidden"
-                onChange={(e) => setPriorFile(e.target.files?.[0] ?? null)}
+                onChange={(e) => handlePriorFile(e.target.files?.[0] ?? null)}
               />
               {priorFile ? (
                 <span className="font-medium text-slate-700">📄 {priorFile.name}</span>
@@ -299,7 +345,7 @@ export default function WorkEmailPage() {
           ) : (
             <textarea
               value={priorText}
-              onChange={(e) => setPriorText(e.target.value)}
+              onChange={(e) => handlePriorText(e.target.value)}
               placeholder="把上一封工作计划邮件的内容粘贴到这里……"
               rows={8}
               className="mt-3 w-full resize-y rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400"
@@ -350,11 +396,21 @@ export default function WorkEmailPage() {
           <h2 className="text-sm font-semibold text-slate-800">③ 目标周（这封计划针对哪一周）</h2>
           <input
             value={targetWeek}
-            onChange={(e) => setTargetWeek(e.target.value)}
+            onChange={(e) => {
+              setTargetWeek(e.target.value);
+              weekTouchedRef.current = true;
+              setWeekNote(null);
+            }}
             placeholder="例如 July 6–10, 2026"
             className="mt-3 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400"
           />
-          <p className="mt-1 text-xs text-slate-400">默认填入本周工作日区间（相对今天）；可自行修改。</p>
+          {weekNote ? (
+            <p className="mt-1 text-xs text-emerald-600">✓ {weekNote}（上一封的下一周）；可自行修改。</p>
+          ) : (
+            <p className="mt-1 text-xs text-slate-400">
+              上传上一封邮件后会自动识别为它的下一周；未识别到则按今天所在周。可自行修改。
+            </p>
+          )}
         </div>
 
         {error && (

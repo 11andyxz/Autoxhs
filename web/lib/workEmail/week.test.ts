@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { defaultTargetWeek, formatWeekRange } from "./week";
+import { defaultTargetWeek, detectNextWeekFromText, formatWeekRange } from "./week";
 
 describe("formatWeekRange", () => {
   it("same-month Mon–Fri", () => {
@@ -35,5 +35,42 @@ describe("defaultTargetWeek", () => {
   it("rolls Sunday forward to next Monday's week", () => {
     // Sunday 2026-07-12 -> next Mon 2026-07-13 .. Fri 2026-07-17
     expect(defaultTargetWeek(new Date(2026, 6, 12))).toBe("July 13–17, 2026");
+  });
+});
+
+describe("detectNextWeekFromText", () => {
+  it("detects the PDF's week and returns the following work week", () => {
+    // The uploaded email covers June 29–July 3, 2026 -> next week is July 6–10
+    const text =
+      "Technical Product Analyst Weekly Work Plan | June 29–July 3\nWed, Jul 1, 2026 at 5:44 PM\nFor this week...";
+    expect(detectNextWeekFromText(text)).toBe("July 6–10, 2026");
+  });
+
+  it("advances a same-month range to the next week", () => {
+    expect(detectNextWeekFromText("Weekly Work Plan | July 6–10, 2026")).toBe(
+      "July 13–17, 2026",
+    );
+  });
+
+  it("uses the year embedded in the range when present", () => {
+    expect(detectNextWeekFromText("plan for June 29–July 3, 2026")).toBe("July 6–10, 2026");
+  });
+
+  it("falls back to the provided year when text has none", () => {
+    expect(detectNextWeekFromText("June 29–July 3", 2026)).toBe("July 6–10, 2026");
+  });
+
+  it("ignores non-month numeric ranges like '3–5 improvements'", () => {
+    expect(detectNextWeekFromText("identify the top 3–5 improvements", 2026)).toBeNull();
+  });
+
+  it("picks the latest week when multiple ranges appear", () => {
+    const text = "Plan A: June 29–July 3, 2026. Plan B: July 6–10, 2026.";
+    expect(detectNextWeekFromText(text)).toBe("July 13–17, 2026");
+  });
+
+  it("returns null when no date and no fallback year", () => {
+    expect(detectNextWeekFromText("no dates here")).toBeNull();
+    expect(detectNextWeekFromText("June 29–July 3")).toBeNull();
   });
 });
