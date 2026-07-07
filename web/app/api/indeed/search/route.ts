@@ -19,6 +19,8 @@ type ServiceJob = {
   company?: unknown;
   location?: unknown;
   indeedApply?: unknown;
+  sponsorship?: unknown;
+  sponsorship_evidence?: unknown;
 };
 
 function normalizeJob(raw: ServiceJob) {
@@ -28,13 +30,19 @@ function normalizeJob(raw: ServiceJob) {
     company: typeof raw.company === "string" ? raw.company : "",
     location: typeof raw.location === "string" ? raw.location : "",
     indeedApply: raw.indeedApply === true,
+    // sponsorship 仅在 classify(=sponsor 过滤或 classify=1)时由服务返回;否则为 null。
+    sponsorship: typeof raw.sponsorship === "string" ? raw.sponsorship : null,
+    sponsorshipEvidence: Array.isArray(raw.sponsorship_evidence)
+      ? raw.sponsorship_evidence.filter((e): e is string => typeof e === "string")
+      : [],
   };
 }
 
 /**
- * GET /api/indeed/search?q=&l=&limit= —— 转发 GET /indeed/search 搜岗位。
- * q 必填；l(地点)可空；limit 默认 10、上限 1000。本地服务按页抓取(每页约 15 条)，
- * limit 越大越慢(可能翻数十页)、也更易触发反爬；Indeed 没有更多岗位时会提前收敛。
+ * GET /api/indeed/search?q=&l=&limit=&sponsor=&classify= —— 转发 GET /indeed/search 搜岗位。
+ * q 必填；l(地点)可空；limit 默认 10、上限 1000。
+ * sponsor=no|yes：只留「不需担保 / 提供担保」的岗位（会自动标注）；classify=1：给每个岗位标注 sponsorship（不过滤）。
+ * 标注会对每个岗位多抓一次描述，明显更慢；limit 越大越慢、也更易触发反爬；Indeed 没有更多岗位时会提前收敛。
  * 只有 indeedApply=true 的岗位能一键投递。
  */
 export async function GET(req: NextRequest) {
@@ -51,13 +59,18 @@ export async function GET(req: NextRequest) {
     ? Math.min(MAX_LIMIT, Math.max(1, Math.round(rawLimit)))
     : 10;
 
+  // sponsor 只认 no/yes（其余忽略=不过滤）；classify 只认 "1"。sponsor 设了服务会自动标注。
+  const sponsorRaw = (searchParams.get("sponsor") ?? "").trim().toLowerCase();
+  const sponsor = sponsorRaw === "no" || sponsorRaw === "yes" ? sponsorRaw : undefined;
+  const classify = searchParams.get("classify") === "1" ? "1" : undefined;
+
   if (!q) {
     return NextResponse.json({ success: false, error: "请输入搜索词。" }, { status: 400 });
   }
 
   const result = await callIndeed("/indeed/search", {
-    query: { q, l: l || undefined, limit },
-    // 大 limit 会在本地服务侧翻多页，放宽超时以容纳深翻页（服务无更多结果时会提前返回）。
+    query: { q, l: l || undefined, limit, sponsor, classify },
+    // 大 limit / 开启 sponsorship 标注会在本地服务侧翻多页 + 逐岗抓描述，放宽超时（服务无更多结果时会提前返回）。
     timeoutMs: 180_000,
   });
   if (result.kind !== "ok") return transportErrorResponse(result, "搜索超时，请重试。");
@@ -79,6 +92,8 @@ export async function GET(req: NextRequest) {
       q: typeof json.q === "string" ? json.q : q,
       l: typeof json.l === "string" ? json.l : l,
       count: jobs.length,
+      sponsorFilter: typeof json.sponsor_filter === "string" ? json.sponsor_filter : null,
+      classified: json.classified === true,
       jobs,
     },
   });

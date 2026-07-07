@@ -68,10 +68,11 @@ function friendlyApplyError(json: ServiceJson): string {
 }
 
 /**
- * POST /api/indeed/apply  body: { jk, confirm }
+ * POST /api/indeed/apply  body: { jk, confirm, answers? }
  * 转发 POST /indeed/apply?jk=&confirm=0|1。
- * confirm=false（默认）：预演——备草稿 + 浏览器取 submit-valid 校验，但不投递。
- * confirm=true：在此基础上真实提交（不可逆）。前端须先预演成功、再显式确认。
+ * confirm=true：真实提交（不可逆）——UI 走「一键直投」（必填答齐即可，不再两步预演）。
+ * confirm=false：dry-run（备草稿 + 浏览器取 submit-valid 校验，不提交），保留供调试/分析。
+ * answers（可选）：{questionId,value}[]，覆盖服务端默认自动答；未覆盖的仍由服务自动答。
  */
 export async function POST(req: NextRequest) {
   const limited = rateLimitedResponse(req);

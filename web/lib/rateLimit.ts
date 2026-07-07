@@ -6,7 +6,9 @@
 type Bucket = { count: number; resetAt: number };
 
 const WINDOW_MS = 60_000;
-const MAX_REQUESTS = 10;
+// 单用户内部工具;批量投递会在短时间内连发多次(逐个扫描问题/逐个投递),故默认放宽,
+// 可用 RATE_LIMIT_MAX_PER_MIN 覆盖。
+const MAX_REQUESTS = Number(process.env.RATE_LIMIT_MAX_PER_MIN) || 120;
 const buckets = new Map<string, Bucket>();
 
 export function rateLimit(key: string): { allowed: boolean } {

@@ -34,6 +34,37 @@ type Job = {
   company: string;
   location: string;
   indeedApply: boolean;
+  // 仅在开启 sponsorship 标注(筛选或全部标注)时有值。
+  sponsorship?: string | null;
+  sponsorshipEvidence?: string[];
+};
+
+type SearchData = {
+  jobs: Job[];
+  sponsorFilter?: string | null;
+  classified?: boolean;
+};
+
+type SponsorshipQuestion = {
+  id: string;
+  label: string;
+  options: Array<{ value: string; label: string }> | null;
+};
+
+type SponsorshipResult = {
+  jk: string;
+  sponsorship: string;
+  evidenceNeg: string[];
+  evidencePos: string[];
+  sponsorshipQuestions: SponsorshipQuestion[];
+  note: string;
+};
+
+// sponsorship 立场 → 展示文案与配色。
+const SPONSORSHIP_META: Record<string, { txt: string; cls: string }> = {
+  no_sponsorship: { txt: "无需担保", cls: "bg-emerald-50 text-emerald-700" },
+  sponsors: { txt: "提供担保", cls: "bg-sky-50 text-sky-700" },
+  unknown: { txt: "担保未知", cls: "bg-slate-100 text-slate-500" },
 };
 
 type Question = {
@@ -55,15 +86,6 @@ type KbMatch = {
   confidence: number;
 };
 
-type DryRun = {
-  jk: string;
-  dryRun: true;
-  note: string;
-  questions: Question[];
-  answers: Answer[];
-  submitFields: Record<string, string>;
-};
-
 type SubmitResult = {
   jk: string;
   dryRun: false;
@@ -76,6 +98,18 @@ type SubmitResult = {
 };
 
 type AppliedResult = { jk: string; applied: boolean; appliedMs: number | null };
+
+// 批量投递
+type BatchPhase = "idle" | "sweeping" | "review" | "submitting" | "done";
+type BatchStatus = "ready" | "needsInput" | "applying" | "done" | "failed" | "read_failed";
+type BatchItem = {
+  job: Job;
+  questions: Question[];
+  matches: Record<string, KbMatch>;
+  answers: Record<string, string>;
+  status: BatchStatus;
+  message?: string;
+};
 
 // ---------- fetch 小工具 ----------
 
@@ -90,6 +124,8 @@ async function callApi<T>(input: string, init?: RequestInit): Promise<ApiRespons
   }
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 function fmtTime(ms: number | null): string {
   if (!ms) return "";
   try {
@@ -97,13 +133,6 @@ function fmtTime(ms: number | null): string {
   } catch {
     return String(ms);
   }
-}
-
-/** 把答案值解析成可读文本（SELECT/RADIO 用选项 label，空值显示「留空」）。 */
-function answerLabel(q: Question | undefined, value: string): string {
-  if (value === "" || value == null) return "（留空）";
-  const opt = q?.options?.find((o) => o.value === value);
-  return opt ? `${opt.label}（${value}）` : value;
 }
 
 // ---------- 小组件 ----------
@@ -133,6 +162,17 @@ function Banner({ tone, children }: { tone: "info" | "success" | "error"; childr
 
 const btnBase =
   "inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50";
+
+/** sponsorship 立场徽章（仅在标注后有值）。 */
+function SponsorshipBadge({ stance }: { stance: string | null | undefined }) {
+  if (!stance) return null;
+  const meta = SPONSORSHIP_META[stance] ?? SPONSORSHIP_META.unknown;
+  return (
+    <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${meta.cls}`}>
+      {meta.txt}
+    </span>
+  );
+}
 
 /** 知识库命中徽章：精确 / 相似 / 需你填写。 */
 function KbBadge({ match }: { match: KbMatch | undefined }) {
@@ -193,6 +233,22 @@ function AnswerInput({
   );
 }
 
+/** 批量投递里单个岗位的状态徽章。 */
+function BatchStatusChip({ it }: { it: BatchItem }) {
+  const map: Record<BatchStatus, { cls: string; txt: string }> = {
+    ready: { cls: "bg-slate-100 text-slate-500", txt: "待投" },
+    needsInput: { cls: "bg-amber-100 text-amber-700", txt: "待回答" },
+    applying: { cls: "bg-sky-100 text-sky-700", txt: "投递中…" },
+    done: { cls: "bg-emerald-100 text-emerald-700", txt: it.message || "已投递" },
+    failed: { cls: "bg-rose-100 text-rose-700", txt: it.message || "失败" },
+    read_failed: { cls: "bg-amber-100 text-amber-700", txt: "读取失败" },
+  };
+  const s = map[it.status];
+  return (
+    <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${s.cls}`}>{s.txt}</span>
+  );
+}
+
 // ---------- 页面 ----------
 
 export default function IndeedPage() {
@@ -204,6 +260,8 @@ export default function IndeedPage() {
   const [q, setQ] = useState("");
   const [l, setL] = useState("");
   const [limit, setLimit] = useState(10);
+  // 担保筛选：""=不限(不判定,最快)｜no=只看不需担保｜yes=只看提供担保｜all=全部并标注担保。
+  const [sponsorFilter, setSponsorFilter] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -215,11 +273,6 @@ export default function IndeedPage() {
   const [questionsLoading, setQuestionsLoading] = useState(false);
   const [questionsError, setQuestionsError] = useState<string | null>(null);
 
-  const [dryRun, setDryRun] = useState<DryRun | null>(null);
-  const [previewing, setPreviewing] = useState(false);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [previewedJk, setPreviewedJk] = useState<string | null>(null);
-
   const [submitResult, setSubmitResult] = useState<SubmitResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -229,6 +282,11 @@ export default function IndeedPage() {
   const [applied, setApplied] = useState<AppliedResult | null>(null);
   const [checkingApplied, setCheckingApplied] = useState(false);
   const [appliedError, setAppliedError] = useState<string | null>(null);
+
+  // 单岗 sponsorship 立场查询（含筛选题强证据）。
+  const [sponsorship, setSponsorship] = useState<SponsorshipResult | null>(null);
+  const [sponsorshipLoading, setSponsorshipLoading] = useState(false);
+  const [sponsorshipError, setSponsorshipError] = useState<string | null>(null);
 
   // 从求职神器带入的定制简历（客户端交接，见 lib/job-hunter/handoff）。
   const [carried, setCarried] = useState<ResumeHandoff | null>(null);
@@ -240,6 +298,12 @@ export default function IndeedPage() {
   const [matches, setMatches] = useState<Record<string, KbMatch>>({});
   const [savingKb, setSavingKb] = useState(false);
   const panelRef = useRef<HTMLElement | null>(null);
+
+  // 批量投递
+  const [batchPhase, setBatchPhase] = useState<BatchPhase>("idle");
+  const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
+  const [batchSweep, setBatchSweep] = useState({ done: 0, total: 0 });
+  const batchCancelRef = useRef(false);
 
   const selectedJob = jobs.find((j) => j.jk === selectedJk) ?? null;
 
@@ -317,14 +381,13 @@ export default function IndeedPage() {
     setQuestionsError(null);
     setAnswers({});
     setMatches({});
-    setDryRun(null);
-    setPreviewError(null);
-    setPreviewedJk(null);
     setSubmitResult(null);
     setSubmitError(null);
     setAmbiguousSubmit(false);
     setApplied(null);
     setAppliedError(null);
+    setSponsorship(null);
+    setSponsorshipError(null);
   }
 
   function selectJob(jk: string) {
@@ -350,7 +413,10 @@ export default function IndeedPage() {
     resetSelectionState();
     const params = new URLSearchParams({ q: q.trim(), limit: String(limit) });
     if (l.trim()) params.set("l", l.trim());
-    const res = await callApi<{ jobs: Job[] }>(`/api/indeed/search?${params.toString()}`);
+    // 担保筛选：no/yes 交给 sponsor（服务自动标注）；all 只标注不过滤（classify=1）。
+    if (sponsorFilter === "no" || sponsorFilter === "yes") params.set("sponsor", sponsorFilter);
+    else if (sponsorFilter === "all") params.set("classify", "1");
+    const res = await callApi<SearchData>(`/api/indeed/search?${params.toString()}`);
     if (res.success && res.data) setJobs(res.data.jobs);
     else {
       setJobs([]);
@@ -435,47 +501,151 @@ export default function IndeedPage() {
     selectJob(jk); // selectedJk 变化会触发上面的 effect 自动读题 + 滚动
   }
 
-  /** ① 保存答案入库 → 预演。 */
-  async function handleSaveAndPreview() {
-    if (!selectedJk || previewing || savingKb) return;
-    await saveAnswersToKb();
-    await handlePreview();
+
+  // ---------- 批量投递 ----------
+
+  function batchRequiredUnanswered(it: BatchItem): boolean {
+    return it.questions.some((q) => q.required && !(it.answers[q.id] ?? "").toString().trim());
   }
 
-  async function handlePreview() {
-    if (!selectedJk || previewing) return;
-    setPreviewing(true);
-    setPreviewError(null);
-    setDryRun(null);
-    setPreviewedJk(null);
-    setSubmitResult(null);
-    setSubmitError(null);
-    setAmbiguousSubmit(false);
-    const res = await callApi<DryRun>("/api/indeed/apply", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jk: selectedJk, confirm: false, answers: answersPayload() }),
-    });
-    if (res.success && res.data) {
-      setDryRun(res.data);
-      setPreviewedJk(selectedJk);
-    } else {
-      setPreviewError(res.error ?? "预演失败。");
+  function batchAnswersPayload(it: BatchItem): Answer[] {
+    return it.questions
+      .map((q) => ({ questionId: q.id, value: (it.answers[q.id] ?? "").toString() }))
+      .filter((a) => a.questionId && a.value.trim().length > 0);
+  }
+
+  function batchKbItems(it: BatchItem) {
+    return it.questions
+      .map((q) => {
+        const value = (it.answers[q.id] ?? "").toString();
+        const valueLabel = q.options?.find((o) => o.value === value)?.label ?? null;
+        return { label: q.label, type: q.type, options: q.options, value, valueLabel };
+      })
+      .filter((x) => x.value.trim().length > 0);
+  }
+
+  /** 扫描当前结果里所有「可投」岗位:逐个取问题 + 知识库预填,判定是否需要你介入。 */
+  async function startBatch() {
+    const targets = jobs.filter((j) => j.indeedApply);
+    if (!targets.length || batchPhase === "sweeping" || batchPhase === "submitting") return;
+    setSelectedJk(null); // 收起单卡面板,避免干扰
+    setBatchItems([]);
+    setBatchSweep({ done: 0, total: targets.length });
+    setBatchPhase("sweeping");
+    batchCancelRef.current = false;
+    const items: BatchItem[] = [];
+    for (let i = 0; i < targets.length; i++) {
+      if (batchCancelRef.current) break;
+      const job = targets[i];
+      const res = await callApi<{ questions: Question[]; matches?: Record<string, KbMatch> }>(
+        `/api/indeed/questions?jk=${encodeURIComponent(job.jk)}`,
+      );
+      if (res.success && res.data) {
+        const qs = res.data.questions;
+        const m = res.data.matches ?? {};
+        const ans: Record<string, string> = {};
+        for (const q of qs) {
+          const hit = m[q.id];
+          if (hit) ans[q.id] = hit.value;
+        }
+        const needs = qs.some((q) => q.required && !(ans[q.id] ?? "").trim());
+        items.push({ job, questions: qs, matches: m, answers: ans, status: needs ? "needsInput" : "ready" });
+      } else {
+        items.push({ job, questions: [], matches: {}, answers: {}, status: "read_failed", message: res.error ?? "读取问题失败" });
+      }
+      setBatchSweep({ done: i + 1, total: targets.length });
+      setBatchItems([...items]);
+      await sleep(400); // 轻限流,减轻限流器与 Indeed 反爬压力
     }
-    setPreviewing(false);
+    setBatchPhase(batchCancelRef.current ? "idle" : "review");
   }
 
-  async function handleConfirmApply() {
-    if (!selectedJk || submitting) return;
-    if (previewedJk !== selectedJk) return;
+  /** review 阶段编辑某岗位的答案;答齐必填后该岗位自动从 needsInput 变 ready。 */
+  function setBatchAnswer(jk: string, qid: string, value: string) {
+    setBatchItems((prev) =>
+      prev.map((it) => {
+        if (it.job.jk !== jk) return it;
+        if (it.status === "read_failed") return it;
+        const answers = { ...it.answers, [qid]: value };
+        const needs = it.questions.some((q) => q.required && !(answers[q.id] ?? "").trim());
+        return { ...it, answers, status: needs ? "needsInput" : "ready" };
+      }),
+    );
+  }
+
+  /** 展示清单后的一次总确认 → 逐个真实提交(可中止)。只投 ready 的,needsInput/failed 跳过。 */
+  async function confirmBatch() {
+    const submittable = batchItems.filter((it) => it.status === "ready");
+    if (!submittable.length) return;
+    const ok = window.confirm(
+      `将真实投递 ${submittable.length} 个岗位,不可逆、无法撤回。确定继续?`,
+    );
+    if (!ok) return;
+    setBatchPhase("submitting");
+    batchCancelRef.current = false;
+    for (const it of submittable) {
+      if (batchCancelRef.current) break;
+      setBatchItems((prev) =>
+        prev.map((x) => (x.job.jk === it.job.jk ? { ...x, status: "applying" } : x)),
+      );
+      const kb = batchKbItems(it);
+      if (kb.length) {
+        await callApi("/api/indeed/kb/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: kb }),
+        });
+      }
+      const res = await callApi<SubmitResult>("/api/indeed/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jk: it.job.jk, confirm: true, answers: batchAnswersPayload(it) }),
+      });
+      const okSubmit = res.success && res.data?.submitted === true;
+      setBatchItems((prev) =>
+        prev.map((x) =>
+          x.job.jk === it.job.jk
+            ? {
+                ...x,
+                status: okSubmit ? "done" : "failed",
+                message: okSubmit
+                  ? res.data?.applied
+                    ? `已投递（已确认 ${fmtTime(res.data.appliedMs)}）`
+                    : "已提交"
+                  : res.error ?? "投递失败",
+              }
+            : x,
+        ),
+      );
+      await sleep(500);
+    }
+    setBatchPhase("done");
+  }
+
+  function cancelBatch() {
+    batchCancelRef.current = true;
+    if (batchPhase === "review") setBatchPhase("idle");
+  }
+
+  function closeBatch() {
+    if (batchPhase === "sweeping" || batchPhase === "submitting") return;
+    setBatchPhase("idle");
+    setBatchItems([]);
+  }
+
+  /** 一键直投:必填答齐即可直接提交,不再两步预演(仍保留一次不可逆确认 + 超时歧义保护)。 */
+  async function handleApplyDirect() {
+    if (!selectedJk || submitting || savingKb) return;
+    if (requiredUnanswered.length > 0) return; // 必填未答:先在下方表单填完
     const ok = window.confirm(
       `确认向雇主真实投递该岗位？\n\n${selectedJob?.title ?? ""} · ${selectedJob?.company ?? ""}\n\n此操作不可逆，将以本地服务登录的身份提交申请。`,
     );
     if (!ok) return;
-    setSubmitting(true);
     setSubmitError(null);
     setSubmitResult(null);
     setAmbiguousSubmit(false);
+    await saveAnswersToKb(); // 尽力而为:入库失败不阻断投递
+    setSubmitting(true);
     const res = await callApi<SubmitResult>("/api/indeed/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -483,17 +653,10 @@ export default function IndeedPage() {
     });
     if (res.success && res.data) {
       setSubmitResult(res.data);
-      // 服务已给出确定结果：清掉预演闸门，禁用「确认投递」按钮，防止对同一岗位重复（不可逆）投递。
-      setPreviewedJk(null);
     } else {
       setSubmitError(res.error ?? "投递失败。");
-      // 超时/非 JSON：本次投递「可能」已在服务端完成，不能盲目重投。清掉闸门 → 禁用「确认投递」，
-      // 逼用户先「复核投递状态」、必要时重新预演，杜绝重复（不可逆）投递。
-      // 仅「连不上」是确定没生效，保留闸门以便直接重试。
-      if (res.code !== "connection") {
-        setPreviewedJk(null);
-        setAmbiguousSubmit(true);
-      }
+      // 超时/非 JSON:本次「可能」已在服务端完成,先复核再决定是否重投;仅「连不上」是确定没投。
+      if (res.code !== "connection") setAmbiguousSubmit(true);
     }
     setSubmitting(false);
   }
@@ -510,7 +673,30 @@ export default function IndeedPage() {
     setCheckingApplied(false);
   }
 
-  const canConfirm = !!selectedJk && previewedJk === selectedJk && !submitting;
+  /** 查该岗位的 visa 担保立场（questions=1 额外拉雇主筛选题作强证据）。 */
+  async function handleCheckSponsorship() {
+    if (!selectedJk || sponsorshipLoading) return;
+    setSponsorshipLoading(true);
+    setSponsorshipError(null);
+    const res = await callApi<SponsorshipResult>(
+      `/api/indeed/sponsorship?jk=${encodeURIComponent(selectedJk)}&questions=1`,
+    );
+    if (res.success && res.data) setSponsorship(res.data);
+    else setSponsorshipError(res.error ?? "判定担保立场失败。");
+    setSponsorshipLoading(false);
+  }
+
+  const alreadyApplied = submitResult?.jk === selectedJk && submitResult?.submitted === true;
+
+  const applyableCount = jobs.filter((j) => j.indeedApply).length;
+  const batchReady = batchItems.filter((it) => it.status === "ready").length;
+  const batchNeeds = batchItems.filter((it) => it.status === "needsInput").length;
+  const batchReadFailed = batchItems.filter((it) => it.status === "read_failed").length;
+  const batchDoneCount = batchItems.filter((it) => it.status === "done").length;
+  const batchSubmitFailed = batchItems.filter((it) => it.status === "failed").length;
+  const batchSubmitList = batchItems.filter((it) =>
+    ["ready", "applying", "done", "failed"].includes(it.status),
+  );
 
   return (
     <main className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
@@ -526,7 +712,7 @@ export default function IndeedPage() {
             🚀 一键投递 Indeed
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-500">
-            搜索岗位 → 查看雇主问题与自动答案 → 先预演（不投递）→ 确认后一键真实投递 → 复核状态。
+            搜索岗位（可按签证担保筛选）→ 答齐雇主问题（知识库自动预填）→ 一键真实投递 → 复核状态。
             仅 <span className="font-medium text-slate-700">indeedApply</span> 岗位可投；真实投递需本地
             Indeed 服务在运行、AdsPower 浏览器已打开并登录。
           </p>
@@ -659,6 +845,19 @@ export default function IndeedPage() {
               />
             </div>
           </div>
+          <div className="mt-3">
+            <label className="mb-1 block text-xs font-medium text-slate-500">签证担保（sponsorship）</label>
+            <select
+              value={sponsorFilter}
+              onChange={(e) => setSponsorFilter(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-400 sm:max-w-xs"
+            >
+              <option value="">不限（不判定，最快）</option>
+              <option value="no">只看「不需担保」的岗位</option>
+              <option value="yes">只看「提供担保」的岗位</option>
+              <option value="all">全部并标注担保立场</option>
+            </select>
+          </div>
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <button
               type="submit"
@@ -669,6 +868,7 @@ export default function IndeedPage() {
             </button>
             <span className="text-xs text-slate-400">
               数量最多 1000；服务端按页抓取，数量越大越慢（上百条可能要 1–2 分钟），也更易触发反爬。
+              {sponsorFilter && "（担保判定需逐岗抓描述，会明显更慢）"}
             </span>
           </div>
           {searchError && (
@@ -681,6 +881,200 @@ export default function IndeedPage() {
         {/* 结果 */}
         {searched && !searching && jobs.length === 0 && !searchError && (
           <Banner tone="info">没有找到岗位，换个搜索词试试。</Banner>
+        )}
+
+        {/* 批量投递入口 */}
+        {batchPhase === "idle" && jobs.length > 0 && applyableCount > 0 && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50/50 p-3">
+            <p className="text-sm text-rose-800">
+              批量投递：一键投递当前结果里全部 {applyableCount} 个可投岗位。无雇主问题 / 知识库能答全的自动投，答不全的先让你回答。
+              <span className="font-medium">真实提交、不可逆。</span>
+            </p>
+            <button
+              type="button"
+              onClick={startBatch}
+              className={`${btnBase} shrink-0 bg-rose-600 text-white hover:bg-rose-700`}
+            >
+              一键全部投递（{applyableCount}）
+            </button>
+          </div>
+        )}
+
+        {/* 批量投递面板 */}
+        {batchPhase !== "idle" && (
+          <section className="mb-6 rounded-xl border border-slate-300 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold text-slate-900">批量投递</h2>
+              {(batchPhase === "review" || batchPhase === "done") && (
+                <button
+                  type="button"
+                  onClick={closeBatch}
+                  className="text-xs text-slate-400 hover:text-slate-600"
+                >
+                  关闭
+                </button>
+              )}
+            </div>
+
+            {batchPhase === "sweeping" && (
+              <div className="mt-3">
+                <p className="text-sm text-slate-600">
+                  正在扫描岗位并匹配知识库…（{batchSweep.done}/{batchSweep.total}）
+                </p>
+                <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className="h-full bg-sky-500 transition-all"
+                    style={{ width: `${batchSweep.total ? (batchSweep.done / batchSweep.total) * 100 : 0}%` }}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={cancelBatch}
+                  className={`${btnBase} mt-3 bg-slate-100 text-slate-700 hover:bg-slate-200`}
+                >
+                  中止扫描
+                </button>
+              </div>
+            )}
+
+            {batchPhase === "review" && (
+              <div className="mt-3 space-y-4">
+                <Banner tone="error">
+                  将真实投递 <span className="font-semibold">{batchReady}</span> 个岗位，
+                  <span className="font-semibold">不可逆、无法撤回</span>。
+                  {batchNeeds > 0 && <> 另有 {batchNeeds} 个待你回答（答齐才计入）。</>}
+                  {batchReadFailed > 0 && <> {batchReadFailed} 个读取失败将跳过。</>} 每个约 1–2
+                  分钟且串行，预计 {batchReady}–{batchReady * 2} 分钟，可随时中止。
+                </Banner>
+
+                {batchNeeds > 0 && (
+                  <div>
+                    <p className="text-sm font-semibold text-slate-800">需要你回答（{batchNeeds}）</p>
+                    <ul className="mt-2 space-y-3">
+                      {batchItems
+                        .filter((it) => it.status === "needsInput")
+                        .map((it) => (
+                          <li key={it.job.jk} className="rounded-lg border border-amber-200 bg-amber-50/40 p-3">
+                            <p className="text-sm font-medium text-slate-900">{it.job.title}</p>
+                            <p className="text-xs text-slate-500">
+                              {it.job.company}
+                              {it.job.location ? ` · ${it.job.location}` : ""}
+                            </p>
+                            <ul className="mt-2 space-y-2">
+                              {it.questions.map((qq, i) => (
+                                <li key={qq.id || i} className="rounded-md border border-slate-200 bg-white p-2">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <p className="text-xs font-medium text-slate-700">
+                                      {qq.label}{" "}
+                                      <span className="font-normal text-slate-400">
+                                        [{qq.type}
+                                        {qq.required ? " · 必填" : ""}]
+                                      </span>
+                                    </p>
+                                    <KbBadge match={it.matches[qq.id]} />
+                                  </div>
+                                  <div className="mt-1.5">
+                                    <AnswerInput
+                                      q={qq}
+                                      value={it.answers[qq.id] ?? ""}
+                                      onChange={(v) => setBatchAnswer(it.job.jk, qq.id, v)}
+                                    />
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          </li>
+                        ))}
+                    </ul>
+                  </div>
+                )}
+
+                {batchReady > 0 && (
+                  <details className="rounded-lg border border-slate-200 p-3">
+                    <summary className="cursor-pointer text-sm font-semibold text-slate-800">
+                      已就绪 · 将投递（{batchReady}）
+                    </summary>
+                    <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                      {batchItems
+                        .filter((it) => it.status === "ready")
+                        .map((it) => (
+                          <li key={it.job.jk}>
+                            {it.job.title} · {it.job.company}
+                            {it.questions.length > 0 && (
+                              <span className="text-slate-400">（{batchAnswersPayload(it).length} 题已答）</span>
+                            )}
+                          </li>
+                        ))}
+                    </ul>
+                  </details>
+                )}
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={confirmBatch}
+                    disabled={batchReady === 0}
+                    className={`${btnBase} bg-rose-600 text-white hover:bg-rose-700`}
+                  >
+                    确认全部投递（{batchReady}）
+                  </button>
+                  <button
+                    type="button"
+                    onClick={cancelBatch}
+                    className={`${btnBase} bg-slate-100 text-slate-700 hover:bg-slate-200`}
+                  >
+                    取消
+                  </button>
+                  {batchNeeds > 0 && (
+                    <span className="text-xs text-amber-600">还有 {batchNeeds} 个未答，将不会被投递。</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {(batchPhase === "submitting" || batchPhase === "done") && (
+              <div className="mt-3 space-y-3">
+                <p className="text-sm text-slate-600">
+                  {batchPhase === "submitting"
+                    ? `正在逐个投递…（成功 ${batchDoneCount} / 失败 ${batchSubmitFailed}，共 ${batchSubmitList.length}）`
+                    : `完成：成功 ${batchDoneCount} 个，失败 ${batchSubmitFailed} 个${batchReadFailed ? `，读取失败跳过 ${batchReadFailed} 个` : ""}。`}
+                </p>
+                <ul className="max-h-80 space-y-1.5 overflow-y-auto">
+                  {batchSubmitList.map((it) => (
+                    <li
+                      key={it.job.jk}
+                      className="flex items-center justify-between gap-2 rounded-md border border-slate-200 p-2 text-xs"
+                    >
+                      <span className="truncate text-slate-700">
+                        {it.job.title} · {it.job.company}
+                      </span>
+                      <BatchStatusChip it={it} />
+                    </li>
+                  ))}
+                </ul>
+                <div className="flex flex-wrap items-center gap-3">
+                  {batchPhase === "submitting" && (
+                    <button
+                      type="button"
+                      onClick={cancelBatch}
+                      className={`${btnBase} bg-slate-100 text-slate-700 hover:bg-slate-200`}
+                    >
+                      中止（完成当前后停止）
+                    </button>
+                  )}
+                  {batchPhase === "done" && (
+                    <button
+                      type="button"
+                      onClick={closeBatch}
+                      className={`${btnBase} bg-slate-800 text-white hover:bg-slate-900`}
+                    >
+                      关闭
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
         )}
 
         {jobs.length > 0 && (
@@ -709,6 +1103,7 @@ export default function IndeedPage() {
                     </div>
                     {job.indeedApply ? (
                       <div className="flex shrink-0 items-center gap-2">
+                        <SponsorshipBadge stance={job.sponsorship} />
                         <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
                           可一键投递
                         </span>
@@ -724,9 +1119,12 @@ export default function IndeedPage() {
                         </button>
                       </div>
                     ) : (
-                      <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-500">
-                        不支持
-                      </span>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <SponsorshipBadge stance={job.sponsorship} />
+                        <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-500">
+                          不支持
+                        </span>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -744,6 +1142,56 @@ export default function IndeedPage() {
               {selectedJob.location ? ` · ${selectedJob.location}` : ""} · jk: {selectedJob.jk}
             </p>
 
+            {/* 签证担保立场（visa sponsorship） */}
+            <div className="mt-4 rounded-lg border border-slate-200 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-slate-800">签证担保立场</span>
+                  {sponsorship && <SponsorshipBadge stance={sponsorship.sponsorship} />}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCheckSponsorship}
+                  disabled={sponsorshipLoading}
+                  className="text-xs text-sky-600 hover:text-sky-700 disabled:opacity-50"
+                >
+                  {sponsorshipLoading ? "判定中…" : sponsorship ? "重新判定" : "查担保立场（含筛选题）"}
+                </button>
+              </div>
+              {sponsorshipError && (
+                <div className="mt-2">
+                  <Banner tone="error">{sponsorshipError}</Banner>
+                </div>
+              )}
+              {sponsorship && (
+                <div className="mt-2 space-y-1.5 text-xs text-slate-600">
+                  {sponsorship.evidenceNeg.length > 0 && (
+                    <p>
+                      <span className="text-emerald-700">不需担保证据：</span>
+                      {sponsorship.evidenceNeg.join("；")}
+                    </p>
+                  )}
+                  {sponsorship.evidencePos.length > 0 && (
+                    <p>
+                      <span className="text-sky-700">提供担保证据：</span>
+                      {sponsorship.evidencePos.join("；")}
+                    </p>
+                  )}
+                  {sponsorship.sponsorshipQuestions.length > 0 && (
+                    <div>
+                      <span className="text-slate-500">相关筛选题：</span>
+                      <ul className="ml-4 list-disc">
+                        {sponsorship.sponsorshipQuestions.map((sq, i) => (
+                          <li key={sq.id || i}>{sq.label}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {sponsorship.note && <p className="text-slate-400">{sponsorship.note}</p>}
+                </div>
+              )}
+            </div>
+
             {/* 雇主问题（作答 + 知识库预填） */}
             <div className="mt-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -759,7 +1207,7 @@ export default function IndeedPage() {
               </div>
               <p className="mt-1 text-xs leading-relaxed text-slate-400">
                 知识库会自动预填：<span className="text-emerald-600">精确命中</span>直接填、
-                <span className="text-sky-600">相似命中</span>请你过目确认、其余需你填写。点「保存并预演」时会把答案存入知识库，下次自动作答。
+                <span className="text-sky-600">相似命中</span>请你过目确认、其余需你填写。点「一键投递」时会把答案存入知识库，下次自动作答。
               </p>
               {questionsError && (
                 <div className="mt-2">
@@ -806,30 +1254,28 @@ export default function IndeedPage() {
               )}
             </div>
 
-            {/* 两步投递 */}
+            {/* 一键直投 */}
             <div className="mt-6 border-t border-slate-100 pt-5">
               <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
-                  onClick={handleSaveAndPreview}
-                  disabled={previewing || savingKb || questionsLoading || requiredUnanswered.length > 0}
-                  className={`${btnBase} bg-slate-800 text-white hover:bg-slate-900`}
-                >
-                  {savingKb
-                    ? "保存答案中…"
-                    : previewing
-                      ? "预演中…（最长 90 秒）"
-                      : questions && questions.length > 0
-                        ? "① 保存答案并预演"
-                        : "① 预演（不投递）"}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmApply}
-                  disabled={!canConfirm}
+                  onClick={handleApplyDirect}
+                  disabled={
+                    submitting ||
+                    savingKb ||
+                    questionsLoading ||
+                    requiredUnanswered.length > 0 ||
+                    alreadyApplied
+                  }
                   className={`${btnBase} bg-rose-600 text-white hover:bg-rose-700`}
                 >
-                  {submitting ? "投递中…（最长 2 分钟）" : "② 确认投递（不可逆）"}
+                  {submitting
+                    ? "投递中…"
+                    : savingKb
+                      ? "保存答案中…"
+                      : alreadyApplied
+                        ? "已投递 ✓"
+                        : "一键投递（不可逆）"}
                 </button>
                 <button
                   type="button"
@@ -840,45 +1286,16 @@ export default function IndeedPage() {
                   {checkingApplied ? "复核中…" : "复核投递状态"}
                 </button>
               </div>
-              {!canConfirm && !submitResult && (
-                <p className="mt-2 text-xs text-slate-400">
-                  需先对该岗位「预演」成功，才能确认投递。
+              {requiredUnanswered.length > 0 ? (
+                <p className="mt-2 text-xs text-amber-600">
+                  有 {requiredUnanswered.length} 个必填问题未回答，填完即可直接投递。
                 </p>
-              )}
-
-              {previewError && (
-                <div className="mt-3">
-                  <Banner tone="error">{previewError}</Banner>
-                </div>
-              )}
-
-              {/* 预演结果 */}
-              {dryRun && previewedJk === selectedJk && (
-                <div className="mt-4 space-y-3">
-                  <Banner tone="success">
-                    预演成功，未投递。已备好草稿并取得提交所需校验。确认无误后点「② 确认投递」。
-                  </Banner>
-                  {dryRun.answers.length > 0 && (
-                    <div className="rounded-lg border border-slate-200 p-3">
-                      <p className="mb-2 text-sm font-medium text-slate-700">将提交的答案</p>
-                      <ul className="space-y-1 text-sm text-slate-600">
-                        {dryRun.answers.map((a, i) => {
-                          const qq = dryRun.questions.find((x) => x.id === a.questionId);
-                          return (
-                            <li key={a.questionId || i}>
-                              <span className="text-slate-500">
-                                {qq?.label ?? a.questionId}：
-                              </span>
-                              <span className="font-medium text-slate-800">
-                                {answerLabel(qq, a.value)}
-                              </span>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </div>
-                  )}
-                </div>
+              ) : (
+                !submitResult && (
+                  <p className="mt-2 text-xs text-slate-400">
+                    该岗位已就绪，点「一键投递」即直接提交（不可逆，无需预演）。
+                  </p>
+                )
               )}
 
               {submitError && (
@@ -890,7 +1307,7 @@ export default function IndeedPage() {
                 <div className="mt-2">
                   <Banner tone="error">
                     ⚠️ 本次投递结果不确定（可能已在服务端完成提交）。请先点「复核投递状态」确认；
-                    若显示未投递、且确需重投，请重新「① 预演」后再确认，切勿直接重复点击投递。
+                    若显示未投递、且确需重投，再点「一键投递」，切勿在未复核前重复点击。
                   </Banner>
                 </div>
               )}
