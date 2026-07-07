@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { MAX_CANDIDATES, MAX_PAGES, type EngageNote } from "@/lib/xiaohongshu/engage";
+import { getCommentedNoteIds } from "@/lib/xiaohongshu/engageDb";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -79,6 +80,13 @@ export async function POST(req: NextRequest) {
         type: (n.type ?? "normal").trim(),
       });
       if (notes.length >= MAX_CANDIDATES) break;
+    }
+    // 标注哪些已评论过(去重库)，供前端提示 + 不再自动勾选。DB 不可用时降级为「都未评论」。
+    try {
+      const commented = await getCommentedNoteIds(notes.map((n) => n.id));
+      for (const n of notes) n.commented = commented.has(n.id);
+    } catch (e) {
+      console.error("[engage/notes] 去重库查询失败(降级)", { name: (e as Error)?.name });
     }
     return NextResponse.json({ success: true, notes });
   } catch (err) {

@@ -16,7 +16,7 @@
     {
       "name": "autoxhs-web-verify",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "/Users/andyxiongzheng/AndyXiongZheng LLC/Autoxhs/web", "run", "dev", "--", "-p", "3111"],
+      "runtimeArgs": ["--prefix", "/Users/andyxiongzheng/AndyXiongZheng LLC/Autoxhs/web", "run", "dev:verify"],
       "port": 3111
     },
     {

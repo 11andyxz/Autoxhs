@@ -13,6 +13,8 @@ export type EngageNote = {
   user: string;
   liked: string;
   type: string;
+  /** 是否在「已评论去重库」里（之前已成功互动过）。用于避免重复评论。 */
+  commented?: boolean;
 };
 
 /** 笔记来源方式。 */

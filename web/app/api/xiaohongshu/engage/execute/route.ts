@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { rateLimit } from "@/lib/rateLimit";
 import { clampCommentLength } from "@/lib/xiaohongshu/comment";
+import { markCommented } from "@/lib/xiaohongshu/engageDb";
+import { buildNoteUrl } from "@/lib/xiaohongshu/url";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,7 +65,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let body: { noteId?: string; comment?: string; likeComment?: boolean; likeNote?: boolean };
+  let body: {
+    noteId?: string;
+    comment?: string;
+    likeComment?: boolean;
+    likeNote?: boolean;
+    xsecToken?: string;
+    title?: string;
+  };
   try {
     body = await req.json();
   } catch {
@@ -71,6 +80,8 @@ export async function POST(req: NextRequest) {
   }
 
   const noteId = (body.noteId ?? "").trim();
+  const xsecToken = (body.xsecToken ?? "").trim();
+  const title = (body.title ?? "").trim();
   const comment = clampCommentLength((body.comment ?? "").trim());
   const likeComment = body.likeComment !== false; // 默认 true（点赞自己的评论）
   const likeNote = body.likeNote !== false; // 默认 true（点赞帖子）
@@ -139,6 +150,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // 评论成功 → 记入「已评论去重库」，以后不再重复评论这篇（best-effort：DB 不可用不影响本次结果）。
+  let recorded = false;
+  try {
+    await markCommented({
+      noteId,
+      url: buildNoteUrl(noteId, xsecToken),
+      title,
+      comment,
+      likedComment: commentLiked,
+      likedNote: noteLiked,
+    });
+    recorded = true;
+  } catch (e) {
+    console.error("[engage/execute] 记录去重库失败(忽略)", { name: (e as Error)?.name });
+  }
+
   return NextResponse.json({
     success: true,
     outcome: "posted",
@@ -146,6 +173,7 @@ export async function POST(req: NextRequest) {
     commentId: commentId ?? null,
     commentLiked,
     noteLiked,
+    recorded,
     note: softNotes.length ? softNotes.join("；") : undefined,
   });
 }

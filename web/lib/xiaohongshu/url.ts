@@ -28,3 +28,9 @@ export function parseNoteRef(raw: string): { noteId: string; xsecToken: string }
     return null;
   }
 }
+
+/** 由 note_id(+可选 xsec_token) 拼回可打开的笔记链接，用于记录「已操作过的帖子」。 */
+export function buildNoteUrl(noteId: string, xsecToken?: string): string {
+  const base = `https://www.xiaohongshu.com/explore/${noteId}`;
+  return xsecToken ? `${base}?xsec_token=${xsecToken}` : base;
+}

@@ -92,6 +92,9 @@ export default function XhsEngagePage() {
 
   const hasPreviews = Object.keys(previews).length > 0;
   const busy = loadingNotes || generating || executing;
+  // 候选中已评论过 / 未评论 的数量（用于提示 + 自动勾选跳过已评论）
+  const commentedCount = useMemo(() => candidates.filter((n) => n.commented).length, [candidates]);
+  const freshCount = candidates.length - commentedCount;
 
   // 切换来源 / 重新取候选时，清空下游状态，避免残留
   function resetDownstream() {
@@ -104,17 +107,19 @@ export default function XhsEngagePage() {
   }
 
   function toggleSelect(id: string) {
+    const note = candidateById.get(id);
+    const isSelected = selectedIds.has(id);
+    if (!isSelected) {
+      if (selectedIds.size >= MAX_NOTES) {
+        showToast(`单批最多 ${MAX_NOTES} 篇，避免触发风控`);
+        return;
+      }
+      if (note?.commented) showToast("这篇之前评论过，注意别重复");
+    }
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        if (next.size >= MAX_NOTES) {
-          showToast(`单批最多 ${MAX_NOTES} 篇，避免触发风控`);
-          return prev;
-        }
-        next.add(id);
-      }
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
     // 勾选变化后，之前的预览/结果不再对应，清掉重来
@@ -157,8 +162,8 @@ export default function XhsEngagePage() {
     }
   }
 
-  // 解析粘贴的链接（客户端解析，需含 xsec_token）
-  function parseLinks() {
+  // 解析粘贴的链接（客户端解析，需含 xsec_token），并标注哪些已评论过
+  async function parseLinks() {
     const lines = linksText
       .split(/\r?\n/)
       .map((s) => s.trim())
@@ -177,20 +182,36 @@ export default function XhsEngagePage() {
       notes.push({ id: ref.noteId, xsecToken: ref.xsecToken, title: "", user: "", liked: "", type: "normal" });
     }
     resetDownstream();
-    setCandidates(notes);
-    setNotesError(
-      notes.length === 0
-        ? "没有解析到有效链接。请粘贴完整的小红书笔记链接（需带 xsec_token）。"
-        : null,
-    );
-    if (notes.length > 0) {
-      // 链接是用户主动粘贴的，默认全选（截断到上限）
-      setSelectedIds(new Set(notes.slice(0, MAX_NOTES).map((n) => n.id)));
-      showToast(
-        `已解析 ${notes.length} 篇${bad ? `（${bad} 行无效已跳过）` : ""}` +
-          (notes.length > MAX_NOTES ? `，已选中前 ${MAX_NOTES} 篇` : ""),
-      );
+    if (notes.length === 0) {
+      setCandidates([]);
+      setNotesError("没有解析到有效链接。请粘贴完整的小红书笔记链接（需带 xsec_token）。");
+      return;
     }
+    setNotesError(null);
+    setLoadingNotes(true);
+    // 查去重库，标注已评论过的（DB 不可用则降级为都未评论）
+    let commentedSet = new Set<string>();
+    try {
+      const res = await fetch("/api/xiaohongshu/engage/commented", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ noteIds: notes.map((n) => n.id) }),
+      });
+      const json = (await res.json().catch(() => null)) as { commented?: string[] } | null;
+      commentedSet = new Set(json?.commented ?? []);
+    } catch {
+      /* 降级：查不到就都当未评论 */
+    }
+    for (const n of notes) n.commented = commentedSet.has(n.id);
+    setCandidates(notes);
+    // 默认勾选：粘贴链接中「未评论过」的前 N 篇（跳过已评论，避免重复）
+    const fresh = notes.filter((n) => !n.commented).slice(0, MAX_NOTES);
+    setSelectedIds(new Set(fresh.map((n) => n.id)));
+    setLoadingNotes(false);
+    showToast(
+      `已解析 ${notes.length} 篇${bad ? `（${bad} 行无效）` : ""}，选中 ${fresh.length} 篇` +
+        (commentedSet.size ? `（跳过 ${commentedSet.size} 篇已评论）` : ""),
+    );
   }
 
   // 生成一条评论（预览用）
@@ -312,7 +333,15 @@ export default function XhsEngagePage() {
       const res = await fetch("/api/xiaohongshu/engage/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ noteId: note.id, comment, likeComment, likeNote }),
+        body: JSON.stringify({
+          noteId: note.id,
+          comment,
+          likeComment,
+          likeNote,
+          // 传 token + 标题：成功后服务端据此把可打开的链接 + 标题记入去重库
+          xsecToken: note.xsecToken,
+          title: previews[note.id]?.title || note.title,
+        }),
       });
       const json = (await res.json().catch(() => null)) as
         | {
@@ -321,11 +350,20 @@ export default function XhsEngagePage() {
             commentPosted?: boolean;
             commentLiked?: boolean;
             noteLiked?: boolean;
+            recorded?: boolean;
             note?: string;
             error?: string;
           }
         | null;
       if (json?.success) {
+        // 已成功评论：把这篇在候选列表标记为「已评论」，本次及以后都不再重复。
+        setCandidates((prev) =>
+          prev.map((c) => (c.id === note.id ? { ...c, commented: true } : c)),
+        );
+        const softNote =
+          json.recorded === false
+            ? [json.note, "未写入去重库(DB 不可用)"].filter(Boolean).join("；")
+            : json.note;
         setResults((prev) => ({
           ...prev,
           [note.id]: {
@@ -333,7 +371,7 @@ export default function XhsEngagePage() {
             commentPosted: true,
             commentLiked: json.commentLiked,
             noteLiked: json.noteLiked,
-            note: json.note,
+            note: softNote,
           },
         }));
       } else if (json?.outcome === "unknown") {
@@ -524,17 +562,25 @@ export default function XhsEngagePage() {
             <div className="mt-4">
               <div className="mb-2 flex items-center justify-between text-xs text-gray-500">
                 <span>
-                  已选 {selectedIds.size} / 上限 {MAX_NOTES}（共 {candidates.length} 篇候选）
+                  已选 {selectedIds.size} / 上限 {MAX_NOTES}（共 {candidates.length} 篇
+                  {commentedCount > 0 ? `，${commentedCount} 篇已评论过` : ""}）
                 </span>
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || freshCount === 0}
                   onClick={() =>
-                    setSelectedIds(new Set(candidates.slice(0, MAX_NOTES).map((n) => n.id)))
+                    setSelectedIds(
+                      new Set(
+                        candidates
+                          .filter((n) => !n.commented)
+                          .slice(0, MAX_NOTES)
+                          .map((n) => n.id),
+                      ),
+                    )
                   }
                   className="text-xhs underline disabled:opacity-50"
                 >
-                  选中前 {Math.min(MAX_NOTES, candidates.length)} 篇
+                  选中前 {Math.min(MAX_NOTES, freshCount)} 篇（跳过已评论）
                 </button>
               </div>
               <ul className="max-h-72 space-y-1.5 overflow-y-auto rounded-xl border border-gray-100 bg-gray-50/60 p-2">
@@ -556,6 +602,11 @@ export default function XhsEngagePage() {
                         />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate font-medium text-gray-800">
+                            {n.commented && (
+                              <span className="mr-1 rounded bg-emerald-100 px-1.5 py-0.5 align-middle text-[10px] font-medium text-emerald-700">
+                                已评论过
+                              </span>
+                            )}
                             {n.title || "（无标题 · 链接笔记）"}
                           </span>
                           <span className="mt-0.5 block text-xs text-gray-400">

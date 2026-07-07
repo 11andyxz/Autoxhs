@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3100",
+    "dev:verify": "NEXT_DIST_DIR=.next-verify next dev -p 3111",
     "build": "next build",
     "start": "next start -p 3100",
     "lint": "next lint",
