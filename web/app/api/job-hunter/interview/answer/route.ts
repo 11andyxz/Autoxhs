@@ -8,8 +8,10 @@ import {
   getQuestion,
   getSkill,
   insertAnswer,
+  updateQuestionSr,
   updateSkillMastery,
 } from "@/lib/job-hunter/interview/repo";
+import { nextReviewLabel, scheduleNext, scoreToQuality, srState } from "@/lib/job-hunter/interview/sr";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -58,6 +60,18 @@ export async function POST(req: NextRequest) {
       grade,
     });
 
+    // 间隔重复(遗忘曲线):按本次评分折算 quality,更新该题的下次到期时间。
+    const sr = scheduleNext(
+      {
+        ease_factor: q.ease_factor,
+        interval_days: q.interval_days,
+        repetitions: q.repetitions,
+        lapses: q.lapses,
+      },
+      scoreToQuality(grade.total),
+    );
+    await updateQuestionSr(questionId, sr, grade.total);
+
     // 评分后才揭示参考答案
     return NextResponse.json({
       success: true,
@@ -65,6 +79,12 @@ export async function POST(req: NextRequest) {
       mastery,
       skillId: q.skill_id,
       referenceAnswer: q.reference_answer,
+      review: {
+        intervalDays: sr.interval_days,
+        nextReviewLabel: nextReviewLabel(sr.interval_days),
+        state: srState({ reviewed: true, interval_days: sr.interval_days }),
+        passed: scoreToQuality(grade.total) >= 3,
+      },
     });
   } catch (err) {
     return fail(err, "answer");

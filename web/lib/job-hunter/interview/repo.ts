@@ -11,10 +11,42 @@ import type { Grade, QuestionType } from "./schema";
 
 let schemaReady: Promise<void> | null = null;
 
+/** 执行 DDL,忽略「目标已是期望状态」的错误码(列/键已存在),让迁移可安全重跑。 */
+async function execIgnoring(sql: string, ignoreCodes: string[]): Promise<void> {
+  const p = getPool();
+  try {
+    await p.query(sql);
+  } catch (err) {
+    const code = (err as { code?: string } | null)?.code;
+    if (!code || !ignoreCodes.includes(code)) throw err;
+  }
+}
+
+/**
+ * 迁移完成标记(记在 ip_meta)。不依赖 information_schema——
+ * 该实例上 information_schema 在 DDL 后可能短暂滞后,不可作幂等判据。
+ */
+async function migrationDone(key: string): Promise<boolean> {
+  const p = getPool();
+  const [rows] = await p.query<RowDataPacket[]>("SELECT 1 FROM ip_meta WHERE k = ? LIMIT 1", [key]);
+  return rows.length > 0;
+}
+async function markMigrationDone(key: string): Promise<void> {
+  const p = getPool();
+  await p.query("INSERT IGNORE INTO ip_meta (k, v) VALUES (?, '1')", [key]);
+}
+
 export function ensureInterviewSchema(): Promise<void> {
   if (schemaReady) return schemaReady;
   schemaReady = (async () => {
     const p = getPool();
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS ip_meta (
+        k VARCHAR(64) PRIMARY KEY,
+        v VARCHAR(255) NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
     await p.query(`
       CREATE TABLE IF NOT EXISTS ip_session (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -84,7 +116,71 @@ export function ensureInterviewSchema(): Promise<void> {
         CONSTRAINT fk_ip_chunk_doc FOREIGN KEY (doc_id) REFERENCES ip_kb_doc(id) ON DELETE CASCADE
       )
     `);
-  })();
+
+    // ---- 迁移 ip_bank_v1:题库绑定简历 + 每题间隔重复(遗忘曲线)所需的列 ----
+    // 整块由标记守卫,只跑一次;每条 ALTER 又用 execIgnoring 容忍「已存在」,可安全重跑(自愈)。
+    if (!(await migrationDone("ip_bank_v1"))) {
+      // ip_session:题库模式标识 + 简历指纹(用于把题库绑定到具体简历) + 展示标题
+      await execIgnoring(
+        "ALTER TABLE ip_session ADD COLUMN mode VARCHAR(16) NOT NULL DEFAULT 'training'",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await execIgnoring(
+        "ALTER TABLE ip_session ADD COLUMN resume_hash CHAR(64) NULL",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await execIgnoring(
+        "ALTER TABLE ip_session ADD COLUMN title VARCHAR(255) NOT NULL DEFAULT ''",
+        ["ER_DUP_FIELDNAME"],
+      );
+      // 简历指纹唯一(NULL 可重复,不影响训练会话);命中即复用同一题库。
+      await execIgnoring(
+        "ALTER TABLE ip_session ADD UNIQUE KEY uniq_resume_hash (resume_hash)",
+        ["ER_DUP_KEYNAME"],
+      );
+
+      // ip_question:SM-2 间隔重复状态
+      await execIgnoring(
+        "ALTER TABLE ip_question ADD COLUMN ease_factor DECIMAL(4,2) NOT NULL DEFAULT 2.50",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await execIgnoring(
+        "ALTER TABLE ip_question ADD COLUMN interval_days INT NOT NULL DEFAULT 0",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await execIgnoring(
+        "ALTER TABLE ip_question ADD COLUMN repetitions INT NOT NULL DEFAULT 0",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await execIgnoring(
+        "ALTER TABLE ip_question ADD COLUMN lapses INT NOT NULL DEFAULT 0",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await execIgnoring(
+        "ALTER TABLE ip_question ADD COLUMN due_at DATETIME NULL",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await execIgnoring(
+        "ALTER TABLE ip_question ADD COLUMN last_reviewed_at DATETIME NULL",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await execIgnoring(
+        "ALTER TABLE ip_question ADD COLUMN last_score TINYINT NULL",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await execIgnoring(
+        "ALTER TABLE ip_question ADD INDEX idx_ip_q_due (session_id, due_at)",
+        ["ER_DUP_KEYNAME"],
+      );
+
+      await markMigrationDone("ip_bank_v1");
+    }
+  })().catch((err) => {
+    // 建表/迁移失败别把「已拒绝的 promise」永久缓存,否则本进程后续所有调用都直接失败,
+    // 直到重启才恢复。清空后下次调用可重试(对齐 expense/repo 的做法)。
+    schemaReady = null;
+    throw err;
+  });
   return schemaReady;
 }
 
@@ -99,6 +195,9 @@ export type SessionRow = {
   language: string;
   jd_text: string;
   resume_text: string;
+  mode: string;
+  title: string;
+  resume_hash: string | null;
 };
 
 export async function createSession(
@@ -115,10 +214,38 @@ export async function createSession(
   return res.insertId;
 }
 
+/** 题库会话:绑定简历指纹,便于「同一份简历命中同一题库」。 */
+export async function createBankSession(args: {
+  language: string;
+  jdText: string;
+  resumeText: string;
+  resumeHash: string;
+  title: string;
+}): Promise<number> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const [res] = await p.execute<ResultSetHeader>(
+    "INSERT INTO ip_session (language, jd_text, resume_text, mode, resume_hash, title) VALUES (?, ?, ?, 'bank', ?, ?)",
+    [args.language, args.jdText, args.resumeText, args.resumeHash, args.title],
+  );
+  return res.insertId;
+}
+
+/** 按简历指纹找已存在的题库会话(用于幂等:同一简历不重复建库)。 */
+export async function findBankSessionByHash(resumeHash: string): Promise<SessionRow | null> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT id, language, jd_text, resume_text, mode, resume_hash, title FROM ip_session WHERE resume_hash = ? LIMIT 1",
+    [resumeHash],
+  );
+  return (rows[0] as SessionRow) ?? null;
+}
+
 export async function getSession(id: number): Promise<SessionRow | null> {
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    "SELECT id, language, jd_text, resume_text FROM ip_session WHERE id = ?",
+    "SELECT id, language, jd_text, resume_text, mode, resume_hash, title FROM ip_session WHERE id = ?",
     [id],
   );
   return (rows[0] as SessionRow) ?? null;
@@ -157,6 +284,14 @@ export async function getSkills(sessionId: number): Promise<SkillRow[]> {
     [sessionId],
   );
   return (rows as SkillRow[]).map((r) => ({ ...r, mastery: Number(r.mastery) }));
+}
+
+/** 技能名(小写) → id 映射,供题库把每题挂到对应技能上。 */
+export async function getSkillIdMap(sessionId: number): Promise<Map<string, number>> {
+  const rows = await getSkills(sessionId);
+  const map = new Map<string, number>();
+  for (const r of rows) map.set(r.name.toLowerCase(), r.id);
+  return map;
 }
 
 export async function getSkill(skillId: number): Promise<SkillRow | null> {
@@ -214,12 +349,16 @@ export type QuestionRow = {
   prompt: string;
   reference_answer: string;
   rubric: Array<{ criterion: string; weight: number }>;
+  ease_factor: number;
+  interval_days: number;
+  repetitions: number;
+  lapses: number;
 };
 
 export async function getQuestion(id: number): Promise<QuestionRow | null> {
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    "SELECT id, session_id, skill_id, type, prompt, reference_answer, rubric_json FROM ip_question WHERE id = ?",
+    "SELECT id, session_id, skill_id, type, prompt, reference_answer, rubric_json, ease_factor, interval_days, repetitions, lapses FROM ip_question WHERE id = ?",
     [id],
   );
   const r = rows[0] as (RowDataPacket & { rubric_json: unknown }) | undefined;
@@ -232,6 +371,10 @@ export async function getQuestion(id: number): Promise<QuestionRow | null> {
     prompt: r.prompt,
     reference_answer: r.reference_answer,
     rubric: asJson(r.rubric_json),
+    ease_factor: Number(r.ease_factor),
+    interval_days: Number(r.interval_days),
+    repetitions: Number(r.repetitions),
+    lapses: Number(r.lapses),
   };
 }
 
@@ -244,6 +387,181 @@ export async function getAskedPrompts(sessionId: number, limit = 30): Promise<st
     [sessionId, limit],
   );
   return rows.map((r) => r.prompt as string);
+}
+
+/* ---------------- question bank + 间隔重复 ---------------- */
+
+export type BankInsertItem = {
+  skillId: number;
+  type: QuestionType;
+  prompt: string;
+  referenceAnswer: string;
+  rubric: Array<{ criterion: string; weight: number }>;
+};
+
+/** 批量写入题库题目;due_at = NOW() 让它们即刻可复习,repetitions=0 记为「新题」。 */
+export async function insertBankQuestions(
+  sessionId: number,
+  items: BankInsertItem[],
+): Promise<number> {
+  if (!items.length) return 0;
+  const p = getPool();
+  const values = items.map((q) => [
+    sessionId,
+    q.skillId,
+    q.type,
+    q.prompt,
+    q.referenceAnswer,
+    JSON.stringify(q.rubric),
+  ]);
+  const [res] = await p.query<ResultSetHeader>(
+    "INSERT INTO ip_question (session_id, skill_id, type, prompt, reference_answer, rubric_json, due_at) VALUES " +
+      values.map(() => "(?, ?, ?, ?, ?, ?, NOW())").join(", "),
+    values.flat(),
+  );
+  return res.affectedRows ?? items.length;
+}
+
+export async function countQuestions(sessionId: number): Promise<number> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT COUNT(*) AS n FROM ip_question WHERE session_id = ?",
+    [sessionId],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+export type NextCardRow = {
+  id: number;
+  skill_id: number;
+  skill: string;
+  category: string;
+  type: QuestionType;
+  prompt: string;
+  interval_days: number;
+  last_reviewed_at: string | null;
+};
+
+/**
+ * 取下一张要复习的卡:优先已到期的复习题(复习过 且 due_at<=NOW(),先到期先复习),
+ * 其次未练过的新题(last_reviewed_at 为空),都没有则返回 null(今日已清空)。
+ * 注意:用 last_reviewed_at 判断新题——答砸后 SM-2 会把 repetitions 归零,
+ * 若按 repetitions=0 判断,重学中的失败卡会被误当新题、无视 due_at 立刻重现。
+ */
+export async function getNextCard(sessionId: number): Promise<NextCardRow | null> {
+  const p = getPool();
+  const [rows] = await p.query<RowDataPacket[]>(
+    `SELECT q.id, q.skill_id, s.name AS skill, s.category, q.type, q.prompt,
+            q.interval_days, q.last_reviewed_at
+       FROM ip_question q
+       JOIN ip_skill s ON s.id = q.skill_id
+      WHERE q.session_id = ?
+        AND (q.last_reviewed_at IS NULL OR q.due_at IS NULL OR q.due_at <= NOW())
+      ORDER BY (q.last_reviewed_at IS NOT NULL AND q.due_at IS NOT NULL AND q.due_at <= NOW()) DESC,
+               q.due_at ASC, q.id ASC
+      LIMIT 1`,
+    [sessionId],
+  );
+  const r = rows[0] as NextCardRow | undefined;
+  if (!r) return null;
+  return { ...r, interval_days: Number(r.interval_days) };
+}
+
+export type BankItemRow = {
+  id: number;
+  skill: string;
+  category: string;
+  type: QuestionType;
+  prompt: string;
+  repetitions: number;
+  interval_days: number;
+  lapses: number;
+  last_score: number | null;
+  due_at: string | null;
+  last_reviewed_at: string | null;
+  is_due: number; // 1 = 已到期/可复习
+};
+
+/** 题库全量列表(含每题的间隔重复状态),给题库面板展示。 */
+export async function getBankList(sessionId: number): Promise<BankItemRow[]> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    `SELECT q.id, s.name AS skill, s.category, q.type, q.prompt,
+            q.repetitions, q.interval_days, q.lapses, q.last_score,
+            q.due_at, q.last_reviewed_at,
+            (q.last_reviewed_at IS NULL OR q.due_at IS NULL OR q.due_at <= NOW()) AS is_due
+       FROM ip_question q
+       JOIN ip_skill s ON s.id = q.skill_id
+      WHERE q.session_id = ?
+      ORDER BY q.id ASC`,
+    [sessionId],
+  );
+  return (rows as BankItemRow[]).map((r) => ({
+    ...r,
+    repetitions: Number(r.repetitions),
+    interval_days: Number(r.interval_days),
+    lapses: Number(r.lapses),
+    last_score: r.last_score == null ? null : Number(r.last_score),
+    is_due: Number(r.is_due),
+  }));
+}
+
+export type SrCounts = {
+  total: number;
+  fresh: number; // 新题(未练过)
+  due: number; // 已到期待复习
+  later: number; // 已排期、尚未到期
+  mastered: number; // interval >= 21 天
+};
+
+/** 复习面板的汇总计数。 */
+export async function getSrCounts(sessionId: number): Promise<SrCounts> {
+  const p = getPool();
+  const [rows] = await p.query<RowDataPacket[]>(
+    // 用 last_reviewed_at 判断新题/复习题:答砸后 repetitions 归零,不能拿它当「新题」判据。
+    // fresh | due | later 三者互斥且完备;mastered 是「复习过且间隔≥21天」的叠加视图。
+    `SELECT
+        COUNT(*) AS total,
+        SUM(last_reviewed_at IS NULL) AS fresh,
+        SUM(last_reviewed_at IS NOT NULL AND due_at IS NOT NULL AND due_at <= NOW()) AS due,
+        SUM(last_reviewed_at IS NOT NULL AND due_at IS NOT NULL AND due_at > NOW()) AS later,
+        SUM(last_reviewed_at IS NOT NULL AND interval_days >= 21) AS mastered
+       FROM ip_question WHERE session_id = ?`,
+    [sessionId],
+  );
+  const r = rows[0] ?? {};
+  return {
+    total: Number(r.total ?? 0),
+    fresh: Number(r.fresh ?? 0),
+    due: Number(r.due ?? 0),
+    later: Number(r.later ?? 0),
+    mastered: Number(r.mastered ?? 0),
+  };
+}
+
+/** 作答后更新该题的 SM-2 状态,并按新间隔把 due_at 顺延(SQL 侧 DATE_ADD,避免时区漂移)。 */
+export async function updateQuestionSr(
+  questionId: number,
+  update: { ease_factor: number; interval_days: number; repetitions: number; lapses: number },
+  lastScore: number,
+): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    `UPDATE ip_question
+        SET ease_factor = ?, interval_days = ?, repetitions = ?, lapses = ?,
+            last_score = ?, last_reviewed_at = NOW(),
+            due_at = DATE_ADD(NOW(), INTERVAL ? DAY)
+      WHERE id = ?`,
+    [
+      update.ease_factor,
+      update.interval_days,
+      update.repetitions,
+      update.lapses,
+      lastScore,
+      update.interval_days,
+      questionId,
+    ],
+  );
 }
 
 /* ---------------- answers ---------------- */

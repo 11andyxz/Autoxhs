@@ -97,6 +97,86 @@ export const QUESTION_JSON_SCHEMA = {
   required: ["type", "prompt", "referenceAnswer", "rubric"],
 } as const;
 
+/* ---------------- 2b) 一次性出一整套题库（面试官视角，重点行为面试 BQ） ---------------- */
+
+export const BankQuestionSchema = z.object({
+  type: z.enum(QUESTION_TYPES),
+  skill: z.string(), // 考核主题/能力项，如 "Ownership"、"Conflict"、"Spring Boot"
+  category: z.string(), // 分类，如 Behavioral / 后端 / 系统设计
+  importance: z.number(), // 1~5
+  prompt: z.string(),
+  referenceAnswer: z.string(),
+  rubric: z.array(RubricItemSchema),
+});
+export const BankResultSchema = z.object({
+  language: z.string(),
+  questions: z.array(BankQuestionSchema),
+});
+export type BankQuestion = z.infer<typeof BankQuestionSchema>;
+export type BankResult = z.infer<typeof BankResultSchema>;
+
+export const BANK_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    language: {
+      type: "string",
+      description: "面试问答应使用的语言,跟随简历/JD;英文简历用 English。",
+    },
+    questions: {
+      type: "array",
+      description:
+        "一整套面试题库,10~16 道,严格基于候选人简历里的真实经历/项目/技能出题。以行为面试(behavioral, STAR)为主(至少 60%),辅以少量与简历技能相关的技术/概念/系统设计题。",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          type: {
+            type: "string",
+            enum: QUESTION_TYPES as unknown as string[],
+            description: "题型:behavioral 行为(STAR)/concept 概念/scenario 场景/system-design 系统设计",
+          },
+          skill: {
+            type: "string",
+            description:
+              "本题考核的主题或能力项。行为题用能力维度(如 Ownership/Leadership/Conflict/Ambiguity/Failure/Impact/Teamwork);技术题用简历里的具体技能名。",
+          },
+          category: {
+            type: "string",
+            description: "分类,如 Behavioral / 后端 / 前端 / 系统设计 / 数据库 / AI 等",
+          },
+          importance: { type: "integer", description: "该题对面试的重要度 1~5(5 最高)" },
+          prompt: {
+            type: "string",
+            description:
+              "面试题本身(只给候选人看的题干)。行为题要像面试官提问,并锚定简历里的某段具体经历/项目,如 'Tell me about a time on <该项目> when…'。",
+          },
+          referenceAnswer: {
+            type: "string",
+            description:
+              "理想参考答案/答题框架,作为评分基准。行为题按 STAR(情境/任务/行动/结果)组织,并尽量引用简历里的该段真实经历与可量化成果。",
+          },
+          rubric: {
+            type: "array",
+            description: "3~6 条评分要点,每条带相对权重。行为题应覆盖 STAR 完整度、具体性/量化、个人贡献、复盘与收获。",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                criterion: { type: "string", description: "评分维度/采分点" },
+                weight: { type: "number", description: "相对权重,正数" },
+              },
+              required: ["criterion", "weight"],
+            },
+          },
+        },
+        required: ["type", "skill", "category", "importance", "prompt", "referenceAnswer", "rubric"],
+      },
+    },
+  },
+  required: ["language", "questions"],
+} as const;
+
 /* ---------------- 3) 评分 ---------------- */
 
 export const CriterionScoreSchema = z.object({
@@ -197,7 +277,8 @@ export function normalizeSkills(input: unknown): SkillsResult {
     })
     .slice(0, 40);
   if (!skills.length) throw new SchemaValidationError("未能拆解出技能");
-  return { language: t(parsed.language, 60) || "English", skills };
+  // 对齐 ip_session.language VARCHAR(50)
+  return { language: t(parsed.language, 50) || "English", skills };
 }
 
 export function normalizeQuestion(input: unknown): QuestionGen {
@@ -241,4 +322,42 @@ export function normalizeCoach(input: unknown): Coach {
     modelAnswer: t(parsed.modelAnswer, 6000),
     practiceQuestion: t(parsed.practiceQuestion, 3000),
   };
+}
+
+/** 出题题库上限:一次最多收录 24 道,防模型跑飞 */
+const MAX_BANK_QUESTIONS = 24;
+
+export function normalizeBank(input: unknown): BankResult {
+  const parsed = BankResultSchema.parse(input);
+  const seenPrompts = new Set<string>();
+  const questions = parsed.questions
+    .map((q) => {
+      const rubric = q.rubric
+        .map((r) => ({
+          criterion: t(r.criterion, 500),
+          weight: Number.isFinite(r.weight) && r.weight > 0 ? r.weight : 1,
+        }))
+        .filter((r) => r.criterion)
+        .slice(0, 8);
+      return {
+        type: q.type,
+        skill: t(q.skill, 255) || "General",
+        category: t(q.category, 100) || "General",
+        importance: clampImportance(q.importance),
+        prompt: t(q.prompt, 8000),
+        referenceAnswer: t(q.referenceAnswer, 12000),
+        rubric: rubric.length ? rubric : [{ criterion: "Correctness & completeness", weight: 1 }],
+      };
+    })
+    .filter((q) => {
+      if (!q.prompt) return false;
+      const k = q.prompt.toLowerCase();
+      if (seenPrompts.has(k)) return false; // 去掉完全重复的题干
+      seenPrompts.add(k);
+      return true;
+    })
+    .slice(0, MAX_BANK_QUESTIONS);
+  if (!questions.length) throw new SchemaValidationError("未能生成题库");
+  // 对齐 ip_session.language VARCHAR(50)
+  return { language: t(parsed.language, 50) || "English", questions };
 }

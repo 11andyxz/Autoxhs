@@ -1,6 +1,7 @@
 import { getClient, getModel } from "@/lib/openai";
 
 import {
+  BANK_SYSTEM,
   COACH_SYSTEM,
   GRADE_SYSTEM,
   QUESTION_SYSTEM,
@@ -9,15 +10,18 @@ import {
   dataBlock,
 } from "./prompt";
 import {
+  BANK_JSON_SCHEMA,
   COACH_JSON_SCHEMA,
   GRADE_JSON_SCHEMA,
   QUESTION_JSON_SCHEMA,
   SKILLS_JSON_SCHEMA,
   SchemaValidationError,
+  normalizeBank,
   normalizeCoach,
   normalizeGrade,
   normalizeQuestion,
   normalizeSkills,
+  type BankResult,
   type Coach,
   type Grade,
   type QuestionGen,
@@ -119,6 +123,26 @@ export function generateQuestion(args: {
     QUESTION_JSON_SCHEMA as unknown as Record<string, unknown>,
     "question",
     normalizeQuestion,
+  );
+}
+
+/** 2b) 一次性生成整套「按简历定制」的面试题库(面试官视角,重点行为面试) */
+export function buildQuestionBank(args: {
+  resumeText: string;
+  jdText: string;
+  kbExcerpts: string[];
+}): Promise<BankResult> {
+  const content = dataBlock([
+    { label: "CANDIDATE RESUME", body: args.resumeText },
+    { label: "TARGET JOB DESCRIPTION (optional)", body: args.jdText },
+    { label: "KNOWLEDGE BASE EXCERPTS", body: args.kbExcerpts.join("\n\n---\n\n") },
+  ]);
+  return callJson(
+    BANK_SYSTEM,
+    content,
+    BANK_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "bank",
+    normalizeBank,
   );
 }
 

@@ -52,6 +52,9 @@ export default function JobHunterPage() {
   const [startingTraining, setStartingTraining] = useState(false);
   const [trainingError, setTrainingError] = useState<string | null>(null);
 
+  const [buildingBank, setBuildingBank] = useState(false);
+  const [bankError, setBankError] = useState<string | null>(null);
+
   const [hintIndex, setHintIndex] = useState(0);
   const resultRef = useRef<HTMLDivElement | null>(null);
   const resumeFrameRef = useRef<HTMLIFrameElement | null>(null);
@@ -95,6 +98,40 @@ export default function JobHunterPage() {
       setTrainingError("网络异常,请稍后重试。");
     } finally {
       setStartingTraining(false);
+    }
+  }
+
+  // 只用简历(JD 可选)直接生成「面试题库」——不需要先定制简历。
+  // AI 当面试官按简历出题(重点行为面试 BQ),每题按遗忘曲线安排复习。
+  async function handleBuildBank() {
+    if (resumeMode === "file" ? !resumeFile : !resumeText.trim()) {
+      setBankError("请先提供简历(上传 PDF/DOCX 或粘贴文本)。");
+      return;
+    }
+    setBankError(null);
+    setBuildingBank(true);
+    const fd = new FormData();
+    if (resumeMode === "file" && resumeFile) fd.append("resumeFile", resumeFile);
+    else fd.append("resumeText", resumeText);
+    // JD 可选:有就带上,让技术题更贴目标岗位
+    if (jdMode === "file" ? jdFile : jdText.trim()) {
+      if (jdMode === "file" && jdFile) fd.append("jdFile", jdFile);
+      else fd.append("jdText", jdText);
+    }
+    try {
+      const res = await fetch("/api/job-hunter/interview/build", { method: "POST", body: fd });
+      const json = (await res.json().catch(() => null)) as
+        | { success?: boolean; sessionId?: number; error?: string }
+        | null;
+      if (!res.ok || !json?.success || !json.sessionId) {
+        setBankError(json?.error || "生成题库失败,请稍后重试。");
+        return;
+      }
+      router.push(`/job-hunter/interview?session=${json.sessionId}`);
+    } catch {
+      setBankError("网络异常,请稍后重试。");
+    } finally {
+      setBuildingBank(false);
     }
   }
 
@@ -290,6 +327,26 @@ export default function JobHunterPage() {
         >
           {loading ? LOADING_HINTS[hintIndex] : "生成定制简历"}
         </button>
+
+        {/* 面试题库入口(始终可用:只需①的简历,JD 可选;不必先定制简历) */}
+        <div className="mt-4 rounded-2xl border border-indigo-200 bg-indigo-50/50 p-5 shadow-sm">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-indigo-900">🧠 简历面试题库 · 遗忘曲线复习</p>
+              <p className="mt-1 text-xs leading-relaxed text-indigo-700">
+                不改简历也行——用上面「① 你的简历」（JD 可选），我来当面试官，按你的真实经历出一套面试题（以行为面试 BQ 为主），你作答、AI 打分；每道题按遗忘曲线自动安排下次复习。题库绑定这份简历，进度自动保存。
+              </p>
+            </div>
+            <button
+              onClick={handleBuildBank}
+              disabled={buildingBank}
+              className="shrink-0 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {buildingBank ? "正在出题…" : "用这份简历生成题库 →"}
+            </button>
+          </div>
+          {bankError && <p className="mt-2 text-sm text-rose-600">{bankError}</p>}
+        </div>
 
         {/* 结果 */}
         {result && (

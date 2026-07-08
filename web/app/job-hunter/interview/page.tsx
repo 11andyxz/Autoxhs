@@ -23,10 +23,30 @@ type AnswerSummary = {
   created_at: string;
 };
 
+type SrState = "new" | "learning" | "young" | "mastered";
+
+type SrCounts = { total: number; fresh: number; due: number; later: number; mastered: number };
+
+type BankItem = {
+  id: number;
+  skill: string;
+  category: string;
+  type: QuestionType;
+  prompt: string;
+  state: SrState;
+  isDue: boolean;
+  lastScore: number | null;
+  intervalDays: number;
+  dueAt: string | null;
+  lastReviewedAt: string | null;
+};
+
 type Progress = {
-  session: { id: number; language: string };
+  session: { id: number; language: string; mode?: string; title?: string };
   skills: Skill[];
   recentAnswers: AnswerSummary[];
+  srCounts?: SrCounts;
+  bank?: BankItem[];
 };
 
 type CurrentQuestion = {
@@ -34,6 +54,7 @@ type CurrentQuestion = {
   skill: { id: number; name: string; category: string };
   type: QuestionType;
   prompt: string;
+  srState?: SrState;
 };
 
 type Grade = {
@@ -45,7 +66,14 @@ type Grade = {
   advice: string[];
 };
 
-type GradeResult = { grade: Grade; mastery: number; referenceAnswer: string };
+type ReviewInfo = {
+  intervalDays: number;
+  nextReviewLabel: string;
+  state: SrState;
+  passed: boolean;
+};
+
+type GradeResult = { grade: Grade; mastery: number; referenceAnswer: string; review?: ReviewInfo };
 
 type KbDoc = { id: number; title: string; char_count: number; chunk_count: number };
 
@@ -54,6 +82,20 @@ const TYPE_LABEL: Record<QuestionType, string> = {
   scenario: "场景题",
   "system-design": "系统设计",
   behavioral: "行为面试",
+};
+
+const SR_STATE_LABEL: Record<SrState, string> = {
+  new: "新题",
+  learning: "学习中",
+  young: "巩固中",
+  mastered: "已掌握",
+};
+
+const SR_STATE_CLASS: Record<SrState, string> = {
+  new: "bg-sky-50 text-sky-600",
+  learning: "bg-amber-50 text-amber-700",
+  young: "bg-violet-50 text-violet-700",
+  mastered: "bg-emerald-50 text-emerald-700",
 };
 
 function masteryColor(m: number): string {
@@ -94,7 +136,10 @@ export default function InterviewPage() {
   const [coach, setCoach] = useState<{ lesson: string; modelAnswer: string; practiceQuestion: string } | null>(null);
   const [coaching, setCoaching] = useState(false);
 
+  const [reviewExhausted, setReviewExhausted] = useState(false);
+
   const practiceRef = useRef<HTMLDivElement | null>(null);
+  const isBank = progress?.session.mode === "bank";
 
   // 从 URL 读取 session（纯客户端，避免 useSearchParams 的 Suspense 约束）
   useEffect(() => {
@@ -131,6 +176,7 @@ export default function InterviewPage() {
     setPracticeError(null);
     setGrade(null);
     setAnswer("");
+    setReviewExhausted(false);
     setFetchingQuestion(true);
     const { ok, data, error } = await postJson<CurrentQuestion & { success: boolean }>(
       "/api/job-hunter/interview/question",
@@ -142,6 +188,51 @@ export default function InterviewPage() {
       return;
     }
     setQuestion(data);
+    setTimeout(() => practiceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+  }
+
+  // 间隔重复复习:向 /next 要下一张到期/新题(不烧 AI,直接从题库取)。
+  async function startReview() {
+    if (!sessionId) return;
+    setPracticeError(null);
+    setGrade(null);
+    setAnswer("");
+    setReviewExhausted(false);
+    setFetchingQuestion(true);
+    try {
+      const res = await fetch(`/api/job-hunter/interview/next?sessionId=${sessionId}`);
+      const json = await res.json().catch(() => null);
+      setFetchingQuestion(false);
+      if (!res.ok || !json?.success) {
+        setPracticeError(json?.error || "获取复习题失败");
+        return;
+      }
+      if (!json.card) {
+        setReviewExhausted(true);
+        setQuestion(null);
+        return;
+      }
+      setQuestion(json.card as CurrentQuestion);
+      setTimeout(() => practiceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+    } catch {
+      setFetchingQuestion(false);
+      setPracticeError("网络异常,无法获取复习题");
+    }
+  }
+
+  // 从题库列表直接练某一道(题干已在列表里,无需再取)。
+  function practiceBankItem(item: BankItem) {
+    setPracticeError(null);
+    setGrade(null);
+    setAnswer("");
+    setReviewExhausted(false);
+    setQuestion({
+      questionId: item.id,
+      skill: { id: 0, name: item.skill, category: item.category },
+      type: item.type,
+      prompt: item.prompt,
+      srState: item.state,
+    });
     setTimeout(() => practiceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   }
 
@@ -187,14 +278,19 @@ export default function InterviewPage() {
         </Link>
         <header className="mt-4 mb-8">
           <span className="inline-flex items-center rounded-full bg-cyan-50 px-3 py-1 text-xs font-medium text-cyan-600">
-            专项面试训练 · Interview Prep
+            {isBank ? "简历面试题库 · Interview Bank" : "专项面试训练 · Interview Prep"}
           </span>
           <h1 className="mt-3 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
-            针对这份 JD 练到会
+            {isBank ? "按你的简历刷面试题" : "针对这份 JD 练到会"}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-500">
-            按岗位技能出题、打字作答、AI 评分定位弱点，自适应优先练你最薄弱的部分。进度自动保存。
+            {isBank
+              ? "我当面试官、按你简历里的真实经历出题（以行为面试 BQ 为主）；你打字作答，AI 评分并给参考答案，每道题按遗忘曲线自动安排下次复习。进度自动保存。"
+              : "按岗位技能出题、打字作答、AI 评分定位弱点，自适应优先练你最薄弱的部分。进度自动保存。"}
           </p>
+          {isBank && progress?.session.title && (
+            <p className="mt-1 text-xs text-slate-400">题库绑定简历：{progress.session.title}</p>
+          )}
         </header>
 
         {!sessionId && !loadingProgress && (
@@ -215,21 +311,36 @@ export default function InterviewPage() {
 
         {progress && (
           <div className="space-y-6">
+            {/* 复习面板(题库模式):遗忘曲线的今日到期 / 新题 / 已掌握 */}
+            {isBank && progress.srCounts && (
+              <ReviewDashboard
+                counts={progress.srCounts}
+                busy={fetchingQuestion || grading}
+                exhausted={reviewExhausted}
+                hasQuestion={!!question}
+                onStart={startReview}
+              />
+            )}
+
             <SkillPanel
               skills={progress.skills}
               onPractice={(id) => nextQuestion(id)}
               onCoach={requestCoach}
               busy={fetchingQuestion}
+              title={isBank ? "能力项掌握度" : "技能掌握度"}
+              showPractice={!isBank}
             />
 
             <div className="flex flex-wrap items-center gap-3">
-              <button
-                onClick={() => nextQuestion()}
-                disabled={fetchingQuestion || grading}
-                className="rounded-xl bg-cyan-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-cyan-700 disabled:opacity-60"
-              >
-                {fetchingQuestion ? "正在出题…" : question ? "换一题（练最弱）" : "开始练习（练最弱）"}
-              </button>
+              {!isBank && (
+                <button
+                  onClick={() => nextQuestion()}
+                  disabled={fetchingQuestion || grading}
+                  className="rounded-xl bg-cyan-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-cyan-700 disabled:opacity-60"
+                >
+                  {fetchingQuestion ? "正在出题…" : question ? "换一题（练最弱）" : "开始练习（练最弱）"}
+                </button>
+              )}
               <KbManager />
             </div>
 
@@ -256,10 +367,16 @@ export default function InterviewPage() {
                   grade={grade}
                   error={practiceError}
                   onSubmit={submitAnswer}
-                  onNext={() => nextQuestion()}
+                  onNext={isBank ? startReview : () => nextQuestion()}
+                  nextLabel={isBank ? "下一张（复习）→" : "下一题 →"}
                 />
               )}
             </div>
+
+            {/* 题库列表(题库模式) */}
+            {isBank && progress.bank && progress.bank.length > 0 && (
+              <BankPanel items={progress.bank} onPractice={practiceBankItem} busy={fetchingQuestion || grading} />
+            )}
 
             {progress.recentAnswers.length > 0 && (
               <HistoryPanel answers={progress.recentAnswers} />
@@ -276,15 +393,19 @@ function SkillPanel({
   onPractice,
   onCoach,
   busy,
+  title = "技能掌握度",
+  showPractice = true,
 }: {
   skills: Skill[];
   onPractice: (id: number) => void;
   onCoach: (id: number) => void;
   busy: boolean;
+  title?: string;
+  showPractice?: boolean;
 }) {
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <p className="text-sm font-semibold text-slate-800">技能掌握度</p>
+      <p className="text-sm font-semibold text-slate-800">{title}</p>
       <div className="mt-3 space-y-3">
         {skills.map((s) => (
           <div key={s.id}>
@@ -304,13 +425,15 @@ function SkillPanel({
                   style={{ width: `${Math.max(3, Math.round(s.mastery))}%` }}
                 />
               </div>
-              <button
-                onClick={() => onPractice(s.id)}
-                disabled={busy}
-                className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs text-slate-600 hover:border-cyan-300 hover:text-cyan-700 disabled:opacity-50"
-              >
-                练这个
-              </button>
+              {showPractice && (
+                <button
+                  onClick={() => onPractice(s.id)}
+                  disabled={busy}
+                  className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs text-slate-600 hover:border-cyan-300 hover:text-cyan-700 disabled:opacity-50"
+                >
+                  练这个
+                </button>
+              )}
               <button
                 onClick={() => onCoach(s.id)}
                 className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs text-slate-600 hover:border-cyan-300 hover:text-cyan-700"
@@ -334,6 +457,7 @@ function PracticeCard({
   error,
   onSubmit,
   onNext,
+  nextLabel = "下一题 →",
 }: {
   question: CurrentQuestion;
   answer: string;
@@ -343,16 +467,22 @@ function PracticeCard({
   error: string | null;
   onSubmit: () => void;
   onNext: () => void;
+  nextLabel?: string;
 }) {
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="rounded-md bg-cyan-50 px-2 py-0.5 text-xs font-medium text-cyan-700">
           {question.skill.name}
         </span>
         <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
           {TYPE_LABEL[question.type]}
         </span>
+        {question.srState && (
+          <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${SR_STATE_CLASS[question.srState]}`}>
+            {SR_STATE_LABEL[question.srState]}
+          </span>
+        )}
       </div>
       <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-slate-800">{question.prompt}</p>
 
@@ -376,13 +506,21 @@ function PracticeCard({
           {grading ? "AI 正在评分…" : "提交作答"}
         </button>
       ) : (
-        <GradeView grade={grade} onNext={onNext} />
+        <GradeView grade={grade} onNext={onNext} nextLabel={nextLabel} />
       )}
     </div>
   );
 }
 
-function GradeView({ grade, onNext }: { grade: GradeResult; onNext: () => void }) {
+function GradeView({
+  grade,
+  onNext,
+  nextLabel,
+}: {
+  grade: GradeResult;
+  onNext: () => void;
+  nextLabel: string;
+}) {
   const g = grade.grade;
   return (
     <div className="mt-4 border-t border-slate-100 pt-4">
@@ -393,6 +531,18 @@ function GradeView({ grade, onNext }: { grade: GradeResult; onNext: () => void }
         </div>
         <p className="text-xs text-slate-500">该技能掌握度已更新为 {Math.round(grade.mastery)} 分</p>
       </div>
+
+      {grade.review && (
+        <div className="mt-3 flex items-center gap-2 rounded-xl bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
+          <span aria-hidden>🧠</span>
+          <span>
+            {grade.review.passed ? "记住了！" : "还没稳，"}
+            按遗忘曲线，这道题
+            <span className="font-semibold">{grade.review.nextReviewLabel}</span>
+            再复习（当前：{SR_STATE_LABEL[grade.review.state]}）。
+          </span>
+        </div>
+      )}
 
       {g.criteria.length > 0 && (
         <div className="mt-3 space-y-1.5">
@@ -424,7 +574,7 @@ function GradeView({ grade, onNext }: { grade: GradeResult; onNext: () => void }
         onClick={onNext}
         className="mt-4 rounded-xl bg-cyan-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-cyan-700"
       >
-        下一题 →
+        {nextLabel}
       </button>
     </div>
   );
@@ -510,6 +660,134 @@ function HistoryPanel({ answers }: { answers: AnswerSummary[] }) {
               <span className="text-xs text-slate-400">[{a.skill}]</span> {a.prompt}
             </span>
             <span className="shrink-0 text-xs font-semibold text-slate-500">{a.total}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ReviewDashboard({
+  counts,
+  busy,
+  exhausted,
+  hasQuestion,
+  onStart,
+}: {
+  counts: SrCounts;
+  busy: boolean;
+  exhausted: boolean;
+  hasQuestion: boolean;
+  onStart: () => void;
+}) {
+  const ready = counts.due + counts.fresh;
+  return (
+    <div className="rounded-2xl border border-indigo-200 bg-gradient-to-b from-indigo-50/70 to-white p-5 shadow-sm">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-semibold text-indigo-900">🧠 遗忘曲线复习</p>
+        <span className="text-xs text-slate-400">共 {counts.total} 题</span>
+      </div>
+      <div className="mt-3 grid grid-cols-4 gap-2 text-center">
+        <Stat label="今日到期" value={counts.due} tone="rose" />
+        <Stat label="新题" value={counts.fresh} tone="sky" />
+        <Stat label="已排期" value={counts.later} tone="slate" />
+        <Stat label="已掌握" value={counts.mastered} tone="emerald" />
+      </div>
+      {exhausted ? (
+        <p className="mt-4 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+          🎉 今日复习已清空！已排期的题到期后会再出现，明天再来吧。
+        </p>
+      ) : (
+        <button
+          onClick={onStart}
+          disabled={busy || ready === 0}
+          className="mt-4 w-full rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {busy
+            ? "加载中…"
+            : ready === 0
+              ? "今日无到期题 🎉"
+              : hasQuestion
+                ? `继续复习（还剩 ${ready} 张）`
+                : `开始复习（${counts.due} 到期 · ${counts.fresh} 新题）`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: "rose" | "sky" | "slate" | "emerald";
+}) {
+  const cls = {
+    rose: "text-rose-600",
+    sky: "text-sky-600",
+    slate: "text-slate-600",
+    emerald: "text-emerald-600",
+  }[tone];
+  return (
+    <div className="rounded-xl bg-white/70 py-2">
+      <div className={`text-xl font-bold ${cls}`}>{value}</div>
+      <div className="text-[11px] text-slate-500">{label}</div>
+    </div>
+  );
+}
+
+function BankPanel({
+  items,
+  onPractice,
+  busy,
+}: {
+  items: BankItem[];
+  onPractice: (i: BankItem) => void;
+  busy: boolean;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <p className="text-sm font-semibold text-slate-800">题库（{items.length} 题 · 按遗忘曲线复习）</p>
+      <div className="mt-3 space-y-2">
+        {items.map((it) => (
+          <div
+            key={it.id}
+            className="flex items-start justify-between gap-3 rounded-xl border border-slate-100 px-3 py-2"
+          >
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="rounded bg-cyan-50 px-1.5 py-0.5 text-[11px] font-medium text-cyan-700">
+                  {it.skill}
+                </span>
+                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500">
+                  {TYPE_LABEL[it.type]}
+                </span>
+                <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${SR_STATE_CLASS[it.state]}`}>
+                  {SR_STATE_LABEL[it.state]}
+                </span>
+                {it.isDue ? (
+                  <span className="rounded bg-rose-50 px-1.5 py-0.5 text-[11px] font-medium text-rose-600">
+                    待复习
+                  </span>
+                ) : it.dueAt ? (
+                  <span className="text-[11px] text-slate-400">下次 {it.dueAt.slice(0, 10)}</span>
+                ) : null}
+                {it.lastScore != null && (
+                  <span className="text-[11px] text-slate-400">上次 {it.lastScore} 分</span>
+                )}
+              </div>
+              <p className="mt-1 truncate text-sm text-slate-600">{it.prompt}</p>
+            </div>
+            <button
+              onClick={() => onPractice(it)}
+              disabled={busy}
+              className="shrink-0 rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 disabled:opacity-50"
+            >
+              练这道
+            </button>
           </div>
         ))}
       </div>
