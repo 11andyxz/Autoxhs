@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { ensureEmployeeSchema, listEmployees, type EmployeeWithFiles } from "@/lib/employee/repo";
 import { nameMergeKey, splitFullName } from "@/lib/employee/validate";
-import { getHistory, listClients, type HistoryRecord } from "@/lib/serviceFee/clients";
+import { getHistory, listClients, type HistoryRecord, type PaymentFileMeta } from "@/lib/serviceFee/clients";
 import { ensureSchema } from "@/lib/serviceFee/db";
 import { listWorkEmailsByEmployee, type WorkEmailLogItem } from "@/lib/workEmail/log";
 
@@ -20,6 +20,9 @@ interface FeeRecord {
   total: number;
   createdAt: string;
   result: unknown;
+  paid: boolean;
+  paidAt: string | null;
+  payments: PaymentFileMeta[];
 }
 
 interface Person {
@@ -44,6 +47,9 @@ function mapFee(h: HistoryRecord): FeeRecord {
     total: h.grandTotal,
     createdAt: h.createdAt,
     result: h.result,
+    paid: h.paid,
+    paidAt: h.paidAt,
+    payments: h.payments,
   };
 }
 

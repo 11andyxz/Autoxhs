@@ -54,6 +54,7 @@ export default function JobHunterPage() {
 
   const [buildingBank, setBuildingBank] = useState(false);
   const [bankError, setBankError] = useState<string | null>(null);
+  const [rebuildBank, setRebuildBank] = useState(false);
 
   const [hintIndex, setHintIndex] = useState(0);
   const resultRef = useRef<HTMLDivElement | null>(null);
@@ -118,6 +119,8 @@ export default function JobHunterPage() {
       if (jdMode === "file" && jdFile) fd.append("jdFile", jdFile);
       else fd.append("jdText", jdText);
     }
+    // 重新生成:覆盖同一简历的旧题库(否则命中旧库直接复用)
+    if (rebuildBank) fd.append("rebuild", "true");
     try {
       const res = await fetch("/api/job-hunter/interview/build", { method: "POST", body: fd });
       const json = (await res.json().catch(() => null)) as
@@ -334,7 +337,7 @@ export default function JobHunterPage() {
             <div>
               <p className="text-sm font-semibold text-indigo-900">🧠 简历面试题库 · 遗忘曲线复习</p>
               <p className="mt-1 text-xs leading-relaxed text-indigo-700">
-                不改简历也行——用上面「① 你的简历」（JD 可选），我来当面试官，按你的真实经历出一套面试题（以行为面试 BQ 为主），你作答、AI 打分；每道题按遗忘曲线自动安排下次复习。题库绑定这份简历，进度自动保存。
+                不改简历也行——用上面「① 你的简历」（JD 可选），我来当面试官，按你的简历出一套面试题（以概念 / 场景 / 系统设计等技术题为主，少量行为面试），你作答、AI 打分；每道题按遗忘曲线自动安排下次复习。题库绑定这份简历，进度自动保存。
               </p>
             </div>
             <button
@@ -342,9 +345,18 @@ export default function JobHunterPage() {
               disabled={buildingBank}
               className="shrink-0 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {buildingBank ? "正在出题…" : "用这份简历生成题库 →"}
+              {buildingBank ? "正在出题（约 1 分钟）…" : "用这份简历生成题库 →"}
             </button>
           </div>
+          <label className="mt-3 flex items-center gap-2 text-xs text-indigo-700">
+            <input
+              type="checkbox"
+              checked={rebuildBank}
+              onChange={(e) => setRebuildBank(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500"
+            />
+            重新生成（覆盖这份简历的旧题库；出题需要约 1 分钟）
+          </label>
           {bankError && <p className="mt-2 text-sm text-rose-600">{bankError}</p>}
         </div>
 

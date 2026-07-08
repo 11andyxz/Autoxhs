@@ -82,6 +82,10 @@ function isPreviewable(mimeType: string): boolean {
   return mimeType === "application/pdf" || mimeType.startsWith("image/");
 }
 
+function isPdfFile(file: File): boolean {
+  return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+}
+
 function typeLabel(t: ExpenseType): string {
   return t === "income" ? "收入" : "支出";
 }
@@ -107,6 +111,7 @@ export default function BusinessExpensePage() {
   const [pending, setPending] = useState<PendingReceipt[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  const [filling, setFilling] = useState(false); // 正在读 PDF 自动填表
   const [toast, setToast] = useState<string | null>(null);
 
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -199,11 +204,53 @@ export default function BusinessExpensePage() {
         return { uid: uidRef.current, file };
       });
       setPending((p) => [...p, ...additions]);
+      // 新增的 PDF 自动尝试解析并填表(非财务单据静默跳过)
+      accepted.filter(isPdfFile).forEach((f) => void autofillFromPdf(f, { silent: true }));
     }
     if (rejected.length) setErrors([`以下凭证未添加:${rejected.join(";")}`]);
   }
   function removePending(uid: number) {
     setPending((p) => p.filter((f) => f.uid !== uid));
+  }
+
+  /** 把一份财务单据 PDF 交给服务端解析,识别成功则填入表单(覆盖能识别的字段;不动 business)。 */
+  async function autofillFromPdf(file: File, opts: { silent: boolean }) {
+    setFilling(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/business-expense/parse-pdf", { method: "POST", body: fd });
+      const json = (await res.json()) as {
+        success: boolean;
+        recognized?: boolean;
+        data?: { type: string; spentOn: string; amount: string; category: string; vendor: string; paymentMethod: string; note: string };
+        error?: string;
+      };
+      if (!json.success) {
+        if (!opts.silent) showToast(json.error ?? "解析失败,请稍后重试。");
+        return;
+      }
+      if (!json.recognized || !json.data) {
+        if (!opts.silent) showToast("未能从该 PDF 识别出收支信息。");
+        return;
+      }
+      const d = json.data;
+      setForm((prev) => ({
+        ...prev,
+        type: d.type === "income" || d.type === "expense" ? d.type : prev.type,
+        spentOn: d.spentOn || prev.spentOn,
+        amount: d.amount || prev.amount,
+        category: d.category || prev.category,
+        vendor: d.vendor || prev.vendor,
+        paymentMethod: d.paymentMethod || prev.paymentMethod,
+        note: d.note || prev.note,
+      }));
+      showToast("已从 PDF 自动填充");
+    } catch {
+      if (!opts.silent) showToast("解析失败,请稍后重试。");
+    } finally {
+      setFilling(false);
+    }
   }
 
   function onReset() {
@@ -467,8 +514,11 @@ export default function BusinessExpensePage() {
           </div>
 
           <div className="mt-4">
-            <p className="mb-1 text-xs font-medium text-slate-600">发票 / 凭证 Receipts(选填)</p>
-            <ReceiptUploader pending={pending} onAdd={addReceipts} onRemove={removePending} />
+            <p className="mb-1 text-xs font-medium text-slate-600">
+              发票 / 凭证 Receipts(选填)
+              <span className="ml-2 font-normal text-slate-400">{filling ? "· 正在识别 PDF…" : "· 上传 PDF(如 Stripe 单据)会自动识别并填表"}</span>
+            </p>
+            <ReceiptUploader pending={pending} onAdd={addReceipts} onRemove={removePending} onAutofill={(f) => autofillFromPdf(f, { silent: false })} filling={filling} />
           </div>
 
           <div className="mt-5 flex flex-wrap gap-3">
@@ -750,8 +800,20 @@ function CategoryCard({ byCategory }: { byCategory: { expense: CategoryTotal[]; 
   );
 }
 
-/** 凭证上传:拖拽 / 选择,列出待上传文件可移除。 */
-function ReceiptUploader({ pending, onAdd, onRemove }: { pending: PendingReceipt[]; onAdd: (files: File[]) => void; onRemove: (uid: number) => void }) {
+/** 凭证上传:拖拽 / 选择,列出待上传文件可移除。onAutofill 存在时,PDF 行显示「用此填表」。 */
+function ReceiptUploader({
+  pending,
+  onAdd,
+  onRemove,
+  onAutofill,
+  filling,
+}: {
+  pending: PendingReceipt[];
+  onAdd: (files: File[]) => void;
+  onRemove: (uid: number) => void;
+  onAutofill?: (file: File) => void;
+  filling?: boolean;
+}) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const border = dragging ? "border-sky-400 bg-sky-50" : "border-slate-300";
@@ -782,7 +844,12 @@ function ReceiptUploader({ pending, onAdd, onRemove }: { pending: PendingReceipt
           {pending.map((f) => (
             <li key={f.uid} className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-1.5 text-xs">
               <span className="min-w-0 truncate text-slate-700">{f.file.name} <span className="text-slate-400">({fmtSize(f.file.size)})</span></span>
-              <button type="button" onClick={() => onRemove(f.uid)} className="shrink-0 rounded-lg border border-slate-200 px-2 py-0.5 text-slate-500 transition hover:border-red-300 hover:text-red-600">移除</button>
+              <span className="flex shrink-0 items-center gap-2">
+                {onAutofill && isPdfFile(f.file) && (
+                  <button type="button" onClick={() => onAutofill(f.file)} disabled={filling} title="读取此 PDF 自动填表" className="rounded-lg border border-sky-200 px-2 py-0.5 text-sky-700 transition hover:border-sky-400 disabled:opacity-50">📄 填表</button>
+                )}
+                <button type="button" onClick={() => onRemove(f.uid)} className="rounded-lg border border-slate-200 px-2 py-0.5 text-slate-500 transition hover:border-red-300 hover:text-red-600">移除</button>
+              </span>
             </li>
           ))}
         </ul>

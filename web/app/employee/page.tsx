@@ -34,6 +34,7 @@ type EmployeeWithFiles = {
   updatedAt: string;
   files: EmployeeFileItem[];
 };
+type PaymentFileItem = { id: number; originalName: string; mimeType: string; sizeBytes: number };
 type FeeRecord = {
   id: number;
   inputStartDate: string;
@@ -45,6 +46,9 @@ type FeeRecord = {
   total: number;
   createdAt: string;
   result: unknown;
+  paid: boolean;
+  paidAt: string | null;
+  payments: PaymentFileItem[];
 };
 type WorkEmailItem = {
   id: number;
@@ -289,6 +293,7 @@ export default function EmployeePage() {
   const [query, setQuery] = useState("");
   const [preview, setPreview] = useState<EmployeeFileItem | null>(null);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
+  const [payTarget, setPayTarget] = useState<number | null>(null); // 待「标记已付」的收费记录 id
   const [addWorkTarget, setAddWorkTarget] = useState<AddWorkTarget | null>(null);
 
   const uidRef = useRef(0);
@@ -344,6 +349,23 @@ export default function EmployeePage() {
       await downloadExcel({ result: rec.result, clientName }, exportFileName(clientName, rec.inputStartDate, rec.inputEndDate));
     } catch {
       showToast("导出失败,请稍后重试。");
+    }
+  }
+
+  /** 撤销某收费记录的「已付」(并删除其付款凭证)。 */
+  async function unmarkPaid(recordId: number) {
+    if (!window.confirm("撤销「已付」?将同时删除该笔已上传的付款凭证,不可撤销。")) return;
+    try {
+      const res = await fetch(`/api/service-fee/record/${recordId}/pay`, { method: "DELETE" });
+      const json = (await res.json()) as { success: boolean; error?: string };
+      if (!json.success) {
+        showToast(json.error ?? "撤销失败,请稍后重试。");
+        return;
+      }
+      showToast("已撤销「已付」");
+      await loadPeople();
+    } catch {
+      showToast("撤销失败,请稍后重试。");
     }
   }
 
@@ -680,7 +702,13 @@ export default function EmployeePage() {
                     )}
 
                     {p.feeHistory.length > 0 && (
-                      <FeeHistory records={p.feeHistory} clientName={p.feeClientName ?? p.displayName} onExport={onExportFee} />
+                      <FeeHistory
+                        records={p.feeHistory}
+                        clientName={p.feeClientName ?? p.displayName}
+                        onExport={onExportFee}
+                        onMarkPaid={(id) => setPayTarget(id)}
+                        onUnmark={unmarkPaid}
+                      />
                     )}
 
                     {emp && (
@@ -708,6 +736,11 @@ export default function EmployeePage() {
       )}
 
       <FilePreviewModal file={preview} onClose={() => setPreview(null)} />
+      <PaymentUploadModal
+        recordId={payTarget}
+        onClose={() => setPayTarget(null)}
+        onSaved={() => { setPayTarget(null); showToast("已标记已付"); loadPeople(); }}
+      />
       <EditEmployeeModal
         target={editTarget}
         onClose={() => setEditTarget(null)}
@@ -777,26 +810,30 @@ function FeeHistory({
   records,
   clientName,
   onExport,
+  onMarkPaid,
+  onUnmark,
 }: {
   records: FeeRecord[];
   clientName: string;
   onExport: (rec: FeeRecord, clientName: string) => void;
+  onMarkPaid: (recordId: number) => void;
+  onUnmark: (recordId: number) => void;
 }) {
   return (
     <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2">
       <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">收费记录 Service Fees</p>
       <div className="mt-1 overflow-x-auto">
-        <table className="w-full min-w-[640px] text-[11px]">
+        <table className="w-full min-w-[720px] text-[11px]">
           <thead>
             <tr className="border-b border-slate-200 text-left text-slate-500">
-              {["Input Start", "Input End", "Actual End", "Payroll Months", "Payroll Fee", "Service Fee", "Total", "Created At", ""].map((h, i) => (
+              {["Input Start", "Input End", "Actual End", "Payroll Months", "Payroll Fee", "Service Fee", "Total", "收款 Paid", "Created At", ""].map((h, i) => (
                 <th key={i} className="whitespace-nowrap px-2 py-1 font-medium">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {records.map((r) => (
-              <tr key={r.id} className="border-b border-slate-100">
+              <tr key={r.id} className="border-b border-slate-100 align-top">
                 <td className="whitespace-nowrap px-2 py-1">{r.inputStartDate}</td>
                 <td className="whitespace-nowrap px-2 py-1">{r.inputEndDate}</td>
                 <td className="whitespace-nowrap px-2 py-1">{r.actualEndDate}</td>
@@ -804,6 +841,30 @@ function FeeHistory({
                 <td className="px-2 py-1">{usd(r.payrollFee)}</td>
                 <td className="px-2 py-1">{usd(r.serviceFee)}</td>
                 <td className="px-2 py-1 font-medium">{usd(r.total)}</td>
+                <td className="whitespace-nowrap px-2 py-1">
+                  {r.paid ? (
+                    <div className="flex flex-col gap-0.5">
+                      <span className="font-medium text-emerald-700">已付 ✓</span>
+                      {r.payments.map((pf) => (
+                        <a
+                          key={pf.id}
+                          href={`/api/service-fee/payment-file/${pf.id}?inline=1`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="max-w-[130px] truncate text-sky-700 hover:underline"
+                          title={pf.originalName}
+                        >
+                          📎 {pf.originalName}
+                        </a>
+                      ))}
+                      <button type="button" onClick={() => onUnmark(r.id)} className="text-left text-slate-400 hover:text-red-600">撤销</button>
+                    </div>
+                  ) : (
+                    <button type="button" onClick={() => onMarkPaid(r.id)} className="rounded-lg border border-emerald-200 px-2 py-0.5 font-medium text-emerald-700 transition hover:border-emerald-400">
+                      标记已付
+                    </button>
+                  )}
+                </td>
                 <td className="whitespace-nowrap px-2 py-1 text-slate-400">{r.createdAt}</td>
                 <td className="whitespace-nowrap px-2 py-1">
                   <button type="button" onClick={() => onExport(r, clientName)} className="font-medium text-emerald-700 hover:underline">Excel</button>
@@ -812,6 +873,120 @@ function FeeHistory({
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+/** 「标记已付」弹窗:上传付款凭证(至少 1 张)后提交,POST 到 /api/service-fee/record/<id>/pay。 */
+function PaymentUploadModal({
+  recordId,
+  onClose,
+  onSaved,
+}: {
+  recordId: number | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [pending, setPending] = useState<PendingFile[]>([]);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const uidRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (recordId == null) return;
+    setPending([]);
+    setErrors([]);
+  }, [recordId]);
+  useEffect(() => {
+    if (recordId == null) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+  }, [recordId, onClose]);
+
+  if (recordId == null) return null;
+
+  function onPick(list: FileList | null) {
+    if (!list || !list.length) return;
+    const added: PendingFile[] = [];
+    const rejected: string[] = [];
+    for (const file of Array.from(list)) {
+      if (file.size === 0) { rejected.push(`「${file.name}」是空文件`); continue; }
+      if (file.size > MAX_FILE_BYTES) { rejected.push(`「${file.name}」超过 20MB`); continue; }
+      if (!isAllowedFileName(file.name)) { rejected.push(`「${file.name}」类型不支持`); continue; }
+      uidRef.current += 1;
+      added.push({ uid: uidRef.current, file, category: "", groupId: uidRef.current });
+    }
+    if (added.length) setPending((p) => [...p, ...added]);
+    if (rejected.length) setErrors([`以下文件未添加:${rejected.join(";")}`]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  async function onSubmit() {
+    if (!pending.length) { setErrors(["请至少上传一张付款凭证。"]); return; }
+    setSaving(true);
+    try {
+      const fd = new FormData();
+      pending.forEach((f) => fd.append("files", f.file));
+      const res = await fetch(`/api/service-fee/record/${recordId}/pay`, { method: "POST", body: fd });
+      const json = (await res.json()) as { success: boolean; error?: string };
+      if (!json.success) { setErrors([json.error ?? "保存失败,请稍后重试。"]); return; }
+      onSaved();
+    } catch {
+      setErrors(["保存失败,请稍后重试。"]);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div onClick={onClose} className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4">
+      <div onClick={(e) => e.stopPropagation()} className="my-8 w-full max-w-lg rounded-2xl bg-white shadow-xl">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
+          <h3 className="text-sm font-semibold text-slate-800">标记已付 · 上传付款凭证</h3>
+          <button type="button" onClick={onClose} className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300">✕ 关闭</button>
+        </div>
+        <div className="space-y-3 px-5 py-4">
+          <p className="text-xs text-slate-500">标记为「已付」需至少上传一张付款凭证(收据 / 转账截图等)。</p>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept={ALLOWED_FILE_EXTENSIONS.map((x) => `.${x}`).join(",")}
+            onChange={(e) => onPick(e.target.files)}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full rounded-xl border-2 border-dashed border-slate-300 px-4 py-6 text-sm font-medium text-slate-600 transition hover:border-emerald-400 hover:text-emerald-700"
+          >
+            + 选择凭证 <span className="text-[11px] font-normal text-slate-400">PDF / 图片 / Word,单个 ≤ 20MB</span>
+          </button>
+          {pending.length > 0 && (
+            <ul className="space-y-1">
+              {pending.map((f) => (
+                <li key={f.uid} className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-1.5 text-xs">
+                  <span className="min-w-0 truncate text-slate-700">{f.file.name} <span className="text-slate-400">({fmtSize(f.file.size)})</span></span>
+                  <button type="button" onClick={() => setPending((p) => p.filter((x) => x.uid !== f.uid))} className="shrink-0 rounded-lg border border-slate-200 px-2 py-0.5 text-slate-500 transition hover:border-red-300 hover:text-red-600">移除</button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {errors.length > 0 && (
+            <ul className="space-y-1 rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+              {errors.map((e) => <li key={e}>• {e}</li>)}
+            </ul>
+          )}
+        </div>
+        <div className="flex justify-end gap-3 border-t border-slate-200 px-5 py-3">
+          <button type="button" onClick={onClose} disabled={saving} className="rounded-xl border border-slate-200 px-5 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-300 disabled:opacity-50">取消</button>
+          <button type="button" onClick={onSubmit} disabled={saving} className="rounded-xl bg-emerald-600 px-6 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-50">{saving ? "保存中…" : "确认已付"}</button>
+        </div>
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import mysql, { type Pool } from "mysql2/promise";
+import mysql, { type Pool, type RowDataPacket } from "mysql2/promise";
 
 /**
  * MySQL 连接池(仅服务器端)。配置来自 .env.local 的 DB_* 变量。
@@ -28,6 +28,24 @@ export function getPool(): Pool {
 }
 
 let schemaReady: Promise<void> | null = null;
+
+/**
+ * 幂等补列:逐列判断存在性,不存在才 ALTER,并容忍 ER_DUP_FIELDNAME
+ * (信息库可能滞后/并发),保证中断后重跑与多实例并发都安全 —— 不依赖单次 information_schema 结果。
+ */
+async function addColumnIfMissing(p: Pool, table: string, column: string, ddl: string): Promise<void> {
+  const [rows] = await p.query<RowDataPacket[]>(
+    `SELECT COUNT(*) AS n FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+    [table, column],
+  );
+  if (Number(rows[0]?.n ?? 0) > 0) return;
+  try {
+    await p.query(ddl);
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code !== "ER_DUP_FIELDNAME") throw err;
+  }
+}
 
 /** 首次使用时建表(幂等)。多次调用只执行一次。 */
 export function ensureSchema(): Promise<void> {
@@ -60,6 +78,8 @@ export function ensureSchema(): Promise<void> {
         total_service_charge DECIMAL(12,2) NOT NULL,
         grand_total DECIMAL(12,2) NOT NULL,
         result_json JSON NOT NULL,
+        paid TINYINT(1) NOT NULL DEFAULT 0,
+        paid_at DATETIME NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY uniq_record (client_id, input_start_date, input_end_date, actual_end_date),
         CONSTRAINT fk_fr_client FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
@@ -96,6 +116,23 @@ export function ensureSchema(): Promise<void> {
         UNIQUE KEY uniq_tw (client_id, week_monday),
         CONSTRAINT fk_tw_client FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
         CONSTRAINT fk_tw_record FOREIGN KEY (record_id) REFERENCES fee_records(id) ON DELETE CASCADE
+      )
+    `);
+    // fee_records 加 paid 状态(旧库幂等补列;逐列独立,防中断/并发)
+    await addColumnIfMissing(p, "fee_records", "paid", "ALTER TABLE fee_records ADD COLUMN paid TINYINT(1) NOT NULL DEFAULT 0");
+    await addColumnIfMissing(p, "fee_records", "paid_at", "ALTER TABLE fee_records ADD COLUMN paid_at DATETIME NULL");
+    // 收费记录的付款凭证(标记已付时上传;随记录级联删)
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS fee_payment_file (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        record_id INT NOT NULL,
+        original_name VARCHAR(255) NOT NULL,
+        stored_name VARCHAR(255) NOT NULL,
+        relative_path VARCHAR(700) NOT NULL,
+        mime_type VARCHAR(127) NOT NULL,
+        size_bytes INT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_feepay_record FOREIGN KEY (record_id) REFERENCES fee_records(id) ON DELETE CASCADE
       )
     `);
   })();

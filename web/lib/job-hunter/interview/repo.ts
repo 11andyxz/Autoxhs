@@ -242,6 +242,12 @@ export async function findBankSessionByHash(resumeHash: string): Promise<Session
   return (rows[0] as SessionRow) ?? null;
 }
 
+/** 删除会话(级联删除其技能/题目/作答)。用于「重新生成题库」覆盖旧库。 */
+export async function deleteSession(id: number): Promise<void> {
+  const p = getPool();
+  await p.execute("DELETE FROM ip_session WHERE id = ?", [id]);
+}
+
 export async function getSession(id: number): Promise<SessionRow | null> {
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
@@ -588,10 +594,17 @@ export async function getSkillWeaknesses(skillId: number, limit = 5): Promise<st
     "SELECT score_json FROM ip_answer WHERE skill_id = ? ORDER BY id DESC LIMIT ?",
     [skillId, limit],
   );
+  // 兼容两种历史形态:旧数据是 string[],新数据是 {zh,en}[]。取中文(缺则英文)。
+  const pull = (arr: unknown): string[] =>
+    (Array.isArray(arr) ? arr : [])
+      .map((x) =>
+        typeof x === "string" ? x : (x as { zh?: string; en?: string })?.zh || (x as { en?: string })?.en || "",
+      )
+      .filter(Boolean);
   const out: string[] = [];
   for (const r of rows) {
     const g = asJson<Grade>(r.score_json);
-    out.push(...(g.misses || []), ...(g.errors || []));
+    out.push(...pull(g.misses), ...pull(g.errors));
   }
   return Array.from(new Set(out)).slice(0, 12);
 }

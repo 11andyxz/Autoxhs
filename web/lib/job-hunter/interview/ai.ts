@@ -3,10 +3,12 @@ import { getClient, getModel } from "@/lib/openai";
 import {
   BANK_SYSTEM,
   COACH_SYSTEM,
+  ENGLISH_ANSWER_SYSTEM,
   GRADE_SYSTEM,
   QUESTION_SYSTEM,
   REPAIR,
   SKILLS_SYSTEM,
+  TRANSLATE_SYSTEM,
   dataBlock,
 } from "./prompt";
 import {
@@ -15,6 +17,7 @@ import {
   GRADE_JSON_SCHEMA,
   QUESTION_JSON_SCHEMA,
   SKILLS_JSON_SCHEMA,
+  TRANSLATE_JSON_SCHEMA,
   SchemaValidationError,
   normalizeBank,
   normalizeCoach,
@@ -42,8 +45,9 @@ async function callJson<T>(
   jsonSchema: Record<string, unknown>,
   schemaName: string,
   normalize: (raw: unknown) => T,
+  opts: { timeoutMs?: number; maxRetries?: number } = {},
 ): Promise<T> {
-  const client = getClient(TIMEOUT_MS);
+  const client = getClient(opts.timeoutMs ?? TIMEOUT_MS, opts.maxRetries ?? 1);
   const run = async (repair: boolean): Promise<T> => {
     const input: Array<{ role: "system" | "user"; content: string }> = [
       { role: "system", content: system },
@@ -137,12 +141,15 @@ export function buildQuestionBank(args: {
     { label: "TARGET JOB DESCRIPTION (optional)", body: args.jdText },
     { label: "KNOWLEDGE BASE EXCERPTS", body: args.kbExcerpts.join("\n\n---\n\n") },
   ]);
+  // 题库是一次性重输出调用:给足单次超时(120s),并关掉 SDK 自动重试——
+  // 否则超时后会再跑一次,等待翻倍到 ~4 分钟。宁可一次失败、快速反馈。
   return callJson(
     BANK_SYSTEM,
     content,
     BANK_JSON_SCHEMA as unknown as Record<string, unknown>,
     "bank",
     normalizeBank,
+    { timeoutMs: 120_000, maxRetries: 0 },
   );
 }
 
@@ -194,6 +201,58 @@ export function coachSkill(args: {
     COACH_JSON_SCHEMA as unknown as Record<string, unknown>,
     "coach",
     normalizeCoach,
+  );
+}
+
+/** 把候选人的作答(可中文/混合)改写成「面试可用的英文版作答」,保留其真实内容。 */
+export async function polishToEnglish(args: {
+  question: string;
+  referenceAnswer: string;
+  userAnswer: string;
+}): Promise<string> {
+  const client = getClient(TIMEOUT_MS);
+  const content = dataBlock([
+    { label: "INTERVIEW QUESTION", body: args.question },
+    { label: "IDEAL ANSWER (reference only, do not copy verbatim)", body: args.referenceAnswer },
+    { label: "CANDIDATE ANSWER (may be Chinese / mixed)", body: args.userAnswer },
+  ]);
+  const response = await client.responses.create({
+    model: getModel(),
+    input: [
+      { role: "system", content: ENGLISH_ANSWER_SYSTEM },
+      { role: "user", content },
+    ],
+  });
+  const text = (response.output_text ?? "").trim();
+  if (!text) throw new SchemaValidationError("英文版生成为空");
+  return text;
+}
+
+/** 划词翻译:把选中的英文词/短语,结合上下文解释成简体中文(含音标),查词用,输出很短、要快。 */
+export function translateTerm(
+  term: string,
+  context: string,
+): Promise<{ ipa: string; zh: string; note: string }> {
+  const content = dataBlock([
+    { label: "TERM (translate this only)", body: term },
+    { label: "CONTEXT (where the term appears)", body: context },
+  ]);
+  return callJson(
+    TRANSLATE_SYSTEM,
+    content,
+    TRANSLATE_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "translate",
+    (raw) => {
+      const o = (raw ?? {}) as { ipa?: unknown; zh?: unknown; note?: unknown };
+      const zh = typeof o.zh === "string" ? o.zh.trim().slice(0, 200) : "";
+      if (!zh) throw new SchemaValidationError("翻译为空");
+      return {
+        ipa: typeof o.ipa === "string" ? o.ipa.trim().slice(0, 120) : "",
+        zh,
+        note: typeof o.note === "string" ? o.note.trim().slice(0, 300) : "",
+      };
+    },
+    { timeoutMs: 30_000 },
   );
 }
 

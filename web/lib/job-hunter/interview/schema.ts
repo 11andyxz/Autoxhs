@@ -126,7 +126,7 @@ export const BANK_JSON_SCHEMA = {
     questions: {
       type: "array",
       description:
-        "一整套面试题库,10~16 道,严格基于候选人简历里的真实经历/项目/技能出题。以行为面试(behavioral, STAR)为主(至少 60%),辅以少量与简历技能相关的技术/概念/系统设计题。",
+        "一整套面试题库,10~12 道,严格基于候选人简历里的真实技能/项目/领域出题。以技术题为主(约 75~80%:概念 concept / 场景 scenario / 系统设计 system-design),仅含少量行为面试(behavioral, STAR)题(约 2~3 道)。",
       items: {
         type: "object",
         additionalProperties: false,
@@ -149,16 +149,16 @@ export const BANK_JSON_SCHEMA = {
           prompt: {
             type: "string",
             description:
-              "面试题本身(只给候选人看的题干)。行为题要像面试官提问,并锚定简历里的某段具体经历/项目,如 'Tell me about a time on <该项目> when…'。",
+              "面试题本身(只给候选人看的题干)。技术题锚定简历里的具体技能/项目/技术栈;行为题像面试官提问并锚定某段真实经历,如 'Tell me about a time on <该项目> when…'。",
           },
           referenceAnswer: {
             type: "string",
             description:
-              "理想参考答案/答题框架,作为评分基准。行为题按 STAR(情境/任务/行动/结果)组织,并尽量引用简历里的该段真实经历与可量化成果。",
+              "精炼的参考答案(要点/短提纲,别写长篇),作为评分基准。技术题给出正确要点;行为题按 STAR 给出简短框架并引用简历里的真实经历。",
           },
           rubric: {
             type: "array",
-            description: "3~6 条评分要点,每条带相对权重。行为题应覆盖 STAR 完整度、具体性/量化、个人贡献、复盘与收获。",
+            description: "3~6 条评分要点,每条带相对权重。技术题覆盖正确性/完整性/权衡;行为题覆盖 STAR 完整度、具体性/量化、个人贡献。",
             items: {
               type: "object",
               additionalProperties: false,
@@ -179,20 +179,38 @@ export const BANK_JSON_SCHEMA = {
 
 /* ---------------- 3) 评分 ---------------- */
 
+/** 中英双语文本(评分反馈都用它,便于英文面试备考同时看中英) */
+export const BiTextSchema = z.object({
+  zh: z.string(),
+  en: z.string(),
+});
+export type BiText = z.infer<typeof BiTextSchema>;
+
 export const CriterionScoreSchema = z.object({
   criterion: z.string(),
   score: z.number(), // 0~100
-  comment: z.string(),
+  comment: z.string(), // 中文点评
+  commentEn: z.string(), // 同一条点评的英文版
 });
 export const GradeSchema = z.object({
   total: z.number(), // 0~100
   criteria: z.array(CriterionScoreSchema),
-  hits: z.array(z.string()),
-  misses: z.array(z.string()),
-  errors: z.array(z.string()),
-  advice: z.array(z.string()),
+  hits: z.array(BiTextSchema),
+  misses: z.array(BiTextSchema),
+  errors: z.array(BiTextSchema),
+  advice: z.array(BiTextSchema),
 });
 export type Grade = z.infer<typeof GradeSchema>;
+
+const BI_TEXT_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    zh: { type: "string", description: "简体中文版" },
+    en: { type: "string", description: "同一条内容的英文版(意思一致)" },
+  },
+  required: ["zh", "en"],
+} as const;
 
 export const GRADE_JSON_SCHEMA = {
   type: "object",
@@ -208,17 +226,35 @@ export const GRADE_JSON_SCHEMA = {
         properties: {
           criterion: { type: "string" },
           score: { type: "integer", description: "该维度 0~100" },
-          comment: { type: "string", description: "简短点评(中文)" },
+          comment: { type: "string", description: "简短点评(简体中文)" },
+          commentEn: { type: "string", description: "同一条点评的英文版" },
         },
-        required: ["criterion", "score", "comment"],
+        required: ["criterion", "score", "comment", "commentEn"],
       },
     },
-    hits: { type: "array", description: "答对/覆盖到的要点(中文)", items: { type: "string" } },
-    misses: { type: "array", description: "遗漏的要点(中文)", items: { type: "string" } },
-    errors: { type: "array", description: "答错/概念错误(中文)", items: { type: "string" } },
-    advice: { type: "array", description: "针对性改进建议(中文)", items: { type: "string" } },
+    hits: { type: "array", description: "答对/覆盖到的要点(中英双语)", items: BI_TEXT_JSON_SCHEMA },
+    misses: { type: "array", description: "遗漏的要点(中英双语)", items: BI_TEXT_JSON_SCHEMA },
+    errors: { type: "array", description: "答错/概念错误(中英双语)", items: BI_TEXT_JSON_SCHEMA },
+    advice: { type: "array", description: "针对性改进建议(中英双语)", items: BI_TEXT_JSON_SCHEMA },
   },
   required: ["total", "criteria", "hits", "misses", "errors", "advice"],
+} as const;
+
+/* ---------------- 划词翻译(阅读英文时查词)---------------- */
+
+export const TRANSLATE_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ipa: {
+      type: "string",
+      description:
+        "该词/短语的国际音标(IPA)注音,含两侧斜杠,如 /dɪˈtɜːmɪnɪstɪk/;短语给整体注音(词间空格分隔);不是可读英文(代码/符号)时留空",
+    },
+    zh: { type: "string", description: "该英文词/短语在此语境下的简体中文意思(简短)" },
+    note: { type: "string", description: "一行简短中文说明(词性/语境细微差别),可为空" },
+  },
+  required: ["ipa", "zh", "note"],
 } as const;
 
 /* ---------------- 4) 补强 ---------------- */
@@ -254,9 +290,6 @@ export function clampImportance(n: number): number {
 /** 截断到 n 个字符(先 trim) */
 function t(s: string, n: number): string {
   return s.trim().slice(0, n);
-}
-function cleanList(arr: string[], cap: number, itemLen: number): string[] {
-  return arr.map((s) => t(s, itemLen)).filter(Boolean).slice(0, cap);
 }
 
 export function normalizeSkills(input: unknown): SkillsResult {
@@ -300,18 +333,31 @@ export function normalizeQuestion(input: unknown): QuestionGen {
   };
 }
 
+/** 清洗中英双语列表:各项 trim+截断,zh/en 至少一个非空才保留 */
+function cleanBiList(arr: BiText[], cap: number, itemLen: number): BiText[] {
+  return arr
+    .map((x) => ({ zh: t(x.zh, itemLen), en: t(x.en, itemLen) }))
+    .filter((x) => x.zh || x.en)
+    .slice(0, cap);
+}
+
 export function normalizeGrade(input: unknown): Grade {
   const parsed = GradeSchema.parse(input);
   return {
     total: clamp100(parsed.total),
     criteria: parsed.criteria
-      .map((c) => ({ criterion: t(c.criterion, 500), score: clamp100(c.score), comment: t(c.comment, 1000) }))
+      .map((c) => ({
+        criterion: t(c.criterion, 500),
+        score: clamp100(c.score),
+        comment: t(c.comment, 1000),
+        commentEn: t(c.commentEn, 1000),
+      }))
       .filter((c) => c.criterion)
       .slice(0, 10),
-    hits: cleanList(parsed.hits, 20, 600),
-    misses: cleanList(parsed.misses, 20, 600),
-    errors: cleanList(parsed.errors, 20, 600),
-    advice: cleanList(parsed.advice, 12, 800),
+    hits: cleanBiList(parsed.hits, 20, 600),
+    misses: cleanBiList(parsed.misses, 20, 600),
+    errors: cleanBiList(parsed.errors, 20, 600),
+    advice: cleanBiList(parsed.advice, 12, 800),
   };
 }
 

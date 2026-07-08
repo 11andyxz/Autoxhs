@@ -37,6 +37,7 @@ type HistoryRecord = {
   payrollFeeMonths: string[];
   createdAt: string;
   result: CalculationResult;
+  paid?: boolean; // 是否已收款(在雇员页标记;此处只读展示)
 };
 type ClientListItem = {
   id: number | null; // null = 仅雇员(尚无收费客户记录),选中后按新客户处理
@@ -711,7 +712,7 @@ export default function ServiceFeePage() {
               <table className="w-full min-w-[860px] text-xs">
                 <thead>
                   <tr className="border-b border-slate-200 text-left text-slate-500">
-                    {["Input Start", "Input End", "Actual End", "Payroll Months", "Payroll Fee", "Service Fee", "Total", "Created At", ""].map((h, i) => (
+                    {["Input Start", "Input End", "Actual End", "Payroll Months", "Payroll Fee", "Service Fee", "Total", "收款", "Created At", ""].map((h, i) => (
                       <th key={i} className="whitespace-nowrap px-3 py-2 font-medium">{h}</th>
                     ))}
                   </tr>
@@ -727,6 +728,11 @@ export default function ServiceFeePage() {
                         <td className="px-3 py-2">{usd(rec.totalPayrollFees)}</td>
                         <td className="px-3 py-2">{usd(rec.totalServiceCharge)}</td>
                         <td className="px-3 py-2 font-medium">{usd(rec.grandTotal)}</td>
+                        <td className="whitespace-nowrap px-3 py-2">
+                          {rec.paid
+                            ? <span className="inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">已付</span>
+                            : <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-500">未付</span>}
+                        </td>
                         <td className="whitespace-nowrap px-3 py-2 text-slate-400">{rec.createdAt}</td>
                         <td className="whitespace-nowrap px-3 py-2">
                           <button type="button" onClick={() => setOpenDetail(openDetail === rec.id ? null : rec.id)} className="text-slate-500 hover:text-slate-800">View</button>
@@ -736,7 +742,7 @@ export default function ServiceFeePage() {
                       </tr>
                       {openDetail === rec.id && (
                         <tr className="bg-slate-50">
-                          <td colSpan={9} className="px-3 py-2 text-[11px] text-slate-600">
+                          <td colSpan={10} className="px-3 py-2 text-[11px] text-slate-600">
                             Gross {usd(rec.grossWages)} · Tax {usd(rec.totalTax)} · Payroll {usd(rec.totalPayrollFees)} · Service {usd(rec.totalServiceCharge)} · Grand {usd(rec.grandTotal)} · 工时 {rec.result?.totalWorkHours}
                           </td>
                         </tr>

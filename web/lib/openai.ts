@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 
 import { SYSTEM_PROMPT } from "./prompt";
 import {
@@ -22,13 +22,17 @@ const DEFAULT_MODEL = "gpt-5.5";
 /** OPENAI_API_KEY 未配置时抛出 */
 export class MissingApiKeyError extends Error {}
 
-/** 创建 OpenAI 客户端(各工具共用,统一重试与 Key 校验;超时可按任务覆盖) */
-export function getClient(timeoutMs: number = TIMEOUT_MS): OpenAI {
+/**
+ * 创建 OpenAI 客户端(各工具共用,统一重试与 Key 校验;超时可按任务覆盖)。
+ * maxRetries 默认 1;对「重输出、耗时长」的调用可传 0,避免超时后 SDK 自动重试把
+ * 等待时间翻倍(单次 90s 超时会变成 ~180s 才失败)。
+ */
+export function getClient(timeoutMs: number = TIMEOUT_MS, maxRetries = 1): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new MissingApiKeyError("OPENAI_API_KEY 未配置");
   }
-  return new OpenAI({ apiKey, timeout: timeoutMs, maxRetries: 1 });
+  return new OpenAI({ apiKey, timeout: timeoutMs, maxRetries });
 }
 
 /** 当前使用的模型 ID(默认 gpt-5.5,由 OPENAI_MODEL 覆盖) */
@@ -165,6 +169,37 @@ export async function generateCoverImage(userPrompt: string): Promise<Buffer> {
   const b64 = result.data?.[0]?.b64_json;
   if (!b64) throw new Error("生图返回为空");
   return Buffer.from(b64, "base64");
+}
+
+// ---- 语音转文字（面试语音作答）----
+const DEFAULT_TRANSCRIBE_MODEL = "whisper-1"; // 通用稳定;可用 OPENAI_TRANSCRIBE_MODEL 覆盖(如 gpt-4o-transcribe)
+type Uploadable = Awaited<ReturnType<typeof toFile>>;
+
+/** 把一段录音转成文字。language 传 ISO-639-1(如 'en'/'zh')可提升准确度,不传则自动识别。 */
+export async function transcribeAudio(file: Uploadable, language?: string): Promise<string> {
+  const client = getClient();
+  const res = await client.audio.transcriptions.create({
+    file,
+    model: process.env.OPENAI_TRANSCRIBE_MODEL || DEFAULT_TRANSCRIBE_MODEL,
+    ...(language ? { language } : {}),
+  });
+  return (res.text ?? "").trim();
+}
+
+// ---- 文字转语音（面试官「读题」，用 OpenAI 更自然的语音替代浏览器机读音）----
+const DEFAULT_TTS_MODEL = "tts-1"; // 通用稳定;可用 OPENAI_TTS_MODEL 覆盖(如 gpt-4o-mini-tts / tts-1-hd)
+const DEFAULT_TTS_VOICE = "onyx"; // 沉稳像面试官;可用 OPENAI_TTS_VOICE 覆盖(alloy/echo/fable/nova/shimmer…)
+const MAX_TTS_CHARS = 4000; // OpenAI 单次上限 4096,留点余量
+
+/** 把一段文字合成成语音,返回 mp3 字节。 */
+export async function synthesizeSpeech(text: string): Promise<Buffer> {
+  const client = getClient();
+  const res = await client.audio.speech.create({
+    model: (process.env.OPENAI_TTS_MODEL || DEFAULT_TTS_MODEL) as "tts-1",
+    voice: (process.env.OPENAI_TTS_VOICE || DEFAULT_TTS_VOICE) as "onyx",
+    input: text.slice(0, MAX_TTS_CHARS),
+  });
+  return Buffer.from(await res.arrayBuffer());
 }
 
 function isZodError(err: unknown): boolean {

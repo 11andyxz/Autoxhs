@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 type QuestionType = "concept" | "scenario" | "system-design" | "behavioral";
 
@@ -57,13 +58,15 @@ type CurrentQuestion = {
   srState?: SrState;
 };
 
+type BiText = { zh: string; en: string };
+
 type Grade = {
   total: number;
-  criteria: Array<{ criterion: string; score: number; comment: string }>;
-  hits: string[];
-  misses: string[];
-  errors: string[];
-  advice: string[];
+  criteria: Array<{ criterion: string; score: number; comment: string; commentEn: string }>;
+  hits: BiText[];
+  misses: BiText[];
+  errors: BiText[];
+  advice: BiText[];
 };
 
 type ReviewInfo = {
@@ -285,7 +288,7 @@ export default function InterviewPage() {
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-500">
             {isBank
-              ? "我当面试官、按你简历里的真实经历出题（以行为面试 BQ 为主）；你打字作答，AI 评分并给参考答案，每道题按遗忘曲线自动安排下次复习。进度自动保存。"
+              ? "我当面试官、按你简历里的技能与项目出题（以概念 / 场景 / 系统设计等技术题为主，少量行为面试）；你打字作答，AI 评分并给参考答案，每道题按遗忘曲线自动安排下次复习。进度自动保存。"
               : "按岗位技能出题、打字作答、AI 评分定位弱点，自适应优先练你最薄弱的部分。进度自动保存。"}
           </p>
           {isBank && progress?.session.title && (
@@ -448,6 +451,149 @@ function SkillPanel({
   );
 }
 
+/**
+ * 可划词翻译的英文文本块:选中一个词/短语 → 浮层显示其中文释义(结合上下文,OpenAI)。
+ * 用于只读英文(题干、参考答案),帮助英文面试备考时随手查词。
+ */
+function TranslatableText({ text, className }: { text: string; className?: string }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const [pop, setPop] = useState<{ x: number; y: number; term: string } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [res, setRes] = useState<{ ipa: string; zh: string; note: string } | null>(null);
+  const reqIdRef = useRef(0);
+  // 发音:复用 /speak(OpenAI TTS)读出选中的词
+  const termAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [speaking, setSpeaking] = useState(false);
+
+  async function speakTerm(term: string) {
+    try {
+      setSpeaking(true);
+      const r = await fetch("/api/job-hunter/interview/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: term }),
+      });
+      if (!r.ok) {
+        setSpeaking(false);
+        return;
+      }
+      const url = URL.createObjectURL(await r.blob());
+      let a = termAudioRef.current;
+      if (!a) {
+        a = new Audio();
+        termAudioRef.current = a;
+      }
+      a.src = url;
+      a.onended = () => URL.revokeObjectURL(url);
+      setSpeaking(false);
+      a.play().catch(() => {});
+    } catch {
+      setSpeaking(false);
+    }
+  }
+
+  useEffect(() => () => termAudioRef.current?.pause(), []);
+
+  function onMouseUp() {
+    const sel = typeof window !== "undefined" ? window.getSelection() : null;
+    if (!sel || sel.isCollapsed) return;
+    const term = sel.toString().trim();
+    if (!term || term.length > 80) return; // 只查词/短语
+    if (!ref.current || !ref.current.contains(sel.anchorNode)) return;
+    let rect: DOMRect;
+    try {
+      rect = sel.getRangeAt(0).getBoundingClientRect();
+    } catch {
+      return;
+    }
+    setPop({ x: rect.left + rect.width / 2, y: rect.bottom, term });
+    setRes(null);
+    setLoading(true);
+    const rid = ++reqIdRef.current;
+    fetch("/api/job-hunter/interview/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: term, context: text.slice(0, 1500) }),
+    })
+      .then((r) => r.json())
+      .then((j) => {
+        if (rid !== reqIdRef.current) return; // 已被新的划词取代
+        setRes(
+          j?.success
+            ? { ipa: j.ipa || "", zh: j.zh, note: j.note || "" }
+            : { ipa: "", zh: "翻译失败", note: "" },
+        );
+      })
+      .catch(() => {
+        if (rid === reqIdRef.current) setRes({ ipa: "", zh: "网络异常", note: "" });
+      })
+      .finally(() => {
+        if (rid === reqIdRef.current) setLoading(false);
+      });
+  }
+
+  // 点击浮层外或开始新的选择时关闭。
+  useEffect(() => {
+    if (!pop) return;
+    const onDown = (e: MouseEvent) => {
+      if (popRef.current && popRef.current.contains(e.target as Node)) return;
+      setPop(null);
+    };
+    const id = window.setTimeout(() => document.addEventListener("mousedown", onDown), 0);
+    return () => {
+      window.clearTimeout(id);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [pop]);
+
+  return (
+    <>
+      <div ref={ref} onMouseUp={onMouseUp} className={className}>
+        {text}
+      </div>
+      {pop &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            ref={popRef}
+            style={{
+              position: "fixed",
+              left: pop.x,
+              top: pop.y + 8,
+              transform: "translateX(-50%)",
+              zIndex: 60,
+              maxWidth: 320,
+            }}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-lg"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-slate-800">{pop.term}</span>
+              {res?.ipa && <span className="text-xs text-slate-500">{res.ipa}</span>}
+              <button
+                onClick={() => speakTerm(pop.term)}
+                disabled={speaking}
+                title="发音"
+                className="rounded-md border border-slate-200 px-1.5 py-0.5 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700 disabled:opacity-50"
+              >
+                {speaking ? "…" : "🔊"}
+              </button>
+            </div>
+            {loading ? (
+              <div className="mt-1 text-xs text-slate-400">翻译中…</div>
+            ) : res ? (
+              <div className="mt-1">
+                <div className="text-sm text-slate-700">{res.zh}</div>
+                {res.note && <div className="mt-0.5 text-xs text-slate-400">{res.note}</div>}
+              </div>
+            ) : null}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
+
 function PracticeCard({
   question,
   answer,
@@ -469,6 +615,250 @@ function PracticeCard({
   onNext: () => void;
   nextLabel?: string;
 }) {
+  // 录音能力探测放到挂载后,避免 SSR/水合不一致。
+  const [canRecord, setCanRecord] = useState(false);
+  useEffect(() => {
+    setCanRecord(
+      typeof navigator !== "undefined" &&
+        !!navigator.mediaDevices?.getUserMedia &&
+        typeof MediaRecorder !== "undefined",
+    );
+  }, []);
+
+  // —— 读题(用 OpenAI 合成更自然的语音朗读题干,替代浏览器机读音)——
+  const [speaking, setSpeaking] = useState(false);
+  const [loadingSpeech, setLoadingSpeech] = useState(false);
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const speakAbortRef = useRef<AbortController | null>(null);
+  // 同一题重复点「读题」时复用已生成的音频,省一次 OpenAI 调用。
+  const audioCacheRef = useRef<{ id: number; url: string } | null>(null);
+
+  function stopSpeak() {
+    speakAbortRef.current?.abort();
+    speakAbortRef.current = null;
+    audioRef.current?.pause();
+    setSpeaking(false);
+    setLoadingSpeech(false);
+  }
+
+  function playSpeech(url: string) {
+    let a = audioRef.current;
+    if (!a) {
+      a = new Audio();
+      audioRef.current = a;
+    }
+    a.src = url;
+    a.onended = () => setSpeaking(false);
+    a.onerror = () => {
+      setSpeaking(false);
+      setSpeechError("播放失败");
+    };
+    setSpeaking(true);
+    a.play().catch(() => {
+      setSpeaking(false);
+      setSpeechError("播放失败");
+    });
+  }
+
+  async function toggleSpeak() {
+    if (speaking || loadingSpeech) {
+      stopSpeak();
+      return;
+    }
+    setSpeechError(null);
+    const cached = audioCacheRef.current;
+    if (cached && cached.id === question.questionId) {
+      playSpeech(cached.url);
+      return;
+    }
+    setLoadingSpeech(true);
+    const ctrl = new AbortController();
+    speakAbortRef.current = ctrl;
+    try {
+      const res = await fetch("/api/job-hunter/interview/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: question.prompt }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        setSpeechError(j?.error || "读题失败,请重试");
+        setLoadingSpeech(false);
+        return;
+      }
+      const blob = await res.blob();
+      if (ctrl.signal.aborted) return;
+      const url = URL.createObjectURL(blob);
+      audioCacheRef.current = { id: question.questionId, url };
+      setLoadingSpeech(false);
+      playSpeech(url);
+    } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError") return;
+      setSpeechError("读题失败,请重试");
+      setLoadingSpeech(false);
+    }
+  }
+
+  // 换题时:停止播放并清理上一题的音频缓存。
+  useEffect(() => {
+    audioRef.current?.pause();
+    speakAbortRef.current?.abort();
+    setSpeaking(false);
+    setLoadingSpeech(false);
+    setSpeechError(null);
+    if (audioCacheRef.current) {
+      URL.revokeObjectURL(audioCacheRef.current.url);
+      audioCacheRef.current = null;
+    }
+  }, [question.questionId]);
+
+  // 卸载时收尾:停音频、取消未完成的请求、回收 URL。
+  useEffect(
+    () => () => {
+      audioRef.current?.pause();
+      speakAbortRef.current?.abort();
+      if (audioCacheRef.current) URL.revokeObjectURL(audioCacheRef.current.url);
+    },
+    [],
+  );
+
+  // —— 语音作答(录音 → OpenAI 转写 → 填入答案框)——
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  // 用 ref 保存最新答案,避免录音结束回调里拿到过期闭包值。
+  const answerRef = useRef(answer);
+  answerRef.current = answer;
+
+  const stopTracks = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }, []);
+
+  async function startRec() {
+    setVoiceError(null);
+    if (!canRecord) {
+      setVoiceError("当前浏览器不支持录音");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      chunksRef.current = [];
+      const mr = new MediaRecorder(stream);
+      mr.ondataavailable = (e) => {
+        if (e.data.size) chunksRef.current.push(e.data);
+      };
+      mr.onstop = async () => {
+        stopTracks();
+        const blob = new Blob(chunksRef.current, { type: mr.mimeType || "audio/webm" });
+        if (!blob.size) return;
+        setTranscribing(true);
+        try {
+          const fd = new FormData();
+          fd.append("audio", blob, "answer.webm");
+          const res = await fetch("/api/job-hunter/interview/transcribe", { method: "POST", body: fd });
+          const json = await res.json().catch(() => null);
+          if (!res.ok || !json?.success) {
+            setVoiceError(json?.error || "转写失败,请重试");
+          } else if (json.text) {
+            const prev = answerRef.current.trim();
+            setAnswer(prev ? `${prev} ${json.text}` : json.text);
+          }
+        } catch {
+          setVoiceError("网络异常,转写失败");
+        } finally {
+          setTranscribing(false);
+        }
+      };
+      mr.start();
+      recorderRef.current = mr;
+      setRecording(true);
+    } catch {
+      setVoiceError("无法访问麦克风(请允许麦克风权限)");
+    }
+  }
+
+  function stopRec() {
+    try {
+      recorderRef.current?.stop();
+    } catch {
+      /* ignore */
+    }
+    recorderRef.current = null;
+    setRecording(false);
+  }
+
+  // 卸载时收尾:停止录音与音轨。
+  useEffect(
+    () => () => {
+      try {
+        recorderRef.current?.stop();
+      } catch {
+        /* ignore */
+      }
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    },
+    [],
+  );
+
+  // —— 转成英文面试版(用中文/任意语言作答 → AI 改写成可说出口的英文作答)——
+  const [englishifying, setEnglishifying] = useState(false);
+  const [englishError, setEnglishError] = useState<string | null>(null);
+  const [canUndoEnglish, setCanUndoEnglish] = useState(false);
+  const prevAnswerRef = useRef<string | null>(null);
+
+  async function toEnglish() {
+    const text = answerRef.current.trim();
+    if (!text) {
+      setEnglishError("请先写下你的作答(可用中文),再转成英文。");
+      return;
+    }
+    setEnglishError(null);
+    setEnglishifying(true);
+    try {
+      const res = await fetch("/api/job-hunter/interview/englishify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ questionId: question.questionId, answer: text }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        setEnglishError(json?.error || "生成英文版失败,请重试");
+      } else if (json.english) {
+        prevAnswerRef.current = answerRef.current;
+        setCanUndoEnglish(true);
+        setAnswer(json.english);
+      }
+    } catch {
+      setEnglishError("网络异常,请重试");
+    } finally {
+      setEnglishifying(false);
+    }
+  }
+
+  function undoEnglish() {
+    if (prevAnswerRef.current != null) {
+      setAnswer(prevAnswerRef.current);
+      prevAnswerRef.current = null;
+      setCanUndoEnglish(false);
+    }
+  }
+
+  // 换题时复位英文改写状态。
+  useEffect(() => {
+    setEnglishError(null);
+    setCanUndoEnglish(false);
+    prevAnswerRef.current = null;
+  }, [question.questionId]);
+
+  const answerLocked = grading || !!grade;
+
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -483,16 +873,69 @@ function PracticeCard({
             {SR_STATE_LABEL[question.srState]}
           </span>
         )}
+        <button
+          onClick={toggleSpeak}
+          className="ml-auto rounded-lg border border-slate-200 px-2.5 py-0.5 text-xs font-medium text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
+        >
+          {loadingSpeech ? "🔄 生成语音…" : speaking ? "⏹ 停止朗读" : "🔊 读题"}
+        </button>
       </div>
-      <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-slate-800">{question.prompt}</p>
+      <TranslatableText
+        text={question.prompt}
+        className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-slate-800"
+      />
+      {speechError && <p className="mt-1 text-xs text-rose-500">{speechError}</p>}
+
+      {/* 语音作答工具条 */}
+      {!answerLocked && (
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {canRecord ? (
+            <button
+              onClick={recording ? stopRec : startRec}
+              disabled={transcribing}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:opacity-60 ${
+                recording
+                  ? "bg-rose-600 text-white hover:bg-rose-700"
+                  : "border border-slate-200 text-slate-600 hover:border-cyan-300 hover:text-cyan-700"
+              }`}
+            >
+              {recording ? "● 停止并转写" : "🎙️ 语音作答"}
+            </button>
+          ) : (
+            <span className="text-xs text-slate-400">（此浏览器不支持录音，可直接打字）</span>
+          )}
+          <button
+            onClick={toEnglish}
+            disabled={englishifying || recording}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 disabled:opacity-60"
+          >
+            {englishifying ? "转换中…" : "🌐 转成英文面试版"}
+          </button>
+          {canUndoEnglish && (
+            <button onClick={undoEnglish} className="text-xs text-slate-400 underline hover:text-slate-600">
+              ↩︎ 恢复原文
+            </button>
+          )}
+          {recording && <span className="text-xs text-rose-500">录音中……说完点「停止并转写」</span>}
+          {transcribing && <span className="text-xs text-slate-400">正在转写……</span>}
+          {voiceError && <span className="text-xs text-rose-500">{voiceError}</span>}
+          {englishError && <span className="text-xs text-rose-500">{englishError}</span>}
+        </div>
+      )}
+
+      {canUndoEnglish && !answerLocked && (
+        <p className="mt-2 text-xs text-indigo-600">
+          ✅ 已按你的作答生成英文面试版，可再编辑后「提交作答」；提交的就是这份英文答案。
+        </p>
+      )}
 
       <textarea
         value={answer}
         onChange={(e) => setAnswer(e.target.value)}
-        placeholder="在这里打字作答……"
+        placeholder="可先用中文作答，再点「🌐 转成英文面试版」；也可直接打字或「🎙️ 语音作答」……"
         rows={7}
-        disabled={grading || !!grade}
-        className="mt-4 w-full resize-y rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 disabled:bg-slate-50"
+        disabled={answerLocked}
+        className="mt-2 w-full resize-y rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 disabled:bg-slate-50"
       />
 
       {error && <p className="mt-2 text-sm text-rose-600">{error}</p>}
@@ -552,7 +995,8 @@ function GradeView({
                 <span className="text-slate-700">{c.criterion}</span>
                 <span className="text-xs font-semibold text-slate-500">{c.score}</span>
               </div>
-              {c.comment && <p className="text-xs text-slate-400">{c.comment}</p>}
+              {c.comment && <p className="text-xs text-slate-500">{c.comment}</p>}
+              {c.commentEn && <p className="text-xs italic text-slate-400">{c.commentEn}</p>}
             </div>
           ))}
         </div>
@@ -564,10 +1008,13 @@ function GradeView({
       <FeedbackList title="💡 改进建议" items={g.advice} tone="slate" />
 
       <details className="mt-3 rounded-xl bg-slate-50 p-3">
-        <summary className="cursor-pointer text-sm font-medium text-slate-600">查看参考答案</summary>
-        <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
-          {grade.referenceAnswer}
-        </p>
+        <summary className="cursor-pointer text-sm font-medium text-slate-600">
+          查看参考答案（可划词翻译）
+        </summary>
+        <TranslatableText
+          text={grade.referenceAnswer}
+          className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700"
+        />
       </details>
 
       <button
@@ -586,7 +1033,7 @@ function FeedbackList({
   tone,
 }: {
   title: string;
-  items: string[];
+  items: BiText[];
   tone: "emerald" | "amber" | "rose" | "slate";
 }) {
   if (!items.length) return null;
@@ -599,11 +1046,14 @@ function FeedbackList({
   return (
     <div className="mt-3">
       <p className={`text-xs font-semibold ${color}`}>{title}</p>
-      <ul className="mt-1 space-y-0.5 text-sm text-slate-600">
+      <ul className="mt-1 space-y-1.5 text-sm text-slate-600">
         {items.map((it, i) => (
           <li key={i} className="flex gap-2">
             <span className="text-slate-300">·</span>
-            <span>{it}</span>
+            <span>
+              {it.zh && <span className="block">{it.zh}</span>}
+              {it.en && <span className="block text-xs italic text-slate-400">{it.en}</span>}
+            </span>
           </li>
         ))}
       </ul>

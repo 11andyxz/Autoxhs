@@ -119,6 +119,13 @@ export async function getPriorCharges(
   };
 }
 
+export interface PaymentFileMeta {
+  id: number;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
 export interface HistoryRecord {
   id: number;
   inputStartDate: string;
@@ -132,6 +139,11 @@ export interface HistoryRecord {
   payrollFeeMonths: string[];
   createdAt: string;
   result: unknown; // 完整 CalculationResult 快照(供 View / 重新导出)
+  /** 是否已付(收款);paidAt = 标记已付的时间 */
+  paid: boolean;
+  paidAt: string | null;
+  /** 付款凭证(标记已付时上传) */
+  payments: PaymentFileMeta[];
 }
 
 export async function getHistory(clientId: number): Promise<HistoryRecord[]> {
@@ -139,10 +151,29 @@ export async function getHistory(clientId: number): Promise<HistoryRecord[]> {
   const [rows] = await p.query<RowDataPacket[]>(
     `SELECT id, input_start_date, input_end_date, actual_end_date,
             gross_wages, total_tax, total_payroll_fees, total_service_charge, grand_total,
-            result_json, created_at
+            result_json, paid, paid_at, created_at
      FROM fee_records WHERE client_id = ? ORDER BY created_at DESC, id DESC`,
     [clientId],
   );
+  // 该客户所有记录的付款凭证,一次查回按 record_id 分组
+  const [payRows] = await p.query<RowDataPacket[]>(
+    `SELECT pf.id, pf.record_id, pf.original_name, pf.mime_type, pf.size_bytes
+     FROM fee_payment_file pf JOIN fee_records fr ON fr.id = pf.record_id
+     WHERE fr.client_id = ? ORDER BY pf.id ASC`,
+    [clientId],
+  );
+  const payByRecord = new Map<number, PaymentFileMeta[]>();
+  for (const r of payRows) {
+    const rid = r.record_id as number;
+    const list = payByRecord.get(rid) ?? [];
+    list.push({
+      id: r.id as number,
+      originalName: r.original_name as string,
+      mimeType: r.mime_type as string,
+      sizeBytes: Number(r.size_bytes),
+    });
+    payByRecord.set(rid, list);
+  }
   return rows.map((r) => {
     const result =
       typeof r.result_json === "string" ? JSON.parse(r.result_json) : r.result_json;
@@ -159,6 +190,9 @@ export async function getHistory(clientId: number): Promise<HistoryRecord[]> {
       payrollFeeMonths: (result?.chargedPayrollMonths as string[]) ?? [],
       createdAt: r.created_at as string,
       result,
+      paid: Number(r.paid) === 1,
+      paidAt: (r.paid_at as string) ?? null,
+      payments: payByRecord.get(r.id as number) ?? [],
     };
   });
 }
