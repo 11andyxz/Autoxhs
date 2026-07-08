@@ -30,6 +30,7 @@ export async function GET(req: NextRequest) {
     ]);
     const bank = bankRows.map((b) => ({
       id: b.id,
+      skillId: b.skill_id,
       skill: b.skill,
       category: b.category,
       type: b.type,

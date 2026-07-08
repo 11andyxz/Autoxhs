@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 
 import { translateTerm } from "@/lib/job-hunter/interview/ai";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
+import { vocabExists } from "@/lib/job-hunter/interview/repo";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,8 +26,12 @@ export async function POST(req: NextRequest) {
   const context = typeof body.context === "string" ? body.context.slice(0, MAX_CONTEXT) : "";
 
   try {
-    const { ipa, zh, note } = await translateTerm(term, context);
-    return NextResponse.json({ success: true, ipa, zh, note });
+    // 顺带查一下是否已在单词本(失败不影响翻译)。
+    const [{ ipa, zh, note }, inVocab] = await Promise.all([
+      translateTerm(term, context),
+      vocabExists(term).catch(() => false),
+    ]);
+    return NextResponse.json({ success: true, ipa, zh, note, inVocab });
   } catch (err) {
     return fail(err, "translate");
   }

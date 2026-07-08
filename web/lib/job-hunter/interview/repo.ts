@@ -2,7 +2,7 @@ import type { RowDataPacket, ResultSetHeader } from "mysql2";
 
 import { getPool } from "@/lib/serviceFee/db";
 
-import type { Grade, QuestionType } from "./schema";
+import type { Coach, Grade, QuestionType } from "./schema";
 
 /**
  * 面试训练的持久化层。复用收费计算器的同一个 MySQL 连接池(getPool),
@@ -114,6 +114,40 @@ export function ensureInterviewSchema(): Promise<void> {
         text MEDIUMTEXT NOT NULL,
         embedding JSON NOT NULL,
         CONSTRAINT fk_ip_chunk_doc FOREIGN KEY (doc_id) REFERENCES ip_kb_doc(id) ON DELETE CASCADE
+      )
+    `);
+    // 单词本(全局,不绑定会话):划词加入的生词,含音标/释义/例句 + SM-2 间隔重复状态。
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS ip_vocab (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        term VARCHAR(255) NOT NULL,
+        term_norm VARCHAR(255) NOT NULL UNIQUE,
+        ipa VARCHAR(255) NOT NULL DEFAULT '',
+        zh VARCHAR(500) NOT NULL DEFAULT '',
+        note VARCHAR(1000) NOT NULL DEFAULT '',
+        example MEDIUMTEXT NOT NULL,
+        example_zh VARCHAR(1000) NOT NULL DEFAULT '',
+        ease_factor DECIMAL(4,2) NOT NULL DEFAULT 2.50,
+        interval_days INT NOT NULL DEFAULT 0,
+        repetitions INT NOT NULL DEFAULT 0,
+        lapses INT NOT NULL DEFAULT 0,
+        due_at DATETIME NULL,
+        last_reviewed_at DATETIME NULL,
+        last_grade VARCHAR(10) NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_ip_vocab_due (due_at)
+      )
+    `);
+    // 弱点补强内容(每个技能一份,持久化):生成后固定展示,除非手动重新生成。
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS ip_coach (
+        skill_id INT PRIMARY KEY,
+        lesson MEDIUMTEXT NOT NULL,
+        model_answer MEDIUMTEXT NOT NULL,
+        practice_question MEDIUMTEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_ip_coach_skill FOREIGN KEY (skill_id) REFERENCES ip_skill(id) ON DELETE CASCADE
       )
     `);
 
@@ -475,6 +509,7 @@ export async function getNextCard(sessionId: number): Promise<NextCardRow | null
 
 export type BankItemRow = {
   id: number;
+  skill_id: number;
   skill: string;
   category: string;
   type: QuestionType;
@@ -492,7 +527,7 @@ export type BankItemRow = {
 export async function getBankList(sessionId: number): Promise<BankItemRow[]> {
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    `SELECT q.id, s.name AS skill, s.category, q.type, q.prompt,
+    `SELECT q.id, q.skill_id, s.name AS skill, s.category, q.type, q.prompt,
             q.repetitions, q.interval_days, q.lapses, q.last_score,
             q.due_at, q.last_reviewed_at,
             (q.last_reviewed_at IS NULL OR q.due_at IS NULL OR q.due_at <= NOW()) AS is_due
@@ -609,6 +644,32 @@ export async function getSkillWeaknesses(skillId: number, limit = 5): Promise<st
   return Array.from(new Set(out)).slice(0, 12);
 }
 
+/* ---------------- 弱点补强(持久化,每技能一份) ---------------- */
+
+export async function getCoach(skillId: number): Promise<Coach | null> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT lesson, model_answer, practice_question FROM ip_coach WHERE skill_id = ?",
+    [skillId],
+  );
+  const r = rows[0] as
+    | { lesson: string; model_answer: string; practice_question: string }
+    | undefined;
+  if (!r) return null;
+  return { lesson: r.lesson, modelAnswer: r.model_answer, practiceQuestion: r.practice_question };
+}
+
+export async function saveCoach(skillId: number, c: Coach): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    `INSERT INTO ip_coach (skill_id, lesson, model_answer, practice_question)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE lesson = VALUES(lesson), model_answer = VALUES(model_answer),
+       practice_question = VALUES(practice_question)`,
+    [skillId, c.lesson, c.modelAnswer, c.practiceQuestion],
+  );
+}
+
 export type AnswerSummary = {
   id: number;
   skill: string;
@@ -714,4 +775,156 @@ export async function hasKb(): Promise<boolean> {
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>("SELECT 1 FROM ip_kb_chunk LIMIT 1");
   return rows.length > 0;
+}
+
+/* ---------------- 单词本(全局,按遗忘曲线复习) ---------------- */
+
+export type VocabRow = {
+  id: number;
+  term: string;
+  ipa: string;
+  zh: string;
+  note: string;
+  example: string;
+  example_zh: string;
+  ease_factor: number;
+  interval_days: number;
+  repetitions: number;
+  lapses: number;
+  due_at: string | null;
+  last_reviewed_at: string | null;
+  last_grade: string | null;
+  is_due: number;
+};
+
+function vocabNorm(term: string): string {
+  return term.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 255);
+}
+
+/** 加入单词本(按归一化词去重:已存在则刷新音标/释义/例句,但保留复习进度)。 */
+export async function addVocab(v: {
+  term: string;
+  ipa: string;
+  zh: string;
+  note: string;
+  example: string;
+  exampleZh: string;
+}): Promise<{ id: number; existed: boolean }> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const norm = vocabNorm(v.term);
+  const [res] = await p.execute<ResultSetHeader>(
+    `INSERT INTO ip_vocab (term, term_norm, ipa, zh, note, example, example_zh, due_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+     ON DUPLICATE KEY UPDATE ipa = VALUES(ipa), zh = VALUES(zh), note = VALUES(note),
+       example = VALUES(example), example_zh = VALUES(example_zh)`,
+    [
+      v.term.trim().slice(0, 255),
+      norm,
+      v.ipa.slice(0, 255),
+      v.zh.slice(0, 500),
+      v.note.slice(0, 1000),
+      v.example.slice(0, 4000) || "(no example)",
+      v.exampleZh.slice(0, 1000),
+    ],
+  );
+  const existed = res.affectedRows === 2; // mysql: 1=插入,2=更新已存在行
+  const [rows] = await p.execute<RowDataPacket[]>("SELECT id FROM ip_vocab WHERE term_norm = ?", [norm]);
+  return { id: Number(rows[0]?.id ?? res.insertId), existed };
+}
+
+/** 该词是否已在单词本(按归一化词判断);划词浮层用它显示「已加入」。 */
+export async function vocabExists(term: string): Promise<boolean> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT 1 FROM ip_vocab WHERE term_norm = ? LIMIT 1",
+    [vocabNorm(term)],
+  );
+  return rows.length > 0;
+}
+
+/** 全部生词(复习题先、按到期排序);is_due=1 表示现在可复习(新词或已到期)。 */
+export async function listVocab(): Promise<VocabRow[]> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    `SELECT id, term, ipa, zh, note, example, example_zh, ease_factor, interval_days,
+            repetitions, lapses, due_at, last_reviewed_at, last_grade,
+            (last_reviewed_at IS NULL OR due_at IS NULL OR due_at <= NOW()) AS is_due
+       FROM ip_vocab
+      ORDER BY (last_reviewed_at IS NOT NULL AND due_at IS NOT NULL AND due_at <= NOW()) DESC,
+               due_at ASC, id DESC`,
+  );
+  return (rows as VocabRow[]).map((r) => ({
+    ...r,
+    ease_factor: Number(r.ease_factor),
+    interval_days: Number(r.interval_days),
+    repetitions: Number(r.repetitions),
+    lapses: Number(r.lapses),
+    is_due: Number(r.is_due),
+  }));
+}
+
+export type VocabCounts = { total: number; due: number; fresh: number; mastered: number };
+
+export async function getVocabCounts(): Promise<VocabCounts> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const [rows] = await p.query<RowDataPacket[]>(
+    `SELECT COUNT(*) AS total,
+        SUM(last_reviewed_at IS NULL) AS fresh,
+        SUM(last_reviewed_at IS NULL OR (due_at IS NOT NULL AND due_at <= NOW())) AS due,
+        SUM(last_reviewed_at IS NOT NULL AND interval_days >= 21) AS mastered
+       FROM ip_vocab`,
+  );
+  const r = rows[0] ?? {};
+  return {
+    total: Number(r.total ?? 0),
+    due: Number(r.due ?? 0),
+    fresh: Number(r.fresh ?? 0),
+    mastered: Number(r.mastered ?? 0),
+  };
+}
+
+export async function getVocab(id: number): Promise<VocabRow | null> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    `SELECT id, term, ipa, zh, note, example, example_zh, ease_factor, interval_days,
+            repetitions, lapses, due_at, last_reviewed_at, last_grade, 1 AS is_due
+       FROM ip_vocab WHERE id = ?`,
+    [id],
+  );
+  const r = rows[0] as VocabRow | undefined;
+  if (!r) return null;
+  return {
+    ...r,
+    ease_factor: Number(r.ease_factor),
+    interval_days: Number(r.interval_days),
+    repetitions: Number(r.repetitions),
+    lapses: Number(r.lapses),
+    is_due: Number(r.is_due),
+  };
+}
+
+/** 复习后按 SM-2 更新单词的调度(SQL 侧 DATE_ADD,避免时区漂移)。 */
+export async function updateVocabSr(
+  id: number,
+  update: { ease_factor: number; interval_days: number; repetitions: number; lapses: number },
+  grade: string,
+): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    `UPDATE ip_vocab
+        SET ease_factor = ?, interval_days = ?, repetitions = ?, lapses = ?,
+            last_grade = ?, last_reviewed_at = NOW(),
+            due_at = DATE_ADD(NOW(), INTERVAL ? DAY)
+      WHERE id = ?`,
+    [update.ease_factor, update.interval_days, update.repetitions, update.lapses, grade, update.interval_days, id],
+  );
+}
+
+export async function deleteVocab(id: number): Promise<void> {
+  const p = getPool();
+  await p.execute("DELETE FROM ip_vocab WHERE id = ?", [id]);
 }

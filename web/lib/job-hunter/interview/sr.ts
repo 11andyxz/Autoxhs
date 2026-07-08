@@ -34,6 +34,14 @@ const SECOND_INTERVAL = 6;
 /** 单卡最长间隔上限（天），约一年，避免间隔无限膨胀 */
 const MAX_INTERVAL = 365;
 
+/** 单词本自评三档 → SM-2 quality。不记得=没通过打回重学;似乎记得=刚过;清楚=牢固。 */
+export type RecallGrade = "forgot" | "vague" | "clear";
+export function gradeToQuality(g: RecallGrade): number {
+  if (g === "forgot") return 1; // <3 → 明天重学
+  if (g === "vague") return 3; // 刚过,间隔小步前进
+  return 5; // clear,牢固,间隔拉长
+}
+
 /** 把 0~100 的评分折算成 SM-2 的 quality（0~5）。<3 视为没通过。 */
 export function scoreToQuality(score: number): number {
   if (!Number.isFinite(score)) return 0;

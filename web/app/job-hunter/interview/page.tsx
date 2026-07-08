@@ -30,6 +30,7 @@ type SrCounts = { total: number; fresh: number; due: number; later: number; mast
 
 type BankItem = {
   id: number;
+  skillId: number;
   skill: string;
   category: string;
   type: QuestionType;
@@ -142,6 +143,7 @@ export default function InterviewPage() {
   const [reviewExhausted, setReviewExhausted] = useState(false);
 
   const practiceRef = useRef<HTMLDivElement | null>(null);
+  const coachRef = useRef<HTMLDivElement | null>(null);
   const isBank = progress?.session.mode === "bank";
 
   // 从 URL 读取 session（纯客户端，避免 useSearchParams 的 Suspense 约束）
@@ -231,7 +233,7 @@ export default function InterviewPage() {
     setReviewExhausted(false);
     setQuestion({
       questionId: item.id,
-      skill: { id: 0, name: item.skill, category: item.category },
+      skill: { id: item.skillId, name: item.skill, category: item.category },
       type: item.type,
       prompt: item.prompt,
       srState: item.state,
@@ -259,14 +261,19 @@ export default function InterviewPage() {
     if (sessionId) loadProgress(sessionId);
   }
 
-  async function requestCoach(skillId: number) {
+  async function requestCoach(skillId: number, regenerate = false) {
     if (!sessionId) return;
+    if (!Number.isInteger(skillId) || skillId <= 0) {
+      setProgressError("这道题暂时无法定位技能,请从「开始复习」进入后再看讲解。");
+      return;
+    }
     setCoachSkillId(skillId);
     setCoach(null);
     setCoaching(true);
+    setTimeout(() => coachRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
     const { ok, data, error } = await postJson<{ coach: typeof coach; success: boolean }>(
       "/api/job-hunter/interview/coach",
-      { sessionId, skillId },
+      { sessionId, skillId, regenerate },
     );
     setCoaching(false);
     if (ok && data?.coach) setCoach(data.coach);
@@ -345,19 +352,25 @@ export default function InterviewPage() {
                 </button>
               )}
               <KbManager />
+              <VocabManager />
             </div>
 
             {/* 补强内容 */}
-            {coachSkillId !== null && (
-              <CoachCard
-                loading={coaching}
-                coach={coach}
-                onClose={() => {
-                  setCoachSkillId(null);
-                  setCoach(null);
-                }}
-              />
-            )}
+            <div ref={coachRef}>
+              {coachSkillId !== null && (
+                <CoachCard
+                  loading={coaching}
+                  coach={coach}
+                  onClose={() => {
+                    setCoachSkillId(null);
+                    setCoach(null);
+                  }}
+                  onRegenerate={() => {
+                    if (coachSkillId !== null) requestCoach(coachSkillId, true);
+                  }}
+                />
+              )}
+            </div>
 
             {/* 答题区 */}
             <div ref={practiceRef}>
@@ -372,6 +385,7 @@ export default function InterviewPage() {
                   onSubmit={submitAnswer}
                   onNext={isBank ? startReview : () => nextQuestion()}
                   nextLabel={isBank ? "下一张（复习）→" : "下一题 →"}
+                  onExplain={() => requestCoach(question.skill.id)}
                 />
               )}
             </div>
@@ -465,6 +479,29 @@ function TranslatableText({ text, className }: { text: string; className?: strin
   // 发音:复用 /speak(OpenAI TTS)读出选中的词
   const termAudioRef = useRef<HTMLAudioElement | null>(null);
   const [speaking, setSpeaking] = useState(false);
+  // 加入单词本
+  const [vocab, setVocab] = useState<"idle" | "adding" | "added" | "existed" | "error">("idle");
+
+  async function addToVocab(term: string) {
+    setVocab("adding");
+    try {
+      const r = await fetch("/api/job-hunter/interview/vocab", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          term,
+          ipa: res?.ipa || "",
+          zh: res?.zh || "",
+          note: res?.note || "",
+          context: text.slice(0, 1000),
+        }),
+      });
+      const j = await r.json().catch(() => null);
+      setVocab(!r.ok || !j?.success ? "error" : j.existed ? "existed" : "added");
+    } catch {
+      setVocab("error");
+    }
+  }
 
   async function speakTerm(term: string) {
     try {
@@ -509,6 +546,7 @@ function TranslatableText({ text, className }: { text: string; className?: strin
     }
     setPop({ x: rect.left + rect.width / 2, y: rect.bottom, term });
     setRes(null);
+    setVocab("idle");
     setLoading(true);
     const rid = ++reqIdRef.current;
     fetch("/api/job-hunter/interview/translate", {
@@ -524,6 +562,7 @@ function TranslatableText({ text, className }: { text: string; className?: strin
             ? { ipa: j.ipa || "", zh: j.zh, note: j.note || "" }
             : { ipa: "", zh: "翻译失败", note: "" },
         );
+        if (j?.success && j.inVocab) setVocab("existed"); // 已在单词本则直接显示「已加入」
       })
       .catch(() => {
         if (rid === reqIdRef.current) setRes({ ipa: "", zh: "网络异常", note: "" });
@@ -587,6 +626,23 @@ function TranslatableText({ text, className }: { text: string; className?: strin
                 {res.note && <div className="mt-0.5 text-xs text-slate-400">{res.note}</div>}
               </div>
             ) : null}
+            {res && (
+              <div className="mt-2 border-t border-slate-100 pt-2">
+                {vocab === "added" || vocab === "existed" ? (
+                  <span className="text-xs font-medium text-emerald-600">
+                    {vocab === "existed" ? "✓ 已在单词本" : "✓ 已加入单词本"}
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => addToVocab(pop.term)}
+                    disabled={vocab === "adding"}
+                    className="rounded-lg border border-indigo-200 px-2.5 py-1 text-xs font-medium text-indigo-600 transition hover:bg-indigo-50 disabled:opacity-60"
+                  >
+                    {vocab === "adding" ? "加入中（生成例句）…" : vocab === "error" ? "重试加入单词本" : "➕ 加入单词本"}
+                  </button>
+                )}
+              </div>
+            )}
           </div>,
           document.body,
         )}
@@ -604,6 +660,7 @@ function PracticeCard({
   onSubmit,
   onNext,
   nextLabel = "下一题 →",
+  onExplain,
 }: {
   question: CurrentQuestion;
   answer: string;
@@ -614,6 +671,7 @@ function PracticeCard({
   onSubmit: () => void;
   onNext: () => void;
   nextLabel?: string;
+  onExplain: () => void;
 }) {
   // 录音能力探测放到挂载后,避免 SSR/水合不一致。
   const [canRecord, setCanRecord] = useState(false);
@@ -916,6 +974,12 @@ function PracticeCard({
               ↩︎ 恢复原文
             </button>
           )}
+          <button
+            onClick={onExplain}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
+          >
+            🤔 不会，直接看讲解
+          </button>
           {recording && <span className="text-xs text-rose-500">录音中……说完点「停止并转写」</span>}
           {transcribing && <span className="text-xs text-slate-400">正在转写……</span>}
           {voiceError && <span className="text-xs text-rose-500">{voiceError}</span>}
@@ -1065,33 +1129,47 @@ function CoachCard({
   loading,
   coach,
   onClose,
+  onRegenerate,
 }: {
   loading: boolean;
   coach: { lesson: string; modelAnswer: string; practiceQuestion: string } | null;
   onClose: () => void;
+  onRegenerate: () => void;
 }) {
   return (
     <div className="rounded-2xl border border-cyan-200 bg-cyan-50/50 p-5 shadow-sm">
       <div className="flex items-center justify-between">
         <p className="text-sm font-semibold text-cyan-900">📚 弱点补强</p>
-        <button onClick={onClose} className="text-xs text-slate-400 hover:text-slate-600">
-          关闭
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onRegenerate}
+            disabled={loading}
+            className="text-xs text-slate-400 transition hover:text-cyan-700 disabled:opacity-50"
+          >
+            重新生成
+          </button>
+          <button onClick={onClose} className="text-xs text-slate-400 hover:text-slate-600">
+            关闭
+          </button>
+        </div>
       </div>
+      {coach && !loading && (
+        <p className="mt-1 text-xs text-slate-400">已保存，下次打开还是这篇；需要新的点「重新生成」。</p>
+      )}
       {loading && <p className="mt-2 text-sm text-slate-500">正在生成讲解……</p>}
       {coach && (
         <div className="mt-3 space-y-3 text-sm leading-relaxed text-slate-700">
           <div>
-            <p className="text-xs font-semibold text-slate-500">讲解</p>
-            <p className="mt-1 whitespace-pre-wrap">{coach.lesson}</p>
+            <p className="text-xs font-semibold text-slate-500">讲解（可划词翻译）</p>
+            <TranslatableText text={coach.lesson} className="mt-1 whitespace-pre-wrap" />
           </div>
           <div>
-            <p className="text-xs font-semibold text-slate-500">示范回答</p>
-            <p className="mt-1 whitespace-pre-wrap">{coach.modelAnswer}</p>
+            <p className="text-xs font-semibold text-slate-500">示范回答（可划词翻译）</p>
+            <TranslatableText text={coach.modelAnswer} className="mt-1 whitespace-pre-wrap" />
           </div>
           <div>
-            <p className="text-xs font-semibold text-slate-500">练习题</p>
-            <p className="mt-1 whitespace-pre-wrap">{coach.practiceQuestion}</p>
+            <p className="text-xs font-semibold text-slate-500">练习题（可划词翻译）</p>
+            <TranslatableText text={coach.practiceQuestion} className="mt-1 whitespace-pre-wrap" />
           </div>
         </div>
       )}
@@ -1369,6 +1447,264 @@ function KbManager() {
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+type VocabItem = {
+  id: number;
+  term: string;
+  ipa: string;
+  zh: string;
+  note: string;
+  example: string;
+  exampleZh: string;
+  state: SrState;
+  isDue: boolean;
+  dueAt: string | null;
+  lastGrade: string | null;
+};
+
+type VocabCounts = { total: number; due: number; fresh: number; mastered: number };
+
+/** 单词本:划词加入的生词按遗忘曲线复习(闪卡:显示词→揭示释义/例句→不记得/似乎记得/清楚 自评)。 */
+function VocabManager() {
+  const [open, setOpen] = useState(false);
+  const [words, setWords] = useState<VocabItem[]>([]);
+  const [counts, setCounts] = useState<VocabCounts | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [queue, setQueue] = useState<VocabItem[]>([]);
+  const [idx, setIdx] = useState(0);
+  const [revealed, setRevealed] = useState(false);
+  const [grading, setGrading] = useState(false);
+  const [lastLabel, setLastLabel] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch("/api/job-hunter/interview/vocab");
+      const j = await r.json().catch(() => null);
+      if (j?.success) {
+        setWords(j.words as VocabItem[]);
+        setCounts(j.counts as VocabCounts);
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open) load();
+  }, [open, load]);
+  useEffect(() => () => audioRef.current?.pause(), []);
+
+  async function speak(text: string) {
+    try {
+      const r = await fetch("/api/job-hunter/interview/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!r.ok) return;
+      const url = URL.createObjectURL(await r.blob());
+      let a = audioRef.current;
+      if (!a) {
+        a = new Audio();
+        audioRef.current = a;
+      }
+      a.src = url;
+      a.onended = () => URL.revokeObjectURL(url);
+      a.play().catch(() => {});
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function startReview() {
+    const due = words.filter((w) => w.isDue);
+    if (!due.length) {
+      setMsg("今日没有到期的单词 🎉");
+      return;
+    }
+    setQueue(due);
+    setIdx(0);
+    setRevealed(false);
+    setLastLabel(null);
+    setMsg(null);
+  }
+
+  async function grade(g: "forgot" | "vague" | "clear") {
+    const cur = queue[idx];
+    if (!cur) return;
+    setGrading(true);
+    try {
+      const r = await fetch("/api/job-hunter/interview/vocab/review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: cur.id, grade: g }),
+      });
+      const j = await r.json().catch(() => null);
+      setLastLabel(j?.success ? `${cur.term} → ${j.nextReviewLabel}复习` : null);
+    } catch {
+      /* ignore */
+    } finally {
+      setGrading(false);
+    }
+    if (idx + 1 >= queue.length) {
+      setQueue([]);
+      setIdx(0);
+      setRevealed(false);
+      setMsg("本轮复习完成 🎉");
+      load();
+    } else {
+      setIdx(idx + 1);
+      setRevealed(false);
+    }
+  }
+
+  async function remove(id: number) {
+    await fetch(`/api/job-hunter/interview/vocab?id=${id}`, { method: "DELETE" });
+    load();
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700"
+      >
+        📓 单词本{counts && counts.due > 0 ? `（${counts.due} 待复习）` : ""}
+      </button>
+    );
+  }
+
+  const cur = queue.length > 0 ? queue[idx] : null;
+
+  return (
+    <div className="w-full rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-semibold text-slate-800">📓 单词本 · 遗忘曲线复习</p>
+        <button onClick={() => setOpen(false)} className="text-xs text-slate-400 hover:text-slate-600">
+          收起
+        </button>
+      </div>
+
+      {counts && (
+        <div className="mt-3 grid grid-cols-4 gap-2 text-center">
+          <Stat label="待复习" value={counts.due} tone="rose" />
+          <Stat label="新词" value={counts.fresh} tone="sky" />
+          <Stat label="已掌握" value={counts.mastered} tone="emerald" />
+          <Stat label="总数" value={counts.total} tone="slate" />
+        </div>
+      )}
+
+      {msg && <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">{msg}</p>}
+
+      {cur ? (
+        <div className="mt-4 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-4">
+          <div className="text-xs text-slate-400">
+            第 {idx + 1} / {queue.length} 张
+          </div>
+          <div className="mt-1 flex items-center gap-2">
+            <span className="text-lg font-bold text-slate-800">{cur.term}</span>
+            {cur.ipa && <span className="text-sm text-slate-500">{cur.ipa}</span>}
+            <button
+              onClick={() => speak(cur.term)}
+              className="rounded-md border border-slate-200 px-1.5 py-0.5 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700"
+            >
+              🔊
+            </button>
+          </div>
+          {!revealed ? (
+            <button
+              onClick={() => setRevealed(true)}
+              className="mt-3 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-700"
+            >
+              显示释义
+            </button>
+          ) : (
+            <div className="mt-3 space-y-2">
+              <div className="text-sm text-slate-700">{cur.zh}</div>
+              {cur.note && <div className="text-xs text-slate-400">{cur.note}</div>}
+              {cur.example && (
+                <div className="rounded-lg bg-white p-2 text-sm">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-slate-700">{cur.example}</span>
+                    <button
+                      onClick={() => speak(cur.example)}
+                      className="shrink-0 rounded border border-slate-200 px-1 text-xs text-slate-400 transition hover:text-cyan-700"
+                    >
+                      🔊
+                    </button>
+                  </div>
+                  {cur.exampleZh && <div className="mt-1 text-xs text-slate-400">{cur.exampleZh}</div>}
+                </div>
+              )}
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={() => grade("forgot")}
+                  disabled={grading}
+                  className="flex-1 rounded-xl bg-rose-100 px-3 py-2 text-sm font-medium text-rose-700 transition hover:bg-rose-200 disabled:opacity-60"
+                >
+                  不记得
+                </button>
+                <button
+                  onClick={() => grade("vague")}
+                  disabled={grading}
+                  className="flex-1 rounded-xl bg-amber-100 px-3 py-2 text-sm font-medium text-amber-700 transition hover:bg-amber-200 disabled:opacity-60"
+                >
+                  似乎记得
+                </button>
+                <button
+                  onClick={() => grade("clear")}
+                  disabled={grading}
+                  className="flex-1 rounded-xl bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-200 disabled:opacity-60"
+                >
+                  清楚
+                </button>
+              </div>
+            </div>
+          )}
+          {lastLabel && <p className="mt-2 text-xs text-indigo-600">上一张：{lastLabel}</p>}
+        </div>
+      ) : (
+        <div className="mt-4">
+          <button
+            onClick={startReview}
+            disabled={loading || !counts || counts.due === 0}
+            className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {counts && counts.due > 0 ? `开始复习（${counts.due} 待复习）` : "暂无到期单词"}
+          </button>
+        </div>
+      )}
+
+      {words.length > 0 && (
+        <div className="mt-4 border-t border-slate-100 pt-3">
+          <p className="text-xs font-semibold text-slate-500">全部单词（{words.length}）</p>
+          <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto">
+            {words.map((w) => (
+              <li key={w.id} className="flex items-center justify-between gap-2 text-sm">
+                <span className="min-w-0 truncate">
+                  <span className="font-medium text-slate-700">{w.term}</span>
+                  <span className="ml-2 text-xs text-slate-400">{w.zh}</span>
+                  <span className={`ml-2 rounded px-1 py-0.5 text-[10px] font-medium ${SR_STATE_CLASS[w.state]}`}>
+                    {SR_STATE_LABEL[w.state]}
+                  </span>
+                </span>
+                <button onClick={() => remove(w.id)} className="shrink-0 text-xs text-rose-400 hover:text-rose-600">
+                  删除
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {loading && <p className="mt-2 text-xs text-slate-400">加载中…</p>}
     </div>
   );
 }

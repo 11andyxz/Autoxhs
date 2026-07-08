@@ -9,6 +9,7 @@ import {
   REPAIR,
   SKILLS_SYSTEM,
   TRANSLATE_SYSTEM,
+  VOCAB_EXAMPLE_SYSTEM,
   dataBlock,
 } from "./prompt";
 import {
@@ -18,6 +19,7 @@ import {
   QUESTION_JSON_SCHEMA,
   SKILLS_JSON_SCHEMA,
   TRANSLATE_JSON_SCHEMA,
+  VOCAB_EXAMPLE_JSON_SCHEMA,
   SchemaValidationError,
   normalizeBank,
   normalizeCoach,
@@ -251,6 +253,32 @@ export function translateTerm(
         zh,
         note: typeof o.note === "string" ? o.note.trim().slice(0, 300) : "",
       };
+    },
+    { timeoutMs: 30_000 },
+  );
+}
+
+/** 为单词本生成一句 tech/面试语境的英文例句(+中文翻译),优先贴合提供的上下文。 */
+export function generateVocabExample(
+  term: string,
+  zh: string,
+  context: string,
+): Promise<{ example: string; exampleZh: string }> {
+  const content = dataBlock([
+    { label: "TERM", body: term },
+    { label: "TERM MEANING (Chinese)", body: zh },
+    { label: "CONTEXT (where the learner saw it; may be empty)", body: context },
+  ]);
+  return callJson(
+    VOCAB_EXAMPLE_SYSTEM,
+    content,
+    VOCAB_EXAMPLE_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "vocab_example",
+    (raw) => {
+      const o = (raw ?? {}) as { example?: unknown; exampleZh?: unknown };
+      const example = typeof o.example === "string" ? o.example.trim().slice(0, 1000) : "";
+      if (!example) throw new SchemaValidationError("例句为空");
+      return { example, exampleZh: typeof o.exampleZh === "string" ? o.exampleZh.trim().slice(0, 1000) : "" };
     },
     { timeoutMs: 30_000 },
   );

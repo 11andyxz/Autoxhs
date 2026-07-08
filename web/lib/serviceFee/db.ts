@@ -5,15 +5,18 @@ import mysql, { type Pool, type RowDataPacket } from "mysql2/promise";
  * Aiven 要求 SSL;这里用 TLS 但暂不校验证书(rejectUnauthorized:false),
  * 如需完整校验可在后续传入 Aiven CA 证书。
  */
-let pool: Pool | null = null;
+// 把连接池挂到 globalThis:Next.js dev 下每次 HMR 都会重新求值本模块,若用普通模块级
+// 单例,`pool` 会被重置成 null → 反复新建连接池而旧池不关闭,连接持续泄漏,最终把
+// Aiven 连接数打满(ER_CON_COUNT_ERROR)。挂到 global 后同一进程内始终复用同一个池。
+const globalForPool = globalThis as unknown as { __autoxhsPool?: Pool };
 
 export function getPool(): Pool {
-  if (pool) return pool;
+  if (globalForPool.__autoxhsPool) return globalForPool.__autoxhsPool;
   const { DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME } = process.env;
   if (!DB_HOST || !DB_USER || !DB_NAME) {
     throw new Error("数据库未配置(缺少 DB_HOST / DB_USER / DB_NAME)");
   }
-  pool = mysql.createPool({
+  const pool = mysql.createPool({
     host: DB_HOST,
     port: DB_PORT ? Number(DB_PORT) : 3306,
     user: DB_USER,
@@ -22,8 +25,13 @@ export function getPool(): Pool {
     ssl: { rejectUnauthorized: false },
     waitForConnections: true,
     connectionLimit: 5,
+    // 空闲连接尽快归还:Aiven 连接数上限低,dev 反复重启若不关空闲连接易攒到
+    // ER_CON_COUNT_ERROR(“Too many connections”)。空闲最多留 1 个、超 15s 关闭。
+    maxIdle: 1,
+    idleTimeout: 15000,
     dateStrings: true, // DATE 列以 'YYYY-MM-DD' 字符串返回,避免时区漂移
   });
+  globalForPool.__autoxhsPool = pool;
   return pool;
 }
 

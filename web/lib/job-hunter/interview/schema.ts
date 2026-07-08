@@ -257,6 +257,18 @@ export const TRANSLATE_JSON_SCHEMA = {
   required: ["ipa", "zh", "note"],
 } as const;
 
+/* ---------------- 单词本例句 ---------------- */
+
+export const VOCAB_EXAMPLE_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    example: { type: "string", description: "含该词的一句英文例句(tech/面试语境,自然、不太长)" },
+    exampleZh: { type: "string", description: "该例句的简体中文翻译" },
+  },
+  required: ["example", "exampleZh"],
+} as const;
+
 /* ---------------- 4) 补强 ---------------- */
 
 export const CoachSchema = z.object({
