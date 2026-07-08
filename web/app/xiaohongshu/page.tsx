@@ -8,6 +8,7 @@ import { collapseBlankLines, estimateCardCount } from "@/lib/xiaohongshu/cards";
 import type { RewriteData } from "@/lib/schema";
 
 import BatchPublish from "./BatchPublish";
+import Engage from "./Engage";
 
 const MAX_CHARS = 10_000;
 const LOADING_HINTS = [
@@ -30,6 +31,8 @@ type PublishFeedback = {
 };
 
 export default function XiaohongshuPage() {
+  // 顶层功能：文案发表 / 评论互动（两个原独立工具合并到同一页）
+  const [section, setSection] = useState<"publish" | "engage">("publish");
   const [mode, setMode] = useState<Mode>("single");
   const [input, setInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
@@ -508,21 +511,47 @@ export default function XiaohongshuPage() {
   return (
     <main className="min-h-screen">
       <div className="mx-auto max-w-3xl px-4 py-10">
-        {/* 1. 标题区域 */}
-        <header className="mb-8">
+        {/* 1. 标题区域（合并工具：文案发表 + 评论互动） */}
+        <header className="mb-6">
           <Link href="/" className="block text-xs text-gray-400 transition hover:text-gray-600">
             ← 工具箱
           </Link>
           <span className="mt-2 inline-flex items-center rounded-full bg-xhs/10 px-3 py-1 text-xs font-medium text-xhs">
-            小红书 · 文案助手
+            小红书 · 助手
           </span>
           <h1 className="mt-3 text-2xl font-bold tracking-tight sm:text-3xl">
-            小红书文案发表
+            小红书助手
           </h1>
-          <p className="mt-2 text-sm leading-relaxed text-gray-500">
-            粘贴参考内容,AI 将为你重新组织语言、优化排版,并生成适合小红书发布的标题、正文和标签。
-          </p>
         </header>
+
+        {/* 顶层功能切换：文案发表 / 评论互动 */}
+        <div className="mb-6 inline-flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
+          {([
+            ["publish", "文案发表"],
+            ["engage", "评论互动"],
+          ] as const).map(([s, label]) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setSection(s)}
+              aria-pressed={section === s}
+              className={`rounded-lg px-4 py-1.5 text-sm font-medium transition ${
+                section === s ? "bg-xhs text-white" : "text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {section === "engage" ? (
+          <Engage />
+        ) : (
+          <>
+        {/* 文案发表说明 */}
+        <p className="mb-6 text-sm leading-relaxed text-gray-500">
+          粘贴参考内容,AI 将为你重新组织语言、优化排版,并生成适合小红书发布的标题、正文和标签。
+        </p>
 
         {/* 模式切换：单条优化 / 批量发布（同一工具内切换） */}
         <div className="mb-6 inline-flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
@@ -1044,6 +1073,8 @@ export default function XiaohongshuPage() {
               )}
             </section>
           </div>
+        )}
+          </>
         )}
           </>
         )}

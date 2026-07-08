@@ -69,6 +69,8 @@ type Person = {
 type EditTarget =
   | { mode: "edit"; employee: EmployeeWithFiles }
   | { mode: "create"; firstName: string; lastName: string };
+/** 「添加工作记录」弹窗的上下文：补录到哪个雇员名下，并预填收件人。 */
+type AddWorkTarget = { employeeId: number; employeeName: string; toEmail: string };
 type PendingFile = { uid: number; file: File; category: string; groupId: number };
 
 const usd = (n: number) => n.toLocaleString("en-US", { style: "currency", currency: "USD" });
@@ -287,6 +289,7 @@ export default function EmployeePage() {
   const [query, setQuery] = useState("");
   const [preview, setPreview] = useState<EmployeeFileItem | null>(null);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
+  const [addWorkTarget, setAddWorkTarget] = useState<AddWorkTarget | null>(null);
 
   const uidRef = useRef(0);
   const gidRef = useRef(0);
@@ -680,8 +683,17 @@ export default function EmployeePage() {
                       <FeeHistory records={p.feeHistory} clientName={p.feeClientName ?? p.displayName} onExport={onExportFee} />
                     )}
 
-                    {emp && p.workEmails.length > 0 && (
-                      <WorkEmailHistory records={p.workEmails} />
+                    {emp && (
+                      <WorkEmailHistory
+                        records={p.workEmails}
+                        onAdd={() =>
+                          setAddWorkTarget({
+                            employeeId: emp.id,
+                            employeeName: p.displayName,
+                            toEmail: emp.email ?? "",
+                          })
+                        }
+                      />
                     )}
                   </li>
                 );
@@ -702,6 +714,15 @@ export default function EmployeePage() {
         onSaved={() => {
           setEditTarget(null);
           showToast("已保存雇员信息");
+          loadPeople();
+        }}
+      />
+      <AddWorkEmailModal
+        target={addWorkTarget}
+        onClose={() => setAddWorkTarget(null)}
+        onSaved={() => {
+          setAddWorkTarget(null);
+          showToast("已添加工作记录");
           loadPeople();
         }}
       />
@@ -796,14 +817,28 @@ function FeeHistory({
   );
 }
 
-/** 该雇员收到的「工作邮件」发送记录(只读);点标题可展开看正文。 */
-function WorkEmailHistory({ records }: { records: WorkEmailItem[] }) {
+/** 该雇员的「工作邮件」记录;点标题可展开看正文;可「添加工作记录」补录历史邮件。 */
+function WorkEmailHistory({ records, onAdd }: { records: WorkEmailItem[]; onAdd: () => void }) {
   const [openId, setOpenId] = useState<number | null>(null);
   return (
     <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2">
-      <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">
-        工作邮件记录 Work Emails
-      </p>
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">
+          工作邮件记录 Work Emails
+        </p>
+        <button
+          type="button"
+          onClick={onAdd}
+          className="rounded-lg border border-amber-300 px-2 py-0.5 text-[11px] font-medium text-amber-700 transition hover:border-amber-500"
+        >
+          + 添加工作记录
+        </button>
+      </div>
+      {records.length === 0 ? (
+        <p className="mt-1 text-[11px] text-slate-400">
+          暂无记录。以前没经工具发送的邮件，可点「添加工作记录」补录进来。
+        </p>
+      ) : (
       <ul className="mt-1 space-y-1">
         {records.map((m) => {
           const open = openId === m.id;
@@ -835,8 +870,291 @@ function WorkEmailHistory({ records }: { records: WorkEmailItem[] }) {
           );
         })}
       </ul>
+      )}
     </div>
   );
+}
+
+/** 「添加工作记录」弹窗:把以前没入库的工作邮件补录到该雇员名下(只写库,不发信)。 */
+function AddWorkEmailModal({
+  target,
+  onClose,
+  onSaved,
+}: {
+  target: AddWorkTarget | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [subject, setSubject] = useState("");
+  const [toEmail, setToEmail] = useState("");
+  const [recipientName, setRecipientName] = useState("");
+  const [sentAt, setSentAt] = useState("");
+  const [cc, setCc] = useState("");
+  const [body, setBody] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [parsing, setParsing] = useState(false);
+  const [parsedNote, setParsedNote] = useState<string | null>(null);
+
+  // 打开时按目标雇员预填收件人;发送时间默认当下(用户改成真实的过去日期)
+  useEffect(() => {
+    if (!target) return;
+    setSubject("");
+    setToEmail(target.toEmail ?? "");
+    setRecipientName(target.employeeName ?? "");
+    setSentAt(nowLocalInput());
+    setCc("");
+    setBody("");
+    setError(null);
+    setParsedNote(null);
+    setParsing(false);
+  }, [target]);
+
+  // 上传邮件 PDF/Word → 自动解析并填入下面各字段(不发信、不入库)
+  async function onPickFile(file: File) {
+    setParsing(true);
+    setError(null);
+    setParsedNote(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/employee/work-email/parse", { method: "POST", body: fd });
+      const json = (await res.json().catch(() => null)) as
+        | {
+            success: boolean;
+            data?: {
+              subject: string;
+              toEmail: string;
+              recipientName: string;
+              cc: string[];
+              sentAt: string;
+              body: string;
+            };
+            error?: string;
+          }
+        | null;
+      if (!json?.success || !json.data) {
+        setError(json?.error ?? "解析失败，请手动填写。");
+        return;
+      }
+      const d = json.data;
+      // 有值才覆盖:空字段保留原有预填(如收件人邮箱/发送时间)
+      if (d.subject) setSubject(d.subject);
+      if (d.body) setBody(d.body);
+      if (d.toEmail) setToEmail(d.toEmail);
+      if (d.recipientName) setRecipientName(d.recipientName);
+      if (d.sentAt) setSentAt(d.sentAt);
+      if (d.cc.length) setCc(d.cc.join(", "));
+      setParsedNote("已从文件自动填写，请核对后保存。");
+    } catch {
+      setError("解析失败，请稍后重试或手动填写。");
+    } finally {
+      setParsing(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!target) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [target, onClose]);
+
+  if (!target) return null;
+
+  async function onSubmit() {
+    if (!target) return;
+    if (!subject.trim()) return setError("请填写邮件标题。");
+    if (!toEmail.trim()) return setError("请填写收件人邮箱。");
+    if (!sentAt.trim()) return setError("请选择发送时间。");
+    if (!body.trim()) return setError("请填写邮件正文。");
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/employee/work-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          employeeId: target.employeeId,
+          subject: subject.trim(),
+          toEmail: toEmail.trim(),
+          recipientName: recipientName.trim(),
+          sentAt,
+          cc: cc
+            .split(/[,\n]/)
+            .map((s) => s.trim())
+            .filter(Boolean),
+          body,
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success: boolean; error?: string }
+        | null;
+      if (!json?.success) {
+        setError(json?.error ?? "添加失败，请稍后重试。");
+        return;
+      }
+      onSaved();
+    } catch {
+      setError("网络连接失败，请稍后重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div onClick={onClose} className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+          <p className="text-sm font-semibold text-slate-800">
+            添加工作记录 · {target.employeeName}
+          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300"
+          >
+            ✕ 关闭
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          <p className="mb-3 text-[11px] text-slate-400">
+            补录以前没经工具发送、因而没入库的工作邮件。只记录到数据库，<b>不会真的发送邮件</b>。
+          </p>
+
+          {/* 上传邮件 PDF/Word → 自动读取并填好下面各项 */}
+          <div className="mb-3 rounded-lg border border-dashed border-violet-300 bg-violet-50/50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs text-slate-600">
+                有这封邮件的 PDF / Word？上传自动读取标题、收件人、时间和正文
+              </span>
+              <label
+                className={`shrink-0 cursor-pointer rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-700 ${
+                  parsing ? "cursor-not-allowed opacity-60" : ""
+                }`}
+              >
+                {parsing ? "解析中…" : "上传并自动读取"}
+                <input
+                  type="file"
+                  accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  className="hidden"
+                  disabled={parsing}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (f) onPickFile(f);
+                  }}
+                />
+              </label>
+            </div>
+            {parsedNote && <p className="mt-1.5 text-[11px] text-emerald-600">{parsedNote}</p>}
+          </div>
+
+          <div className="space-y-3">
+            <label className="block">
+              <span className="text-xs font-medium text-slate-600">邮件标题 *</span>
+              <input
+                type="text"
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                placeholder="如：Technical Product Analyst Weekly Work Plan | June 29–July 3"
+                className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-violet-400 focus:ring-1 focus:ring-violet-300"
+              />
+            </label>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="text-xs font-medium text-slate-600">收件人邮箱 *</span>
+                <input
+                  type="email"
+                  value={toEmail}
+                  onChange={(e) => setToEmail(e.target.value)}
+                  placeholder="name@example.com"
+                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-violet-400 focus:ring-1 focus:ring-violet-300"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium text-slate-600">发送时间 *</span>
+                <input
+                  type="datetime-local"
+                  value={sentAt}
+                  onChange={(e) => setSentAt(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-violet-400 focus:ring-1 focus:ring-violet-300"
+                />
+              </label>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="text-xs font-medium text-slate-600">收件人姓名</span>
+                <input
+                  type="text"
+                  value={recipientName}
+                  onChange={(e) => setRecipientName(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-violet-400 focus:ring-1 focus:ring-violet-300"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium text-slate-600">抄送（逗号或换行分隔）</span>
+                <input
+                  type="text"
+                  value={cc}
+                  onChange={(e) => setCc(e.target.value)}
+                  placeholder="可留空"
+                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-violet-400 focus:ring-1 focus:ring-violet-300"
+                />
+              </label>
+            </div>
+            <label className="block">
+              <span className="text-xs font-medium text-slate-600">邮件正文 *</span>
+              <textarea
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                rows={10}
+                placeholder="把当时那封邮件的正文粘贴进来（支持 ## 小标题、- 列表、**加粗**）"
+                className="mt-1 w-full resize-y rounded-lg border border-slate-200 p-3 text-sm leading-relaxed outline-none transition focus:border-violet-400 focus:ring-1 focus:ring-violet-300"
+              />
+            </label>
+            {error && <p className="text-xs text-red-600">{error}</p>}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-4 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-300"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={onSubmit}
+            disabled={saving}
+            className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving ? "保存中…" : "保存记录"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** datetime-local 输入的默认值 = 当前本地时间 'YYYY-MM-DDTHH:MM'。 */
+function nowLocalInput(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /** 页面内文件预览弹窗:PDF 用 iframe、图片用 img;遮罩点击 / ESC / × 关闭,打开时锁定背景滚动。 */

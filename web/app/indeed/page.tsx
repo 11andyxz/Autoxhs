@@ -10,8 +10,11 @@ import {
   type ResumeExportKind,
   type ResumeHandoff,
 } from "@/lib/job-hunter/handoff";
+import { PROFILE_FIELDS, emptyProfile, type ApplicantProfile } from "@/lib/indeed/profileFields";
 
 // ---------- 类型（对齐 app/api/indeed/* 归一化后的响应） ----------
+
+type AiConfidence = "high" | "medium" | "low";
 
 type ApiResponse<T> = {
   success: boolean;
@@ -107,6 +110,7 @@ type BatchItem = {
   questions: Question[];
   matches: Record<string, KbMatch>;
   answers: Record<string, string>;
+  aiConf: Record<string, AiConfidence>; // AI 兜底作答的题 → 置信度(用于清单里标注/高亮)
   status: BatchStatus;
   message?: string;
 };
@@ -174,25 +178,37 @@ function SponsorshipBadge({ stance }: { stance: string | null | undefined }) {
   );
 }
 
-/** 知识库命中徽章：精确 / 相似 / 需你填写。 */
-function KbBadge({ match }: { match: KbMatch | undefined }) {
-  if (!match) {
-    return (
-      <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
-        需你填写
-      </span>
-    );
-  }
-  if (match.source === "exact") {
+/** 答案来源徽章：知识库精确/相似 → AI(按置信度) → 需你填写。 */
+function AnswerSourceBadge({ match, ai }: { match: KbMatch | undefined; ai?: AiConfidence }) {
+  if (match?.source === "exact") {
     return (
       <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
         知识库 · 自动
       </span>
     );
   }
+  if (match?.source === "similar") {
+    return (
+      <span className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
+        类似 · 请确认（{Math.round(match.confidence * 100)}%）
+      </span>
+    );
+  }
+  if (ai) {
+    const cls =
+      ai === "low"
+        ? "bg-rose-50 text-rose-700"
+        : ai === "medium"
+          ? "bg-violet-50 text-violet-700"
+          : "bg-violet-50 text-violet-600";
+    const suffix = ai === "high" ? "" : ai === "medium" ? " · 推断" : " · 低把握请确认";
+    return (
+      <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>AI{suffix}</span>
+    );
+  }
   return (
-    <span className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
-      类似 · 请确认（{Math.round(match.confidence * 100)}%）
+    <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+      需你填写
     </span>
   );
 }
@@ -296,6 +312,8 @@ export default function IndeedPage() {
   // 雇主问题作答 + 知识库预填
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [matches, setMatches] = useState<Record<string, KbMatch>>({});
+  const [aiConf, setAiConf] = useState<Record<string, AiConfidence>>({}); // 单卡:AI 兜底题的置信度
+  const [aiFilling, setAiFilling] = useState(false);
   const [savingKb, setSavingKb] = useState(false);
   const panelRef = useRef<HTMLElement | null>(null);
 
@@ -305,6 +323,12 @@ export default function IndeedPage() {
   const [batchSweep, setBatchSweep] = useState({ done: 0, total: 0 });
   const batchCancelRef = useRef(false);
 
+  // 求职身份档案(AI 作答依据)
+  const [profile, setProfile] = useState<ApplicantProfile>(emptyProfile());
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileMsg, setProfileMsg] = useState<string | null>(null);
+
   const selectedJob = jobs.find((j) => j.jk === selectedJk) ?? null;
 
   // 挂载时读取带入的定制简历；若搜索词为空，用简历标题预填，方便直接搜岗位。
@@ -313,6 +337,14 @@ export default function IndeedPage() {
     if (!h) return;
     setCarried(h);
     setQ((prev) => prev || h.result.resume.headline || "");
+  }, []);
+
+  // 挂载时载入身份档案(AI 作答依据)。
+  useEffect(() => {
+    void (async () => {
+      const res = await callApi<ApplicantProfile>("/api/indeed/profile");
+      if (res.success && res.data) setProfile((prev) => ({ ...prev, ...res.data }));
+    })();
   }, []);
 
   async function handleDownloadCarried(kind: ResumeExportKind) {
@@ -425,6 +457,58 @@ export default function IndeedPage() {
     setSearching(false);
   }
 
+  function carriedResumeSummary(): string | undefined {
+    if (!carried) return undefined;
+    const r = carried.result.resume;
+    const txt = [r.headline, ...(r.summary ?? [])].filter(Boolean).join("\n").trim();
+    return txt ? txt.slice(0, 3000) : undefined;
+  }
+
+  /** 用 AI 回答给定问题(知识库未覆盖的题);返回 qid -> {value, confidence}。 */
+  async function aiAnswerFor(
+    qs: Question[],
+    job?: { title?: string; company?: string },
+  ): Promise<Record<string, { value: string; confidence: AiConfidence }>> {
+    if (!qs.length) return {};
+    const res = await callApi<{ answers: Record<string, { value: string; confidence: AiConfidence }> }>(
+      "/api/indeed/ai-answer",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          questions: qs.map((q) => ({
+            id: q.id,
+            type: q.type,
+            required: q.required,
+            label: q.label,
+            options: q.options,
+          })),
+          jobTitle: job?.title,
+          company: job?.company,
+          resume: carriedResumeSummary(),
+        }),
+      },
+    );
+    return res.success && res.data?.answers ? res.data.answers : {};
+  }
+
+  async function handleSaveProfile() {
+    setProfileSaving(true);
+    setProfileMsg(null);
+    const res = await callApi<ApplicantProfile>("/api/indeed/profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile }),
+    });
+    if (res.success && res.data) {
+      setProfile((prev) => ({ ...prev, ...res.data }));
+      setProfileMsg("已保存");
+    } else {
+      setProfileMsg(res.error ?? "保存失败");
+    }
+    setProfileSaving(false);
+  }
+
   async function handleLoadQuestions(jkArg?: string) {
     const jk = jkArg ?? selectedJk;
     if (!jk || questionsLoading) return;
@@ -434,20 +518,41 @@ export default function IndeedPage() {
       `/api/indeed/questions?jk=${encodeURIComponent(jk)}`,
     );
     if (res.success && res.data) {
-      setQuestions(res.data.questions);
+      const qs = res.data.questions;
+      setQuestions(qs);
       const m = res.data.matches ?? {};
       setMatches(m);
       // 用知识库命中预填答案(精确+相似都预填;相似会在 UI 标注请你确认)。
       const init: Record<string, string> = {};
-      for (const qq of res.data.questions) {
+      for (const qq of qs) {
         const hit = m[qq.id];
         if (hit) init[qq.id] = hit.value;
       }
       setAnswers(init);
+      setAiConf({});
+      setQuestionsLoading(false);
+      // 全自动:知识库未覆盖的题交给 AI 兜底作答(不阻塞问题展示)。
+      const uncovered = qs.filter((q) => !(init[q.id] ?? "").trim());
+      if (uncovered.length) {
+        const job = jobs.find((j) => j.jk === jk);
+        setAiFilling(true);
+        const ai = await aiAnswerFor(uncovered, { title: job?.title, company: job?.company });
+        setAnswers((prev) => {
+          const next = { ...prev };
+          for (const [id, a] of Object.entries(ai)) if (!(next[id] ?? "").trim() && a.value) next[id] = a.value;
+          return next;
+        });
+        setAiConf((prev) => {
+          const next = { ...prev };
+          for (const [id, a] of Object.entries(ai)) if (a.value) next[id] = a.confidence;
+          return next;
+        });
+        setAiFilling(false);
+      }
     } else {
       setQuestionsError(res.error ?? "读取雇主问题失败。");
+      setQuestionsLoading(false);
     }
-    setQuestionsLoading(false);
   }
 
   function setAnswer(qid: string, value: string) {
@@ -548,10 +653,22 @@ export default function IndeedPage() {
           const hit = m[q.id];
           if (hit) ans[q.id] = hit.value;
         }
+        // 全自动:知识库未覆盖的题用 AI 兜底,尽量让整卡就绪。
+        const aiConf: Record<string, AiConfidence> = {};
+        const uncovered = qs.filter((q) => !(ans[q.id] ?? "").trim());
+        if (uncovered.length) {
+          const ai = await aiAnswerFor(uncovered, { title: job.title, company: job.company });
+          for (const [id, a] of Object.entries(ai)) {
+            if (a.value && !(ans[id] ?? "").trim()) {
+              ans[id] = a.value;
+              aiConf[id] = a.confidence;
+            }
+          }
+        }
         const needs = qs.some((q) => q.required && !(ans[q.id] ?? "").trim());
-        items.push({ job, questions: qs, matches: m, answers: ans, status: needs ? "needsInput" : "ready" });
+        items.push({ job, questions: qs, matches: m, answers: ans, aiConf, status: needs ? "needsInput" : "ready" });
       } else {
-        items.push({ job, questions: [], matches: {}, answers: {}, status: "read_failed", message: res.error ?? "读取问题失败" });
+        items.push({ job, questions: [], matches: {}, answers: {}, aiConf: {}, status: "read_failed", message: res.error ?? "读取问题失败" });
       }
       setBatchSweep({ done: i + 1, total: targets.length });
       setBatchItems([...items]);
@@ -567,8 +684,10 @@ export default function IndeedPage() {
         if (it.job.jk !== jk) return it;
         if (it.status === "read_failed") return it;
         const answers = { ...it.answers, [qid]: value };
+        const aiConf = { ...it.aiConf };
+        delete aiConf[qid]; // 用户手改后不再是 AI 答案
         const needs = it.questions.some((q) => q.required && !(answers[q.id] ?? "").trim());
-        return { ...it, answers, status: needs ? "needsInput" : "ready" };
+        return { ...it, answers, aiConf, status: needs ? "needsInput" : "ready" };
       }),
     );
   }
@@ -697,6 +816,9 @@ export default function IndeedPage() {
   const batchSubmitList = batchItems.filter((it) =>
     ["ready", "applying", "done", "failed"].includes(it.status),
   );
+  const batchLowConf = batchItems
+    .filter((it) => it.status === "ready")
+    .reduce((n, it) => n + Object.values(it.aiConf).filter((c) => c === "low").length, 0);
 
   return (
     <main className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
@@ -809,6 +931,52 @@ export default function IndeedPage() {
           )}
         </section>
 
+        {/* 求职身份档案（AI 作答依据） */}
+        <details
+          open={profileOpen}
+          onToggle={(e) => setProfileOpen((e.target as HTMLDetailsElement).open)}
+          className="mb-6 rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
+        >
+          <summary className="cursor-pointer text-sm font-semibold text-slate-700">
+            求职身份档案（AI 据此如实作答雇主问题；填一次即可，随时可改）
+          </summary>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            {PROFILE_FIELDS.map((f) => (
+              <label key={f.key} className={f.long ? "sm:col-span-2" : undefined}>
+                <span className="mb-1 block text-xs font-medium text-slate-500">{f.label}</span>
+                {f.long ? (
+                  <textarea
+                    value={profile[f.key]}
+                    onChange={(e) => setProfile((p) => ({ ...p, [f.key]: e.target.value }))}
+                    rows={3}
+                    className="w-full resize-y rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-400"
+                  />
+                ) : (
+                  <input
+                    value={profile[f.key]}
+                    onChange={(e) => setProfile((p) => ({ ...p, [f.key]: e.target.value }))}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-400"
+                  />
+                )}
+              </label>
+            ))}
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleSaveProfile}
+              disabled={profileSaving}
+              className={`${btnBase} bg-sky-600 text-white hover:bg-sky-700`}
+            >
+              {profileSaving ? "保存中…" : "保存档案"}
+            </button>
+            {profileMsg && <span className="text-xs text-slate-500">{profileMsg}</span>}
+            <span className="text-xs text-slate-400">
+              留空的字段 AI 会尽量从简历/岗位推断；工作授权、sponsorship 等硬事实建议填准。
+            </span>
+          </div>
+        </details>
+
         {/* 搜索 */}
         <form
           onSubmit={handleSearch}
@@ -919,7 +1087,7 @@ export default function IndeedPage() {
             {batchPhase === "sweeping" && (
               <div className="mt-3">
                 <p className="text-sm text-slate-600">
-                  正在扫描岗位并匹配知识库…（{batchSweep.done}/{batchSweep.total}）
+                  正在扫描岗位、匹配知识库并用 AI 兜底作答…（{batchSweep.done}/{batchSweep.total}）
                 </p>
                 <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-100">
                   <div
@@ -943,8 +1111,11 @@ export default function IndeedPage() {
                   将真实投递 <span className="font-semibold">{batchReady}</span> 个岗位，
                   <span className="font-semibold">不可逆、无法撤回</span>。
                   {batchNeeds > 0 && <> 另有 {batchNeeds} 个待你回答（答齐才计入）。</>}
-                  {batchReadFailed > 0 && <> {batchReadFailed} 个读取失败将跳过。</>} 每个约 1–2
-                  分钟且串行，预计 {batchReady}–{batchReady * 2} 分钟，可随时中止。
+                  {batchReadFailed > 0 && <> {batchReadFailed} 个读取失败将跳过。</>}
+                  {batchLowConf > 0 && (
+                    <> 其中 AI <span className="font-semibold">{batchLowConf}</span> 处低把握，建议展开「已就绪」复核。</>
+                  )}{" "}
+                  每个约 1–2 分钟且串行，预计 {batchReady}–{batchReady * 2} 分钟，可随时中止。
                 </Banner>
 
                 {batchNeeds > 0 && (
@@ -971,7 +1142,7 @@ export default function IndeedPage() {
                                         {qq.required ? " · 必填" : ""}]
                                       </span>
                                     </p>
-                                    <KbBadge match={it.matches[qq.id]} />
+                                    <AnswerSourceBadge match={it.matches[qq.id]} ai={it.aiConf[qq.id]} />
                                   </div>
                                   <div className="mt-1.5">
                                     <AnswerInput
@@ -997,14 +1168,27 @@ export default function IndeedPage() {
                     <ul className="mt-2 space-y-1 text-xs text-slate-600">
                       {batchItems
                         .filter((it) => it.status === "ready")
-                        .map((it) => (
-                          <li key={it.job.jk}>
-                            {it.job.title} · {it.job.company}
-                            {it.questions.length > 0 && (
-                              <span className="text-slate-400">（{batchAnswersPayload(it).length} 题已答）</span>
-                            )}
-                          </li>
-                        ))}
+                        .map((it) => {
+                          const aiN = Object.keys(it.aiConf).length;
+                          const lowN = Object.values(it.aiConf).filter((c) => c === "low").length;
+                          return (
+                            <li key={it.job.jk}>
+                              {it.job.title} · {it.job.company}
+                              {it.questions.length > 0 && (
+                                <span className="text-slate-400">
+                                  （{batchAnswersPayload(it).length} 题已答
+                                  {aiN > 0 ? ` · AI ${aiN}` : ""}
+                                  {lowN > 0 ? (
+                                    <span className="font-medium text-rose-600"> · {lowN} 低把握</span>
+                                  ) : (
+                                    ""
+                                  )}
+                                  ）
+                                </span>
+                              )}
+                            </li>
+                          );
+                        })}
                     </ul>
                   </details>
                 )}
@@ -1207,7 +1391,8 @@ export default function IndeedPage() {
               </div>
               <p className="mt-1 text-xs leading-relaxed text-slate-400">
                 知识库会自动预填：<span className="text-emerald-600">精确命中</span>直接填、
-                <span className="text-sky-600">相似命中</span>请你过目确认、其余需你填写。点「一键投递」时会把答案存入知识库，下次自动作答。
+                <span className="text-sky-600">相似命中</span>请你过目确认；知识库没有的题由 <span className="text-violet-600">AI</span> 依据你的身份档案兜底作答（
+                <span className="text-rose-600">低把握</span>会标出请你复核）。点「一键投递」时会把答案存入知识库，下次自动作答。
               </p>
               {questionsError && (
                 <div className="mt-2">
@@ -1222,6 +1407,9 @@ export default function IndeedPage() {
                   <Banner tone="info">该岗位没有额外的雇主问题，可直接预演。</Banner>
                 </div>
               )}
+              {aiFilling && (
+                <p className="mt-3 text-xs text-violet-500">AI 正在补全知识库未覆盖的问题…</p>
+              )}
               {questions && questions.length > 0 && (
                 <ul className="mt-3 space-y-3">
                   {questions.map((qq, i) => (
@@ -1234,7 +1422,7 @@ export default function IndeedPage() {
                             {qq.required ? " · 必填" : ""}]
                           </span>
                         </p>
-                        <KbBadge match={matches[qq.id]} />
+                        <AnswerSourceBadge match={matches[qq.id]} ai={aiConf[qq.id]} />
                       </div>
                       <div className="mt-2">
                         <AnswerInput

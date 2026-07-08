@@ -56,9 +56,9 @@ const TOOLS: Array<{
 }> = [
   {
     href: "/xiaohongshu",
-    name: "小红书文案发表",
-    en: "Xiaohongshu Copywriting",
-    desc: "粘贴参考内容,AI 帮你重写标题、优化正文、生成标签,一键复制发布。",
+    name: "小红书助手",
+    en: "Xiaohongshu Assistant",
+    desc: "文案发表 + 评论互动一站式:AI 帮你重写标题、优化正文、生成标签并一键发布;还能按关键词/推荐/链接选定笔记,AI 生成「正向且相关」的评论后批量互动、点赞。",
     icon: "✍️",
     accent: "rose",
   },
@@ -101,14 +101,6 @@ const TOOLS: Array<{
     desc: "上传上一封「周报工作计划」邮件,AI 顺着上周进度生成下一封;先预览、可修改,确认后从 adxztech Gmail 发给指定收件人(收件人来自雇员库)。",
     icon: "📧",
     accent: "amber",
-  },
-  {
-    href: "/xhs-engage",
-    name: "小红书互动助手",
-    en: "Xiaohongshu Engagement",
-    desc: "按关键词/推荐/链接选定笔记,AI 读懂正文后生成「正向且相关」的评论;预览确认后批量发评论、给自己评论点赞、给帖子点赞。需本地 rednote 服务 + 已登录浏览器。",
-    icon: "💬",
-    accent: "fuchsia",
   },
 ];
 

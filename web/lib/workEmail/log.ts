@@ -73,6 +73,41 @@ export async function insertWorkEmailLog(rec: NewWorkEmail): Promise<number> {
   return res.insertId;
 }
 
+/** 手动补录一条历史工作邮件记录（可指定 sent_at；message_id 记为 NULL 表示非工具发送）。 */
+export interface ManualWorkEmail {
+  employeeId: number;
+  toEmail: string;
+  recipientName: string;
+  cc: string[];
+  fromEmail: string;
+  subject: string;
+  body: string;
+  /** 已归一化为 'YYYY-MM-DD HH:MM:SS' 的发送时间。 */
+  sentAt: string;
+}
+
+/** 插入一条「手动补录」的工作邮件记录，返回新记录 id。 */
+export async function insertManualWorkEmail(rec: ManualWorkEmail): Promise<number> {
+  await ensureWorkEmailSchema();
+  const p = getPool();
+  const [res] = await p.query<ResultSetHeader>(
+    `INSERT INTO emp_work_email
+       (employee_id, to_email, recipient_name, cc, from_email, subject, body, message_id, sent_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+    [
+      rec.employeeId,
+      rec.toEmail,
+      rec.recipientName,
+      rec.cc.join(", "),
+      rec.fromEmail,
+      rec.subject,
+      rec.body,
+      rec.sentAt,
+    ],
+  );
+  return res.insertId;
+}
+
 export interface WorkEmailLogItem {
   id: number;
   subject: string;

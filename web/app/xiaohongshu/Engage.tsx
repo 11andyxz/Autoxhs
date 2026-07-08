@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -32,7 +31,7 @@ type ExecResult = {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export default function XhsEngagePage() {
+export default function Engage() {
   // —— 来源 ——
   const [sourceMode, setSourceMode] = useState<NoteSource>("search");
   const [keyword, setKeyword] = useState("");
@@ -451,25 +450,16 @@ export default function XhsEngagePage() {
   const doneUnknown = Object.values(results).filter((r) => r.status === "unknown").length;
 
   return (
-    <main className="min-h-screen">
-      <div className="mx-auto max-w-3xl px-4 py-10">
-        {/* 标题区 */}
-        <header className="mb-8">
-          <Link href="/" className="block text-xs text-gray-400 transition hover:text-gray-600">
-            ← 工具箱
-          </Link>
-          <span className="mt-2 inline-flex items-center rounded-full bg-xhs/10 px-3 py-1 text-xs font-medium text-xhs">
-            小红书 · 互动助手
-          </span>
-          <h1 className="mt-3 text-2xl font-bold tracking-tight sm:text-3xl">小红书互动助手</h1>
-          <p className="mt-2 text-sm leading-relaxed text-gray-500">
-            批量为目标笔记生成「正向且相关」的评论(AI 读懂正文后再写)，预览确认后自动发评论、给自己这条评论点赞、并给帖子点赞。
-          </p>
-          <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-700">
-            ⚠️ 真实写操作，无法撤销。需本地 rednote 服务运行且浏览器已登录小红书。单批最多 {MAX_NOTES} 篇，已串行 +
-            间隔以降低风控概率。请遵守小红书社区规范，勿刷屏。
-          </p>
-        </header>
+    <>
+      <div className="mb-6">
+        <p className="text-sm leading-relaxed text-gray-500">
+          批量为目标笔记生成「正向且相关」的评论(AI 读懂正文后再写)，预览确认后自动发评论、给自己这条评论点赞、并给帖子点赞。
+        </p>
+        <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-700">
+          ⚠️ 真实写操作，无法撤销。需本地 rednote 服务运行且浏览器已登录小红书。单批最多 {MAX_NOTES} 篇，已串行 +
+          间隔以降低风控概率。请遵守小红书社区规范，勿刷屏。
+        </p>
+      </div>
 
         {/* 1. 选择笔记来源 */}
         <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
@@ -861,14 +851,13 @@ export default function XhsEngagePage() {
             </div>
           </section>
         )}
-      </div>
 
       {toast && (
         <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full bg-gray-900 px-4 py-2 text-sm text-white shadow-lg">
           {toast}
         </div>
       )}
-    </main>
+    </>
   );
 }
 
