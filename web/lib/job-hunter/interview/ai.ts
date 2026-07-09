@@ -4,6 +4,7 @@ import {
   BANK_SYSTEM,
   COACH_SYSTEM,
   ENGLISH_ANSWER_SYSTEM,
+  FUNDAMENTALS_SYSTEM,
   GRADE_SYSTEM,
   QUESTION_SYSTEM,
   REPAIR,
@@ -150,6 +151,27 @@ export function buildQuestionBank(args: {
     content,
     BANK_JSON_SCHEMA as unknown as Record<string, unknown>,
     "bank",
+    normalizeBank,
+    { timeoutMs: 120_000, maxRetries: 0 },
+  );
+}
+
+/** 2c) 生成「技术八股文」(纯 concept 概念题)。传 topics 则只按指定技术出,否则按简历技术栈。 */
+export function buildFundamentals(args: {
+  resumeText: string;
+  jdText: string;
+  topics?: string;
+}): Promise<BankResult> {
+  const content = dataBlock([
+    { label: "REQUESTED TOPICS (if present, generate ONLY for these)", body: args.topics || "" },
+    { label: "CANDIDATE RESUME (tech stack source / depth calibration)", body: args.resumeText },
+    { label: "TARGET JOB DESCRIPTION (optional)", body: args.jdText },
+  ]);
+  return callJson(
+    FUNDAMENTALS_SYSTEM,
+    content,
+    BANK_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "fundamentals",
     normalizeBank,
     { timeoutMs: 120_000, maxRetries: 0 },
   );

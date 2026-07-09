@@ -34,6 +34,8 @@ type Item = {
   charsPerCard?: number;
   // 该条内容对应的 AI 配图候选 URL（准备阶段拉取），发布时按整批去重挑一张。
   coverCandidates?: string[];
+  // 取配图被上游拦截(如账号风控 906)时的原因；有值说明该条会回落默认封面，需提示用户。
+  coverReason?: string;
   shareLink?: string | null;
   error?: string;
   // 发布超时/未确认：rednote 可能其实已发布成功 → 重试前需二次确认，避免重复公开。
@@ -161,6 +163,7 @@ export default function BatchPublish() {
     // 取该条内容的 AI 配图候选（best-effort：失败/超时则该条无候选，发布时按兜底借用其它条的封面）。
     patch(item.id, { status: "covering" });
     let coverCandidates: string[] = [];
+    let coverReason: string | undefined;
     try {
       const cv = await fetch("/api/xiaohongshu/cover-images", {
         method: "POST",
@@ -168,11 +171,13 @@ export default function BatchPublish() {
         body: JSON.stringify({ summary: `${chosenTitle}\n\n${body}`.slice(0, 2000) }),
       });
       const cj = (await cv.json().catch(() => null)) as
-        | { success: boolean; images?: string[] }
+        | { success: boolean; images?: string[]; blocked?: boolean; reason?: string }
         | null;
       if (cj?.success && Array.isArray(cj.images)) {
         coverCandidates = cj.images.filter((u): u is string => typeof u === "string" && !!u);
       }
+      // 上游明确拦截(如账号风控)且无候选：记下原因，本条发布会回落默认封面。
+      if (coverCandidates.length === 0 && cj?.blocked && cj.reason) coverReason = cj.reason;
     } catch {
       // 拉配图失败不致命：该条发布时按兜底处理
     }
@@ -184,6 +189,7 @@ export default function BatchPublish() {
       tags: data.tags,
       charsPerCard: pickCharsPerCard(body),
       coverCandidates,
+      coverReason,
     });
   }
 
@@ -454,6 +460,9 @@ export default function BatchPublish() {
     failed: items.filter((i) => i.status === "failed").length,
     skipped: items.filter((i) => i.status === "skipped").length,
   };
+  // AI 配图被拦截提示：任一条在准备阶段被上游拒绝(如账号风控)，就横幅说明将回落默认封面。
+  const coverBlockedReason = items.find((i) => i.coverReason)?.coverReason;
+  const coverBlockedCount = items.filter((i) => i.coverReason).length;
 
   return (
     <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
@@ -510,6 +519,11 @@ export default function BatchPublish() {
       {dedupWarning && (
         <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-700">
           ⚠️ {dedupWarning}
+        </div>
+      )}
+      {coverBlockedReason && (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs leading-relaxed text-amber-700">
+          ⚠️ AI 配图被小红书拦截（{coverBlockedReason}）：{coverBlockedCount} 篇取不到配图，将使用默认封面（多篇可能重复）。建议在 AdsPower 里重新登录小红书、冷却后重试。
         </div>
       )}
 

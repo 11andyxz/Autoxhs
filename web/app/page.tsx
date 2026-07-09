@@ -113,6 +113,9 @@ const TOOLS: Array<{
 ];
 
 export default function Home() {
+  // 公网部署模式:只展示「面试/简历」相关工具(其余路由在 middleware 里已 404)。
+  const isPublic = process.env.NEXT_PUBLIC_DEPLOY_MODE === "public";
+  const tools = isPublic ? TOOLS.filter((t) => t.href.startsWith("/job-hunter")) : TOOLS;
   return (
     <main className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
       <div className="mx-auto max-w-4xl px-4 py-16 sm:py-20">
@@ -127,12 +130,12 @@ export default function Home() {
           <p className="mt-2 max-w-xl text-sm leading-relaxed text-slate-500">
             内部小工具集合。选择下面的工具开始使用。
           </p>
-          <p className="mt-1 text-xs text-slate-400">共 {TOOLS.length} 个工具</p>
+          <p className="mt-1 text-xs text-slate-400">共 {tools.length} 个工具</p>
         </header>
 
         {/* Tool cards */}
         <div className="grid gap-5 sm:grid-cols-2">
-          {TOOLS.map((tool) => {
+          {tools.map((tool) => {
             const a = ACCENTS[tool.accent];
             return (
               <Link

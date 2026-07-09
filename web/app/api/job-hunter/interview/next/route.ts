@@ -6,6 +6,7 @@ import { srState } from "@/lib/job-hunter/interview/sr";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 /**
  * 取下一张要复习的卡(间隔重复驱动):优先已到期的复习题,其次新题;都清空则返回 card=null。

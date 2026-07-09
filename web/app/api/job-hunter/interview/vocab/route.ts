@@ -7,6 +7,7 @@ import { srState } from "@/lib/job-hunter/interview/sr";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const MAX_TERM = 120;
 const MAX_CONTEXT = 1500;

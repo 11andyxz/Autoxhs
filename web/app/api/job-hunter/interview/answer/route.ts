@@ -15,6 +15,7 @@ import { nextReviewLabel, scheduleNext, scoreToQuality, srState } from "@/lib/jo
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const MAX_ANSWER = 20_000;
 

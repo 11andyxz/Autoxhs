@@ -271,11 +271,15 @@ export default function XiaohongshuPage() {
         body: JSON.stringify({ summary: `${selectedTitle}\n\n${editedBody}`.slice(0, 2000) }),
       });
       const json = (await res.json().catch(() => null)) as
-        | { success: boolean; images?: string[]; error?: string }
+        | { success: boolean; images?: string[]; blocked?: boolean; reason?: string; error?: string }
         | null;
       const imgs = json?.images ?? [];
       if (!json?.success || imgs.length === 0) {
-        setCoverError(json?.error ?? "暂无 AI 配图候选，可补充更完整的正文后重试。");
+        setCoverError(
+          json?.blocked && json.reason
+            ? `AI 配图被小红书拦截（${json.reason}）：请在 AdsPower 里重新登录小红书、冷却后重试；不选则用默认封面。`
+            : json?.error ?? "暂无 AI 配图候选，可补充更完整的正文后重试。",
+        );
         return;
       }
       setCoverCandidates(imgs);

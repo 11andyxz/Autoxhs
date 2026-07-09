@@ -8,6 +8,7 @@ import { rateLimit } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5MB
 const MAX_TEXT_LENGTH = 30_000;

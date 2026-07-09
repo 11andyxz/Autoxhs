@@ -12,6 +12,7 @@ import { srState } from "@/lib/job-hunter/interview/sr";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 export async function GET(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
@@ -41,6 +42,7 @@ export async function GET(req: NextRequest) {
       intervalDays: b.interval_days,
       dueAt: b.due_at,
       lastReviewedAt: b.last_reviewed_at,
+      source: b.source,
     }));
     return NextResponse.json({
       success: true,

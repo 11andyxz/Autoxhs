@@ -209,6 +209,16 @@ export function ensureInterviewSchema(): Promise<void> {
 
       await markMigrationDone("ip_bank_v1");
     }
+
+    // ---- 迁移 ip_fundamentals_v1:题目来源标记(bank=简历题库,fundamentals=技术八股文)。
+    // 便于「重新生成八股文」时只删八股文那批,不动原来的行为面试/技术题。
+    if (!(await migrationDone("ip_fundamentals_v1"))) {
+      await execIgnoring(
+        "ALTER TABLE ip_question ADD COLUMN source VARCHAR(24) NOT NULL DEFAULT 'bank'",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await markMigrationDone("ip_fundamentals_v1");
+    }
   })().catch((err) => {
     // 建表/迁移失败别把「已拒绝的 promise」永久缓存,否则本进程后续所有调用都直接失败,
     // 直到重启才恢复。清空后下次调用可重试(对齐 expense/repo 的做法)。
@@ -472,10 +482,11 @@ export type BankInsertItem = {
   rubric: Array<{ criterion: string; weight: number }>;
 };
 
-/** 批量写入题库题目;due_at = NOW() 让它们即刻可复习,repetitions=0 记为「新题」。 */
+/** 批量写入题库题目;due_at = NOW() 让它们即刻可复习,repetitions=0 记为「新题」。source 区分来源。 */
 export async function insertBankQuestions(
   sessionId: number,
   items: BankInsertItem[],
+  source: "bank" | "fundamentals" = "bank",
 ): Promise<number> {
   if (!items.length) return 0;
   const p = getPool();
@@ -486,13 +497,30 @@ export async function insertBankQuestions(
     q.prompt,
     q.referenceAnswer,
     JSON.stringify(q.rubric),
+    source,
   ]);
   const [res] = await p.query<ResultSetHeader>(
-    "INSERT INTO ip_question (session_id, skill_id, type, prompt, reference_answer, rubric_json, due_at) VALUES " +
-      values.map(() => "(?, ?, ?, ?, ?, ?, NOW())").join(", "),
+    "INSERT INTO ip_question (session_id, skill_id, type, prompt, reference_answer, rubric_json, source, due_at) VALUES " +
+      values.map(() => "(?, ?, ?, ?, ?, ?, ?, NOW())").join(", "),
     values.flat(),
   );
   return res.affectedRows ?? items.length;
+}
+
+/** 该题库已有的技术八股文题目数(判断是否已生成)。 */
+export async function countFundamentals(sessionId: number): Promise<number> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT COUNT(*) AS n FROM ip_question WHERE session_id = ? AND source = 'fundamentals'",
+    [sessionId],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** 删除该题库的技术八股文题目(重新生成前清空,不动原来的题)。 */
+export async function deleteFundamentals(sessionId: number): Promise<void> {
+  const p = getPool();
+  await p.execute("DELETE FROM ip_question WHERE session_id = ? AND source = 'fundamentals'", [sessionId]);
 }
 
 export async function countQuestions(sessionId: number): Promise<number> {
@@ -553,6 +581,7 @@ export type BankItemRow = {
   last_score: number | null;
   due_at: string | null;
   last_reviewed_at: string | null;
+  source: string;
   is_due: number; // 1 = 已到期/可复习
 };
 
@@ -562,7 +591,7 @@ export async function getBankList(sessionId: number): Promise<BankItemRow[]> {
   const [rows] = await p.execute<RowDataPacket[]>(
     `SELECT q.id, q.skill_id, s.name AS skill, s.category, q.type, q.prompt,
             q.repetitions, q.interval_days, q.lapses, q.last_score,
-            q.due_at, q.last_reviewed_at,
+            q.due_at, q.last_reviewed_at, q.source,
             (q.last_reviewed_at IS NULL OR q.due_at IS NULL OR q.due_at <= NOW()) AS is_due
        FROM ip_question q
        JOIN ip_skill s ON s.id = q.skill_id

@@ -6,6 +6,7 @@ import { transcribeAudio } from "@/lib/openai";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 // OpenAI 转写单文件上限 25MB;面试作答的短录音远小于此。
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;

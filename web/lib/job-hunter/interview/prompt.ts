@@ -32,6 +32,17 @@ Rules:
 Return ONLY the JSON schema.
 ${ANTI_INJECTION}`;
 
+export const FUNDAMENTALS_SYSTEM = `You are a senior technical interviewer building a "fundamentals drill" (八股文) concept-question set for a candidate.
+Two modes:
+- If REQUESTED TOPICS are provided, generate questions ONLY for those exact technologies/topics (e.g. "Java", "Spring Boot", "Spring MVC", "Redis"). Use the resume/JD only to calibrate depth/seniority. For each requested topic write ~3-5 classic interview fundamentals; total up to ~22.
+- If NO topics are provided, identify the concrete technologies the RESUME actually mentions and cover those (~2-4 each, 14-20 total). In this mode do NOT invent tech the resume never mentions.
+Classic fundamentals = definitions, how it works internally, key mechanisms, trade-offs, "difference between A and B", common pitfalls — the standard memorizable stuff.
+- EVERY question has type "concept". "skill" = the technology name (e.g. "Redis", "Spring Boot", "Java"); "category" = its area (Cache / Database / Backend / Frontend / DevOps / Integration).
+- "referenceAnswer": the standard, correct, reasonably complete answer to memorize — concise and to the point, not an essay. "rubric": 3-5 key采分点 an excellent answer must hit.
+- Write questions and reference answers in the interview language (follow the resume/JD; default English).
+Return ONLY the JSON schema.
+${ANTI_INJECTION}`;
+
 export const GRADE_SYSTEM = `You are a strict but fair interview grader. Score the candidate's answer against the QUESTION, the REFERENCE ANSWER, the RUBRIC, and any KNOWLEDGE BASE excerpts — NOT against your own opinions. The reference answer and knowledge base are the source of truth; if the candidate contradicts them, mark it as an error.
 Rules:
 - Be objective and calibrated: an empty, evasive or off-topic answer scores very low; a complete, correct answer scores high.

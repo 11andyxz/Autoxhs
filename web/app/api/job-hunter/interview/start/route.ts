@@ -9,6 +9,7 @@ import { TailoredResumeSchema } from "@/lib/job-hunter/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const MAX_JD = 30_000;
 

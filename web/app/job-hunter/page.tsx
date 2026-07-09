@@ -60,6 +60,8 @@ export default function JobHunterPage() {
   const resultRef = useRef<HTMLDivElement | null>(null);
   const resumeFrameRef = useRef<HTMLIFrameElement | null>(null);
   const router = useRouter();
+  // 公网部署:Indeed 投递依赖本机服务,远程用不了,隐藏相关入口。
+  const isPublicDeploy = process.env.NEXT_PUBLIC_DEPLOY_MODE === "public";
 
   const resumeHtml = useMemo(
     () => (result ? buildResumeHtml(result.resume) : ""),
@@ -260,16 +262,18 @@ export default function JobHunterPage() {
           <p className="mt-2 text-sm leading-relaxed text-slate-500">
             上传你的简历，再贴上目标岗位的 JD，AI 会按岗位重排经历、强化关键词，并生成求职信和匹配分析，导出 PDF / Word；生成后可直接带着这份简历去投递 Indeed。
           </p>
-          <p className="mt-2 text-xs text-slate-400">
-            已经有满意的简历了？
-            <button
-              type="button"
-              onClick={handleSkipToApply}
-              className="font-medium text-sky-600 hover:text-sky-700"
-            >
-              跳过定制，直接去投递 Indeed →
-            </button>
-          </p>
+          {!isPublicDeploy && (
+            <p className="mt-2 text-xs text-slate-400">
+              已经有满意的简历了？
+              <button
+                type="button"
+                onClick={handleSkipToApply}
+                className="font-medium text-sky-600 hover:text-sky-700"
+              >
+                跳过定制，直接去投递 Indeed →
+              </button>
+            </p>
+          )}
         </header>
 
         {/* 简历输入 */}
@@ -363,22 +367,24 @@ export default function JobHunterPage() {
         {/* 结果 */}
         {result && (
           <div ref={resultRef} className="mt-10 space-y-6">
-            <div className="rounded-2xl border border-sky-200 bg-sky-50/60 p-5 shadow-sm">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <p className="text-sm font-semibold text-sky-900">🚀 带这份定制简历去投递 Indeed</p>
-                  <p className="mt-1 text-xs leading-relaxed text-sky-700">
-                    会把这份定制简历和 JD 带到投递页；投递前记得把它下载并更新到你的 Indeed 账号简历，确保投出的是定制版。
-                  </p>
+            {!isPublicDeploy && (
+              <div className="rounded-2xl border border-sky-200 bg-sky-50/60 p-5 shadow-sm">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-sky-900">🚀 带这份定制简历去投递 Indeed</p>
+                    <p className="mt-1 text-xs leading-relaxed text-sky-700">
+                      会把这份定制简历和 JD 带到投递页；投递前记得把它下载并更新到你的 Indeed 账号简历，确保投出的是定制版。
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleGoApply}
+                    className="shrink-0 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-700"
+                  >
+                    去投递 Indeed →
+                  </button>
                 </div>
-                <button
-                  onClick={handleGoApply}
-                  className="shrink-0 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-700"
-                >
-                  去投递 Indeed →
-                </button>
               </div>
-            </div>
+            )}
 
             <div className="rounded-2xl border border-cyan-200 bg-cyan-50/60 p-5 shadow-sm">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

@@ -6,6 +6,7 @@ import { gradeToQuality, nextReviewLabel, scheduleNext, srState, type RecallGrad
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const GRADES: RecallGrade[] = ["forgot", "vague", "clear"];
 

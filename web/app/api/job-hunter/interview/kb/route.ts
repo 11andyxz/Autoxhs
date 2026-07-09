@@ -8,6 +8,7 @@ import { extractTextFromFile, FileParseError } from "@/lib/job-hunter/parse";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_TEXT = 200_000; // 单个知识库文档上限(字符)

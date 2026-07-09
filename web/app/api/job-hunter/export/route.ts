@@ -7,6 +7,7 @@ import { rateLimit } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const PDF_MIME = "application/pdf";
 const DOCX_MIME =

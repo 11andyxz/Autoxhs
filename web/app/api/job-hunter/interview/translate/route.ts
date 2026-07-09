@@ -6,6 +6,7 @@ import { vocabExists } from "@/lib/job-hunter/interview/repo";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const MAX_TERM = 120; // 只查词/短语,不翻整段
 const MAX_CONTEXT = 2000;
