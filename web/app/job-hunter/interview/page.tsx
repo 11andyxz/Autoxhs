@@ -188,6 +188,12 @@ export default function InterviewPage() {
   const [coach, setCoach] = useState<{ lesson: string; modelAnswer: string; practiceQuestion: string } | null>(null);
   const [coaching, setCoaching] = useState(false);
   const [coachCached, setCoachCached] = useState(false);
+  const [coachSr, setCoachSr] = useState<{
+    lastPct: number | null;
+    reviewed: boolean;
+    nextReviewLabel: string | null;
+  } | null>(null);
+  const [coachCardsKey, setCoachCardsKey] = useState(0); // bump 以刷新「讲解复习」面板
 
   const [reviewExhausted, setReviewExhausted] = useState(false);
 
@@ -339,11 +345,13 @@ export default function InterviewPage() {
       coach: typeof coach;
       success: boolean;
       cached?: boolean;
+      sr?: { lastPct: number | null; reviewed: boolean; nextReviewLabel: string | null };
     }>("/api/job-hunter/interview/coach", { sessionId, skillId, regenerate });
     setCoaching(false);
     if (ok && data?.coach) {
       setCoach(data.coach);
       setCoachCached(!!data.cached);
+      setCoachSr(data.sr ?? null);
     } else setProgressError(error ?? "生成补强内容失败");
   }
 
@@ -407,6 +415,14 @@ export default function InterviewPage() {
               />
             )}
 
+            {isBank && sessionId && (
+              <CoachReviewPanel
+                key={coachCardsKey}
+                sessionId={sessionId}
+                onOpen={(sid) => requestCoach(sid)}
+              />
+            )}
+
             <SkillPanel
               skills={progress.skills}
               onPractice={(id) => nextQuestion(id)}
@@ -437,6 +453,10 @@ export default function InterviewPage() {
                   loading={coaching}
                   coach={coach}
                   cached={coachCached}
+                  sessionId={sessionId ?? 0}
+                  skillId={coachSkillId}
+                  sr={coachSr}
+                  onRated={() => setCoachCardsKey((k) => k + 1)}
                   onClose={() => {
                     setCoachSkillId(null);
                     setCoach(null);
@@ -1195,15 +1215,54 @@ function CoachCard({
   loading,
   coach,
   cached,
+  sessionId,
+  skillId,
+  sr,
+  onRated,
   onClose,
   onRegenerate,
 }: {
   loading: boolean;
   coach: { lesson: string; modelAnswer: string; practiceQuestion: string } | null;
   cached: boolean;
+  sessionId: number;
+  skillId: number | null;
+  sr: { lastPct: number | null; reviewed: boolean; nextReviewLabel: string | null } | null;
+  onRated: () => void;
   onClose: () => void;
   onRegenerate: () => void;
 }) {
+  const [pct, setPct] = useState(60);
+  const [rating, setRating] = useState(false);
+  const [rated, setRated] = useState<{ pct: number; label: string } | null>(null);
+
+  // 换技能时:滑块默认到上次理解度(或 60),清掉本次评分结果。
+  useEffect(() => {
+    setPct(sr?.lastPct ?? 60);
+    setRated(null);
+  }, [skillId, sr?.lastPct]);
+
+  async function rate() {
+    if (!skillId) return;
+    setRating(true);
+    try {
+      const res = await fetch("/api/job-hunter/interview/coach/rate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, skillId, pct }),
+      });
+      const j = await res.json().catch(() => null);
+      if (res.ok && j?.success) {
+        setRated({ pct, label: j.nextReviewLabel });
+        onRated();
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setRating(false);
+    }
+  }
+
   return (
     <div className="rounded-2xl border border-cyan-200 bg-cyan-50/50 p-5 shadow-sm">
       <div className="flex items-center justify-between">
@@ -1254,8 +1313,138 @@ function CoachCard({
             <p className="text-xs font-semibold text-slate-500">练习题（可划词翻译）</p>
             <TranslatableText text={coach.practiceQuestion} className="mt-1 whitespace-pre-wrap" />
           </div>
+
+          {/* 理解度滑块 → 遗忘曲线复习 */}
+          <div className="mt-1 rounded-xl border border-cyan-100 bg-white/70 p-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold text-slate-600">读完了?拖一下「我理解了多少」,按遗忘曲线排复习</p>
+              <span className="text-sm font-bold text-cyan-700">{pct}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              value={pct}
+              onChange={(e) => setPct(Number(e.target.value))}
+              className="mt-2 w-full accent-cyan-600"
+            />
+            <div className="mt-1 flex justify-between text-[10px] text-slate-400">
+              <span>0 完全不懂</span>
+              <span>60 大概懂</span>
+              <span>100 很清楚</span>
+            </div>
+            <div className="mt-2 flex items-center gap-3">
+              <button
+                onClick={rate}
+                disabled={rating}
+                className="rounded-xl bg-cyan-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-cyan-700 disabled:opacity-60"
+              >
+                {rating ? "记录中…" : rated ? "更新理解度" : "记下理解度(排复习)"}
+              </button>
+              {rated ? (
+                <span className="text-xs text-emerald-600">
+                  已记下(理解 {rated.pct}%)：{rated.label}再复习。
+                </span>
+              ) : sr?.reviewed && sr.nextReviewLabel ? (
+                <span className="text-xs text-slate-400">
+                  上次理解 {sr.lastPct ?? "-"}%,原定 {sr.nextReviewLabel}复习。
+                </span>
+              ) : (
+                <span className="text-xs text-slate-400">还没排过复习。</span>
+              )}
+            </div>
+          </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** 讲解复习面板:列出已生成讲解的技能(带遗忘曲线状态),点开进入讲解卡按理解度复习。 */
+function CoachReviewPanel({
+  sessionId,
+  onOpen,
+}: {
+  sessionId: number;
+  onOpen: (skillId: number) => void;
+}) {
+  const [cards, setCards] = useState<
+    | {
+        skillId: number;
+        skill: string;
+        category: string;
+        lastPct: number | null;
+        isDue: boolean;
+        dueAt: string | null;
+        state: SrState;
+      }[]
+    | null
+  >(null);
+  const [counts, setCounts] = useState<{ total: number; due: number } | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch(`/api/job-hunter/interview/coach/cards?sessionId=${sessionId}`);
+        const j = await r.json().catch(() => null);
+        if (j?.success) {
+          setCards(j.cards);
+          setCounts(j.counts);
+        } else setCards([]);
+      } catch {
+        setCards([]);
+      }
+    })();
+  }, [sessionId]);
+
+  if (!cards || cards.length === 0) return null; // 没生成过讲解就不显示
+
+  return (
+    <div className="rounded-2xl border border-cyan-200 bg-cyan-50/40 p-5 shadow-sm">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-semibold text-cyan-900">📖 讲解复习（遗忘曲线）</p>
+        {counts && (
+          <span
+            className={`rounded-full px-3 py-1 text-xs font-semibold ${
+              counts.due > 0 ? "bg-rose-50 text-rose-600" : "bg-emerald-50 text-emerald-600"
+            }`}
+          >
+            {counts.due > 0 ? `${counts.due} 篇待复习` : "已清空"}
+          </span>
+        )}
+      </div>
+      <p className="mt-1 text-xs text-cyan-700">你补强/看过讲解的技能,按遗忘曲线安排复习;点「复习」重读并更新理解度。</p>
+      <div className="mt-3 space-y-2">
+        {cards.map((c) => (
+          <div
+            key={c.skillId}
+            className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-white px-3 py-2"
+          >
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium text-slate-700">{c.skill}</div>
+              <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400">
+                <span className={`rounded px-1 py-0.5 font-medium ${SR_STATE_CLASS[c.state]}`}>
+                  {SR_STATE_LABEL[c.state]}
+                </span>
+                {c.lastPct != null && <span>理解 {c.lastPct}%</span>}
+                {!c.isDue && c.dueAt && <span>下次 {c.dueAt.slice(0, 10)}</span>}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {c.isDue && (
+                <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600">待复习</span>
+              )}
+              <button
+                onClick={() => onOpen(c.skillId)}
+                className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
+              >
+                复习
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -145,6 +145,13 @@ export function ensureInterviewSchema(): Promise<void> {
         lesson MEDIUMTEXT NOT NULL,
         model_answer MEDIUMTEXT NOT NULL,
         practice_question MEDIUMTEXT NOT NULL,
+        ease_factor DECIMAL(4,2) NOT NULL DEFAULT 2.50,
+        interval_days INT NOT NULL DEFAULT 0,
+        repetitions INT NOT NULL DEFAULT 0,
+        lapses INT NOT NULL DEFAULT 0,
+        due_at DATETIME NULL,
+        last_reviewed_at DATETIME NULL,
+        last_pct TINYINT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         CONSTRAINT fk_ip_coach_skill FOREIGN KEY (skill_id) REFERENCES ip_skill(id) ON DELETE CASCADE
@@ -218,6 +225,22 @@ export function ensureInterviewSchema(): Promise<void> {
         ["ER_DUP_FIELDNAME"],
       );
       await markMigrationDone("ip_fundamentals_v1");
+    }
+
+    // ---- 迁移 ip_coach_sr_v1:讲解也纳入遗忘曲线(SM-2 + 理解度%)所需的列。
+    if (!(await migrationDone("ip_coach_sr_v1"))) {
+      for (const col of [
+        "ADD COLUMN ease_factor DECIMAL(4,2) NOT NULL DEFAULT 2.50",
+        "ADD COLUMN interval_days INT NOT NULL DEFAULT 0",
+        "ADD COLUMN repetitions INT NOT NULL DEFAULT 0",
+        "ADD COLUMN lapses INT NOT NULL DEFAULT 0",
+        "ADD COLUMN due_at DATETIME NULL",
+        "ADD COLUMN last_reviewed_at DATETIME NULL",
+        "ADD COLUMN last_pct TINYINT NULL",
+      ]) {
+        await execIgnoring(`ALTER TABLE ip_coach ${col}`, ["ER_DUP_FIELDNAME"]);
+      }
+      await markMigrationDone("ip_coach_sr_v1");
     }
   })().catch((err) => {
     // 建表/迁移失败别把「已拒绝的 promise」永久缓存,否则本进程后续所有调用都直接失败,
@@ -730,6 +753,88 @@ export async function saveCoach(skillId: number, c: Coach): Promise<void> {
        practice_question = VALUES(practice_question)`,
     [skillId, c.lesson, c.modelAnswer, c.practiceQuestion],
   );
+}
+
+/* ---------------- 讲解的间隔重复(理解度% → SM-2) ---------------- */
+
+export type CoachSr = {
+  ease_factor: number;
+  interval_days: number;
+  repetitions: number;
+  lapses: number;
+  due_at: string | null;
+  last_reviewed_at: string | null;
+  last_pct: number | null;
+};
+
+export async function getCoachSr(skillId: number): Promise<CoachSr | null> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    `SELECT ease_factor, interval_days, repetitions, lapses, due_at, last_reviewed_at, last_pct
+       FROM ip_coach WHERE skill_id = ?`,
+    [skillId],
+  );
+  const r = rows[0] as CoachSr | undefined;
+  if (!r) return null;
+  return {
+    ease_factor: Number(r.ease_factor),
+    interval_days: Number(r.interval_days),
+    repetitions: Number(r.repetitions),
+    lapses: Number(r.lapses),
+    due_at: r.due_at,
+    last_reviewed_at: r.last_reviewed_at,
+    last_pct: r.last_pct == null ? null : Number(r.last_pct),
+  };
+}
+
+/** 记录理解度 → 更新讲解的 SM-2 调度(SQL 侧 DATE_ADD)。 */
+export async function rateCoach(
+  skillId: number,
+  update: { ease_factor: number; interval_days: number; repetitions: number; lapses: number },
+  pct: number,
+): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    `UPDATE ip_coach
+        SET ease_factor = ?, interval_days = ?, repetitions = ?, lapses = ?,
+            last_pct = ?, last_reviewed_at = NOW(),
+            due_at = DATE_ADD(NOW(), INTERVAL ? DAY)
+      WHERE skill_id = ?`,
+    [update.ease_factor, update.interval_days, update.repetitions, update.lapses, pct, update.interval_days, skillId],
+  );
+}
+
+export type CoachCardRow = {
+  skill_id: number;
+  skill: string;
+  category: string;
+  interval_days: number;
+  last_pct: number | null;
+  due_at: string | null;
+  last_reviewed_at: string | null;
+  is_due: number;
+};
+
+/** 某会话下已生成讲解的技能列表(带遗忘曲线状态),给「讲解复习」面板用。 */
+export async function listCoachCards(sessionId: number): Promise<CoachCardRow[]> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    `SELECT co.skill_id, s.name AS skill, s.category, co.interval_days, co.last_pct,
+            co.due_at, co.last_reviewed_at,
+            (co.last_reviewed_at IS NULL OR co.due_at IS NULL OR co.due_at <= NOW()) AS is_due
+       FROM ip_coach co
+       JOIN ip_skill s ON s.id = co.skill_id
+      WHERE s.session_id = ?
+      ORDER BY (co.last_reviewed_at IS NOT NULL AND co.due_at IS NOT NULL AND co.due_at <= NOW()) DESC,
+               co.due_at ASC, co.skill_id ASC`,
+    [sessionId],
+  );
+  return (rows as CoachCardRow[]).map((r) => ({
+    ...r,
+    interval_days: Number(r.interval_days),
+    last_pct: r.last_pct == null ? null : Number(r.last_pct),
+    is_due: Number(r.is_due),
+  }));
 }
 
 export type AnswerSummary = {
