@@ -246,15 +246,20 @@ export const TRANSLATE_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
+    en: {
+      type: "string",
+      description:
+        "这个词/符号在英文里怎么读出来:普通单词/短语就是它本身;符号/标点/运算符给它常见的英文读法名称,如 '(' → 'left parenthesis'、'=>' → 'arrow'、'&&' → 'logical AND'、'!=' → 'not equal'",
+    },
     ipa: {
       type: "string",
       description:
-        "该词/短语的国际音标(IPA)注音,含两侧斜杠,如 /dɪˈtɜːmɪnɪstɪk/;短语给整体注音(词间空格分隔);不是可读英文(代码/符号)时留空",
+        "上面 en 的国际音标(IPA)注音,含两侧斜杠,如 /lɛft pəˈrɛnθəsɪs/;短语/多词给整体注音(词间空格分隔)。始终给出,不要留空",
     },
-    zh: { type: "string", description: "该英文词/短语在此语境下的简体中文意思(简短)" },
+    zh: { type: "string", description: "该英文词/短语/符号在此语境下的简体中文意思(简短)" },
     note: { type: "string", description: "一行简短中文说明(词性/语境细微差别),可为空" },
   },
-  required: ["ipa", "zh", "note"],
+  required: ["en", "ipa", "zh", "note"],
 } as const;
 
 /* ---------------- 单词本例句 ---------------- */

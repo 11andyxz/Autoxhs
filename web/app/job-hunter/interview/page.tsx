@@ -108,6 +108,53 @@ function masteryColor(m: number): string {
   return "bg-emerald-500";
 }
 
+type BankSummary = {
+  id: number;
+  title: string;
+  language: string;
+  created_at: string;
+  total: number;
+  due: number;
+};
+
+/**
+ * 播放一段 TTS 音频:每次用全新的 Audio 元素,等缓冲到「可完整播放」再从头(currentTime=0)播。
+ * 直接 `a.src=url; a.play()`(尤其复用同一个元素)常导致开头被吃掉、只听到后半段。
+ * ref 保存当前音频,便于停止/卸载清理;onEnded 用于调用方复位播放状态。
+ */
+function playTts(blob: Blob, ref: { current: HTMLAudioElement | null }, onEnded?: () => void) {
+  const prev = ref.current;
+  if (prev) {
+    prev.pause();
+    if (prev.src.startsWith("blob:")) URL.revokeObjectURL(prev.src);
+  }
+  const url = URL.createObjectURL(blob);
+  const a = new Audio();
+  a.preload = "auto";
+  a.src = url;
+  ref.current = a;
+  let started = false;
+  const start = () => {
+    if (started) return;
+    started = true;
+    a.currentTime = 0; // 关键:从头播,避免只听到后半段
+    a.play().catch(() => {});
+  };
+  // canplay / loadeddata 都表示已就绪可从当前位置播;取先触发者(canplaythrough 对
+  // 短 blob 音频不稳定,故不依赖它)。currentTime=0 保证从开头播。
+  a.addEventListener("canplay", start, { once: true });
+  a.addEventListener("loadeddata", start, { once: true });
+  a.addEventListener(
+    "ended",
+    () => {
+      URL.revokeObjectURL(url);
+      onEnded?.();
+    },
+    { once: true },
+  );
+  a.load();
+}
+
 async function postJson<T>(url: string, body: unknown): Promise<{ ok: boolean; data: T | null; error?: string }> {
   try {
     const res = await fetch(url, {
@@ -142,6 +189,8 @@ export default function InterviewPage() {
 
   const [reviewExhausted, setReviewExhausted] = useState(false);
 
+  const [banks, setBanks] = useState<BankSummary[] | null>(null);
+
   const practiceRef = useRef<HTMLDivElement | null>(null);
   const coachRef = useRef<HTMLDivElement | null>(null);
   const isBank = progress?.session.mode === "bank";
@@ -172,8 +221,21 @@ export default function InterviewPage() {
   }, []);
 
   useEffect(() => {
-    if (sessionId) loadProgress(sessionId);
-    else setLoadingProgress(false);
+    if (sessionId) {
+      loadProgress(sessionId);
+      return;
+    }
+    // 没有指定 session → 复习中心:列出所有题库(按人名)供选择。
+    setLoadingProgress(false);
+    (async () => {
+      try {
+        const res = await fetch("/api/job-hunter/interview/banks");
+        const json = await res.json().catch(() => null);
+        setBanks(json?.success ? (json.banks as BankSummary[]) : []);
+      } catch {
+        setBanks([]);
+      }
+    })();
   }, [sessionId, loadProgress]);
 
   async function nextQuestion(skillId?: number) {
@@ -283,34 +345,34 @@ export default function InterviewPage() {
   return (
     <main className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
       <div className="mx-auto max-w-3xl px-4 py-12 sm:py-16">
-        <Link href="/job-hunter" className="text-sm text-slate-400 hover:text-slate-600">
-          ← 返回求职神器
+        <Link href={sessionId ? "/job-hunter" : "/"} className="text-sm text-slate-400 hover:text-slate-600">
+          {sessionId ? "← 返回求职神器" : "← 返回工具箱"}
         </Link>
         <header className="mt-4 mb-8">
           <span className="inline-flex items-center rounded-full bg-cyan-50 px-3 py-1 text-xs font-medium text-cyan-600">
-            {isBank ? "简历面试题库 · Interview Bank" : "专项面试训练 · Interview Prep"}
+            {!sessionId ? "面试复习 · Interview Review" : isBank ? "简历面试题库 · Interview Bank" : "专项面试训练 · Interview Prep"}
           </span>
           <h1 className="mt-3 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
-            {isBank ? "按你的简历刷面试题" : "针对这份 JD 练到会"}
+            {!sessionId ? "面试复习中心" : isBank ? "按你的简历刷面试题" : "针对这份 JD 练到会"}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-500">
-            {isBank
-              ? "我当面试官、按你简历里的技能与项目出题（以概念 / 场景 / 系统设计等技术题为主，少量行为面试）；你打字作答，AI 评分并给参考答案，每道题按遗忘曲线自动安排下次复习。进度自动保存。"
-              : "按岗位技能出题、打字作答、AI 评分定位弱点，自适应优先练你最薄弱的部分。进度自动保存。"}
+            {!sessionId
+              ? "选一份题库开始按遗忘曲线复习（按人名 / 简历区分），或复习你的单词本。所有题库和进度都存在数据库里，随时回来接着练。"
+              : isBank
+                ? "我当面试官、按你简历里的技能与项目出题（以概念 / 场景 / 系统设计等技术题为主，少量行为面试）；你打字作答，AI 评分并给参考答案，每道题按遗忘曲线自动安排下次复习。进度自动保存。"
+                : "按岗位技能出题、打字作答、AI 评分定位弱点，自适应优先练你最薄弱的部分。进度自动保存。"}
           </p>
           {isBank && progress?.session.title && (
             <p className="mt-1 text-xs text-slate-400">题库绑定简历：{progress.session.title}</p>
           )}
         </header>
 
-        {!sessionId && !loadingProgress && (
-          <p className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-700">
-            没有训练会话。请先到{" "}
-            <Link href="/job-hunter" className="font-semibold underline">
-              求职神器
-            </Link>{" "}
-            生成简历，再点「开始训练」。
-          </p>
+        {/* 复习中心(无 session):列出所有题库供选择 + 单词本 */}
+        {!sessionId && (
+          <div className="space-y-6">
+            <BankPicker banks={banks} />
+            <VocabManager />
+          </div>
         )}
 
         {progressError && (
@@ -474,7 +536,7 @@ function TranslatableText({ text, className }: { text: string; className?: strin
   const popRef = useRef<HTMLDivElement | null>(null);
   const [pop, setPop] = useState<{ x: number; y: number; term: string } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [res, setRes] = useState<{ ipa: string; zh: string; note: string } | null>(null);
+  const [res, setRes] = useState<{ en: string; ipa: string; zh: string; note: string } | null>(null);
   const reqIdRef = useRef(0);
   // 发音:复用 /speak(OpenAI TTS)读出选中的词
   const termAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -503,29 +565,18 @@ function TranslatableText({ text, className }: { text: string; className?: strin
     }
   }
 
-  async function speakTerm(term: string) {
+  async function speakTerm(text: string) {
     try {
       setSpeaking(true);
       const r = await fetch("/api/job-hunter/interview/speak", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: term }),
+        body: JSON.stringify({ text }),
       });
-      if (!r.ok) {
-        setSpeaking(false);
-        return;
-      }
-      const url = URL.createObjectURL(await r.blob());
-      let a = termAudioRef.current;
-      if (!a) {
-        a = new Audio();
-        termAudioRef.current = a;
-      }
-      a.src = url;
-      a.onended = () => URL.revokeObjectURL(url);
-      setSpeaking(false);
-      a.play().catch(() => {});
+      if (r.ok) playTts(await r.blob(), termAudioRef);
     } catch {
+      /* ignore */
+    } finally {
       setSpeaking(false);
     }
   }
@@ -559,13 +610,13 @@ function TranslatableText({ text, className }: { text: string; className?: strin
         if (rid !== reqIdRef.current) return; // 已被新的划词取代
         setRes(
           j?.success
-            ? { ipa: j.ipa || "", zh: j.zh, note: j.note || "" }
-            : { ipa: "", zh: "翻译失败", note: "" },
+            ? { en: j.en || "", ipa: j.ipa || "", zh: j.zh, note: j.note || "" }
+            : { en: "", ipa: "", zh: "翻译失败", note: "" },
         );
         if (j?.success && j.inVocab) setVocab("existed"); // 已在单词本则直接显示「已加入」
       })
       .catch(() => {
-        if (rid === reqIdRef.current) setRes({ ipa: "", zh: "网络异常", note: "" });
+        if (rid === reqIdRef.current) setRes({ en: "", ipa: "", zh: "网络异常", note: "" });
       })
       .finally(() => {
         if (rid === reqIdRef.current) setLoading(false);
@@ -606,18 +657,36 @@ function TranslatableText({ text, className }: { text: string; className?: strin
             }}
             className="rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-lg"
           >
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold text-slate-800">{pop.term}</span>
-              {res?.ipa && <span className="text-xs text-slate-500">{res.ipa}</span>}
-              <button
-                onClick={() => speakTerm(pop.term)}
-                disabled={speaking}
-                title="发音"
-                className="rounded-md border border-slate-200 px-1.5 py-0.5 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700 disabled:opacity-50"
-              >
-                {speaking ? "…" : "🔊"}
-              </button>
-            </div>
+            {(() => {
+              const enReading = res?.en?.trim() || "";
+              const sameAsTerm = enReading.toLowerCase() === pop.term.trim().toLowerCase();
+              return (
+                <>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-slate-800">{pop.term}</span>
+                    {/* 普通单词:音标直接跟在词后 */}
+                    {res?.ipa && (sameAsTerm || !enReading) && (
+                      <span className="text-xs text-slate-500">{res.ipa}</span>
+                    )}
+                    <button
+                      onClick={() => speakTerm(enReading || pop.term)}
+                      disabled={speaking}
+                      title="发音"
+                      className="rounded-md border border-slate-200 px-1.5 py-0.5 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700 disabled:opacity-50"
+                    >
+                      {speaking ? "…" : "🔊"}
+                    </button>
+                  </div>
+                  {/* 符号/运算符:显示英文读法 + 音标(不会读它) */}
+                  {enReading && !sameAsTerm && (
+                    <div className="mt-0.5 text-xs text-slate-500">
+                      读作 <span className="font-medium text-slate-700">{enReading}</span>
+                      {res?.ipa && <span className="ml-1 text-slate-500">{res.ipa}</span>}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
             {loading ? (
               <div className="mt-1 text-xs text-slate-400">翻译中…</div>
             ) : res ? (
@@ -689,8 +758,8 @@ function PracticeCard({
   const [speechError, setSpeechError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const speakAbortRef = useRef<AbortController | null>(null);
-  // 同一题重复点「读题」时复用已生成的音频,省一次 OpenAI 调用。
-  const audioCacheRef = useRef<{ id: number; url: string } | null>(null);
+  // 同一题重复点「读题」时复用已生成的音频(缓存 blob),省一次 OpenAI 调用。
+  const audioCacheRef = useRef<{ id: number; blob: Blob } | null>(null);
 
   function stopSpeak() {
     speakAbortRef.current?.abort();
@@ -700,23 +769,9 @@ function PracticeCard({
     setLoadingSpeech(false);
   }
 
-  function playSpeech(url: string) {
-    let a = audioRef.current;
-    if (!a) {
-      a = new Audio();
-      audioRef.current = a;
-    }
-    a.src = url;
-    a.onended = () => setSpeaking(false);
-    a.onerror = () => {
-      setSpeaking(false);
-      setSpeechError("播放失败");
-    };
+  function speakBlob(blob: Blob) {
     setSpeaking(true);
-    a.play().catch(() => {
-      setSpeaking(false);
-      setSpeechError("播放失败");
-    });
+    playTts(blob, audioRef, () => setSpeaking(false));
   }
 
   async function toggleSpeak() {
@@ -727,7 +782,7 @@ function PracticeCard({
     setSpeechError(null);
     const cached = audioCacheRef.current;
     if (cached && cached.id === question.questionId) {
-      playSpeech(cached.url);
+      speakBlob(cached.blob);
       return;
     }
     setLoadingSpeech(true);
@@ -748,10 +803,9 @@ function PracticeCard({
       }
       const blob = await res.blob();
       if (ctrl.signal.aborted) return;
-      const url = URL.createObjectURL(blob);
-      audioCacheRef.current = { id: question.questionId, url };
+      audioCacheRef.current = { id: question.questionId, blob };
       setLoadingSpeech(false);
-      playSpeech(url);
+      speakBlob(blob);
     } catch (err) {
       if ((err as { name?: string })?.name === "AbortError") return;
       setSpeechError("读题失败,请重试");
@@ -766,18 +820,16 @@ function PracticeCard({
     setSpeaking(false);
     setLoadingSpeech(false);
     setSpeechError(null);
-    if (audioCacheRef.current) {
-      URL.revokeObjectURL(audioCacheRef.current.url);
-      audioCacheRef.current = null;
-    }
+    audioCacheRef.current = null;
   }, [question.questionId]);
 
-  // 卸载时收尾:停音频、取消未完成的请求、回收 URL。
+  // 卸载时收尾:停音频、取消未完成的请求。
   useEffect(
     () => () => {
       audioRef.current?.pause();
       speakAbortRef.current?.abort();
-      if (audioCacheRef.current) URL.revokeObjectURL(audioCacheRef.current.url);
+      const a = audioRef.current;
+      if (a && a.src.startsWith("blob:")) URL.revokeObjectURL(a.src);
     },
     [],
   );
@@ -1195,6 +1247,63 @@ function HistoryPanel({ answers }: { answers: AnswerSummary[] }) {
   );
 }
 
+function BankPicker({ banks }: { banks: BankSummary[] | null }) {
+  if (banks === null) return <p className="text-sm text-slate-400">正在加载题库……</p>;
+  if (banks.length === 0) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 text-sm text-slate-500 shadow-sm">
+        还没有题库。去{" "}
+        <Link href="/job-hunter" className="font-semibold text-indigo-600 underline">
+          求职投递一条龙
+        </Link>{" "}
+        上传简历、点「生成题库」，之后就会出现在这里。
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <p className="text-sm font-semibold text-slate-800">选择要复习的题库（按人名 / 简历）</p>
+      <div className="mt-3 space-y-2">
+        {banks.map((b) => (
+          // 用整页跳转(<a>)而非 <Link>:本页只在挂载时读一次 ?session=,同路由的
+          // 客户端软跳转不会重挂载 → 点了没反应。整页导航强制重挂载、正确读到 session。
+          <a
+            key={b.id}
+            href={`/job-hunter/interview?session=${b.id}`}
+            className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 px-4 py-3 transition hover:border-indigo-300 hover:bg-indigo-50/40"
+          >
+            <div className="min-w-0">
+              <div className="truncate font-medium text-slate-800">{b.title}</div>
+              <div className="mt-0.5 text-xs text-slate-400">
+                {b.language} · {b.total} 题 · 生成于 {String(b.created_at).slice(0, 10)}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {b.due > 0 ? (
+                <span className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-600">
+                  {b.due} 待复习
+                </span>
+              ) : (
+                <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-600">
+                  已清空
+                </span>
+              )}
+              <span className="text-sm text-indigo-500">复习 →</span>
+            </div>
+          </a>
+        ))}
+      </div>
+      <p className="mt-3 text-xs text-slate-400">
+        想加新简历的题库？去{" "}
+        <Link href="/job-hunter" className="text-indigo-600 underline">
+          求职投递一条龙
+        </Link>{" "}
+        生成。
+      </p>
+    </div>
+  );
+}
+
 function ReviewDashboard({
   counts,
   busy,
@@ -1509,16 +1618,7 @@ function VocabManager() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (!r.ok) return;
-      const url = URL.createObjectURL(await r.blob());
-      let a = audioRef.current;
-      if (!a) {
-        a = new Audio();
-        audioRef.current = a;
-      }
-      a.src = url;
-      a.onended = () => URL.revokeObjectURL(url);
-      a.play().catch(() => {});
+      if (r.ok) playTts(await r.blob(), audioRef);
     } catch {
       /* ignore */
     }

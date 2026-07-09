@@ -79,6 +79,14 @@ const TOOLS: Array<{
     accent: "cyan",
   },
   {
+    href: "/job-hunter/interview",
+    name: "面试复习",
+    en: "Interview Review",
+    desc: "按遗忘曲线复习你的简历面试题库(按人名区分)与单词本:选一份题库作答、AI 打分并给讲解,每题自动排下次复习;划词可查音标/翻译/发音并加入单词本。题库在「求职投递一条龙」里生成,进度都存数据库。",
+    icon: "🧠",
+    accent: "fuchsia",
+  },
+  {
     href: "/employee",
     name: "雇员信息",
     en: "Employee Information",

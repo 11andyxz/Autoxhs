@@ -27,11 +27,11 @@ export async function POST(req: NextRequest) {
 
   try {
     // 顺带查一下是否已在单词本(失败不影响翻译)。
-    const [{ ipa, zh, note }, inVocab] = await Promise.all([
+    const [{ en, ipa, zh, note }, inVocab] = await Promise.all([
       translateTerm(term, context),
       vocabExists(term).catch(() => false),
     ]);
-    return NextResponse.json({ success: true, ipa, zh, note, inVocab });
+    return NextResponse.json({ success: true, en, ipa, zh, note, inVocab });
   } catch (err) {
     return fail(err, "translate");
   }

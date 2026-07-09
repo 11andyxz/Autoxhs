@@ -265,6 +265,39 @@ export async function createBankSession(args: {
   return res.insertId;
 }
 
+export type BankSessionSummary = {
+  id: number;
+  title: string;
+  language: string;
+  created_at: string;
+  total: number;
+  due: number;
+};
+
+/** 所有题库会话(按人名/简历标题展示),带每个库的总题数与待复习数。给「面试复习」入口用。 */
+export async function listBankSessions(): Promise<BankSessionSummary[]> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const [rows] = await p.query<RowDataPacket[]>(
+    `SELECT s.id, s.title, s.language, s.created_at,
+        COUNT(q.id) AS total,
+        SUM(q.last_reviewed_at IS NULL OR (q.due_at IS NOT NULL AND q.due_at <= NOW())) AS due
+       FROM ip_session s
+       LEFT JOIN ip_question q ON q.session_id = s.id
+      WHERE s.mode = 'bank'
+      GROUP BY s.id, s.title, s.language, s.created_at
+      ORDER BY s.created_at DESC`,
+  );
+  return (rows as RowDataPacket[]).map((r) => ({
+    id: Number(r.id),
+    title: (r.title as string) || "我的简历",
+    language: r.language as string,
+    created_at: r.created_at as string,
+    total: Number(r.total ?? 0),
+    due: Number(r.due ?? 0),
+  }));
+}
+
 /** 按简历指纹找已存在的题库会话(用于幂等:同一简历不重复建库)。 */
 export async function findBankSessionByHash(resumeHash: string): Promise<SessionRow | null> {
   await ensureInterviewSchema();

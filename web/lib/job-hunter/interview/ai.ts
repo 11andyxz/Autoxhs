@@ -234,7 +234,7 @@ export async function polishToEnglish(args: {
 export function translateTerm(
   term: string,
   context: string,
-): Promise<{ ipa: string; zh: string; note: string }> {
+): Promise<{ en: string; ipa: string; zh: string; note: string }> {
   const content = dataBlock([
     { label: "TERM (translate this only)", body: term },
     { label: "CONTEXT (where the term appears)", body: context },
@@ -245,10 +245,11 @@ export function translateTerm(
     TRANSLATE_JSON_SCHEMA as unknown as Record<string, unknown>,
     "translate",
     (raw) => {
-      const o = (raw ?? {}) as { ipa?: unknown; zh?: unknown; note?: unknown };
+      const o = (raw ?? {}) as { en?: unknown; ipa?: unknown; zh?: unknown; note?: unknown };
       const zh = typeof o.zh === "string" ? o.zh.trim().slice(0, 200) : "";
       if (!zh) throw new SchemaValidationError("翻译为空");
       return {
+        en: typeof o.en === "string" ? o.en.trim().slice(0, 120) : "",
         ipa: typeof o.ipa === "string" ? o.ipa.trim().slice(0, 120) : "",
         zh,
         note: typeof o.note === "string" ? o.note.trim().slice(0, 300) : "",
