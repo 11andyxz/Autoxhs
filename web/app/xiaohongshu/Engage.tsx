@@ -65,8 +65,13 @@ export default function Engage() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef(false);
 
+  // 组件卸载时（切到「文案发表」、返回工具箱、或离开页面）中止正在进行的批量任务。
+  // 生成/执行都是客户端串行循环，React 卸载不会自动停止它；若不中止，执行循环会在后台
+  // 继续真实发评论(无法撤销)且无法叫停。置 abortRef 后，循环会在当前这一篇完成后停下，
+  // 不再发下一篇（不打断已在途的请求，避免出现「发没发出去」的不确定状态）。
   useEffect(() => {
     return () => {
+      abortRef.current = true;
       if (toastTimer.current) clearTimeout(toastTimer.current);
     };
   }, []);
