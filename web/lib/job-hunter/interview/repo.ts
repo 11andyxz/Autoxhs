@@ -158,6 +158,27 @@ export function ensureInterviewSchema(): Promise<void> {
       )
     `);
 
+    // 每道题的「讲解」(per-question,区别于 ip_coach 的 per-skill):点「不会」时按这道题
+    // 单独生成、持久化,并带理解度%的遗忘曲线。这样同一技能下不同题目各有各的讲解。
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS ip_explain (
+        question_id INT PRIMARY KEY,
+        lesson MEDIUMTEXT NOT NULL,
+        model_answer MEDIUMTEXT NOT NULL,
+        practice_question MEDIUMTEXT NOT NULL,
+        ease_factor DECIMAL(4,2) NOT NULL DEFAULT 2.50,
+        interval_days INT NOT NULL DEFAULT 0,
+        repetitions INT NOT NULL DEFAULT 0,
+        lapses INT NOT NULL DEFAULT 0,
+        due_at DATETIME NULL,
+        last_reviewed_at DATETIME NULL,
+        last_pct TINYINT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_ip_explain_q FOREIGN KEY (question_id) REFERENCES ip_question(id) ON DELETE CASCADE
+      )
+    `);
+
     // ---- 迁移 ip_bank_v1:题库绑定简历 + 每题间隔重复(遗忘曲线)所需的列 ----
     // 整块由标记守卫,只跑一次;每条 ALTER 又用 execIgnoring 容忍「已存在」,可安全重跑(自愈)。
     if (!(await migrationDone("ip_bank_v1"))) {
@@ -830,6 +851,105 @@ export async function listCoachCards(sessionId: number): Promise<CoachCardRow[]>
     [sessionId],
   );
   return (rows as CoachCardRow[]).map((r) => ({
+    ...r,
+    interval_days: Number(r.interval_days),
+    last_pct: r.last_pct == null ? null : Number(r.last_pct),
+    is_due: Number(r.is_due),
+  }));
+}
+
+/* ---------------- 每题讲解(per-question,点「不会」用) + 其遗忘曲线 ---------------- */
+
+export async function getExplain(questionId: number): Promise<Coach | null> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT lesson, model_answer, practice_question FROM ip_explain WHERE question_id = ?",
+    [questionId],
+  );
+  const r = rows[0] as
+    | { lesson: string; model_answer: string; practice_question: string }
+    | undefined;
+  if (!r) return null;
+  return { lesson: r.lesson, modelAnswer: r.model_answer, practiceQuestion: r.practice_question };
+}
+
+export async function saveExplain(questionId: number, c: Coach): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    `INSERT INTO ip_explain (question_id, lesson, model_answer, practice_question)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE lesson = VALUES(lesson), model_answer = VALUES(model_answer),
+       practice_question = VALUES(practice_question)`,
+    [questionId, c.lesson, c.modelAnswer, c.practiceQuestion],
+  );
+}
+
+export async function getExplainSr(questionId: number): Promise<CoachSr | null> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    `SELECT ease_factor, interval_days, repetitions, lapses, due_at, last_reviewed_at, last_pct
+       FROM ip_explain WHERE question_id = ?`,
+    [questionId],
+  );
+  const r = rows[0] as CoachSr | undefined;
+  if (!r) return null;
+  return {
+    ease_factor: Number(r.ease_factor),
+    interval_days: Number(r.interval_days),
+    repetitions: Number(r.repetitions),
+    lapses: Number(r.lapses),
+    due_at: r.due_at,
+    last_reviewed_at: r.last_reviewed_at,
+    last_pct: r.last_pct == null ? null : Number(r.last_pct),
+  };
+}
+
+/** 记录理解度 → 更新该题讲解的 SM-2 调度。 */
+export async function rateExplain(
+  questionId: number,
+  update: { ease_factor: number; interval_days: number; repetitions: number; lapses: number },
+  pct: number,
+): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    `UPDATE ip_explain
+        SET ease_factor = ?, interval_days = ?, repetitions = ?, lapses = ?,
+            last_pct = ?, last_reviewed_at = NOW(),
+            due_at = DATE_ADD(NOW(), INTERVAL ? DAY)
+      WHERE question_id = ?`,
+    [update.ease_factor, update.interval_days, update.repetitions, update.lapses, pct, update.interval_days, questionId],
+  );
+}
+
+export type ExplainCardRow = {
+  question_id: number;
+  prompt: string;
+  skill: string;
+  category: string;
+  type: QuestionType;
+  interval_days: number;
+  last_pct: number | null;
+  due_at: string | null;
+  last_reviewed_at: string | null;
+  is_due: number;
+};
+
+/** 某会话下已生成讲解的题目列表(带遗忘曲线状态),给「讲解复习」面板用。 */
+export async function listExplainCards(sessionId: number): Promise<ExplainCardRow[]> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    `SELECT e.question_id, q.prompt, s.name AS skill, s.category, q.type,
+            e.interval_days, e.last_pct, e.due_at, e.last_reviewed_at,
+            (e.last_reviewed_at IS NULL OR e.due_at IS NULL OR e.due_at <= NOW()) AS is_due
+       FROM ip_explain e
+       JOIN ip_question q ON q.id = e.question_id
+       JOIN ip_skill s ON s.id = q.skill_id
+      WHERE q.session_id = ?
+      ORDER BY (e.last_reviewed_at IS NOT NULL AND e.due_at IS NOT NULL AND e.due_at <= NOW()) DESC,
+               e.due_at ASC, e.question_id ASC`,
+    [sessionId],
+  );
+  return (rows as ExplainCardRow[]).map((r) => ({
     ...r,
     interval_days: Number(r.interval_days),
     last_pct: r.last_pct == null ? null : Number(r.last_pct),

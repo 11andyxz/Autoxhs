@@ -184,8 +184,10 @@ export default function InterviewPage() {
   const [grade, setGrade] = useState<GradeResult | null>(null);
   const [practiceError, setPracticeError] = useState<string | null>(null);
 
-  const [coachSkillId, setCoachSkillId] = useState<number | null>(null);
+  // 讲解卡的目标:skill=技能层面补强(/coach);question=某一道题的讲解(/explain,点「不会」用)。
+  const [coachTarget, setCoachTarget] = useState<{ kind: "skill" | "question"; id: number } | null>(null);
   const [coach, setCoach] = useState<{ lesson: string; modelAnswer: string; practiceQuestion: string } | null>(null);
+  const [coachPrompt, setCoachPrompt] = useState<string | null>(null); // 单题讲解时:题干
   const [coaching, setCoaching] = useState(false);
   const [coachCached, setCoachCached] = useState(false);
   const [coachSr, setCoachSr] = useState<{
@@ -331,28 +333,64 @@ export default function InterviewPage() {
     if (sessionId) loadProgress(sessionId);
   }
 
-  async function requestCoach(skillId: number, regenerate = false) {
-    if (!sessionId) return;
-    if (!Number.isInteger(skillId) || skillId <= 0) {
-      setProgressError("这道题暂时无法定位技能,请从「开始复习」进入后再看讲解。");
-      return;
-    }
-    setCoachSkillId(skillId);
+  type CoachResp = {
+    coach: typeof coach;
+    success: boolean;
+    cached?: boolean;
+    prompt?: string;
+    sr?: { lastPct: number | null; reviewed: boolean; nextReviewLabel: string | null };
+  };
+
+  async function openCoachCard(
+    target: { kind: "skill" | "question"; id: number },
+    url: string,
+    body: Record<string, unknown>,
+    failMsg: string,
+  ) {
+    setCoachTarget(target);
     setCoach(null);
+    setCoachPrompt(null);
+    setCoachSr(null);
     setCoaching(true);
     setTimeout(() => coachRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
-    const { ok, data, error } = await postJson<{
-      coach: typeof coach;
-      success: boolean;
-      cached?: boolean;
-      sr?: { lastPct: number | null; reviewed: boolean; nextReviewLabel: string | null };
-    }>("/api/job-hunter/interview/coach", { sessionId, skillId, regenerate });
+    const { ok, data, error } = await postJson<CoachResp>(url, body);
     setCoaching(false);
     if (ok && data?.coach) {
       setCoach(data.coach);
       setCoachCached(!!data.cached);
+      setCoachPrompt(data.prompt ?? null);
       setCoachSr(data.sr ?? null);
-    } else setProgressError(error ?? "生成补强内容失败");
+    } else setProgressError(error ?? failMsg);
+  }
+
+  // 技能层面的补强(能力项面板「补强」)。
+  function requestCoach(skillId: number, regenerate = false) {
+    if (!sessionId) return;
+    if (!Number.isInteger(skillId) || skillId <= 0) {
+      setProgressError("暂时无法定位技能。");
+      return;
+    }
+    return openCoachCard(
+      { kind: "skill", id: skillId },
+      "/api/job-hunter/interview/coach",
+      { sessionId, skillId, regenerate },
+      "生成补强内容失败",
+    );
+  }
+
+  // 某一道题的讲解(答题卡「不会」/ 讲解复习面板)。绑定 questionId,每题各有各的讲解。
+  function requestExplain(questionId: number, regenerate = false) {
+    if (!sessionId) return;
+    if (!Number.isInteger(questionId) || questionId <= 0) {
+      setProgressError("这道题暂时无法定位,请从「开始复习」进入后再看讲解。");
+      return;
+    }
+    return openCoachCard(
+      { kind: "question", id: questionId },
+      "/api/job-hunter/interview/explain",
+      { questionId, regenerate },
+      "生成讲解失败",
+    );
   }
 
   return (
@@ -419,7 +457,7 @@ export default function InterviewPage() {
               <CoachReviewPanel
                 key={coachCardsKey}
                 sessionId={sessionId}
-                onOpen={(sid) => requestCoach(sid)}
+                onOpen={(qid) => requestExplain(qid)}
               />
             )}
 
@@ -446,23 +484,27 @@ export default function InterviewPage() {
               <VocabManager />
             </div>
 
-            {/* 补强内容 */}
+            {/* 讲解卡(技能补强 / 单题讲解) */}
             <div ref={coachRef}>
-              {coachSkillId !== null && (
+              {coachTarget !== null && (
                 <CoachCard
                   loading={coaching}
                   coach={coach}
                   cached={coachCached}
                   sessionId={sessionId ?? 0}
-                  skillId={coachSkillId}
+                  kind={coachTarget.kind}
+                  targetId={coachTarget.id}
+                  promptText={coachPrompt}
                   sr={coachSr}
                   onRated={() => setCoachCardsKey((k) => k + 1)}
                   onClose={() => {
-                    setCoachSkillId(null);
+                    setCoachTarget(null);
                     setCoach(null);
                   }}
                   onRegenerate={() => {
-                    if (coachSkillId !== null) requestCoach(coachSkillId, true);
+                    if (!coachTarget) return;
+                    if (coachTarget.kind === "question") requestExplain(coachTarget.id, true);
+                    else requestCoach(coachTarget.id, true);
                   }}
                 />
               )}
@@ -481,7 +523,7 @@ export default function InterviewPage() {
                   onSubmit={submitAnswer}
                   onNext={isBank ? startReview : () => nextQuestion()}
                   nextLabel={isBank ? "下一张（复习）→" : "下一题 →"}
-                  onExplain={() => requestCoach(question.skill.id)}
+                  onExplain={() => requestExplain(question.questionId)}
                 />
               )}
             </div>
@@ -1216,7 +1258,9 @@ function CoachCard({
   coach,
   cached,
   sessionId,
-  skillId,
+  kind,
+  targetId,
+  promptText,
   sr,
   onRated,
   onClose,
@@ -1226,7 +1270,9 @@ function CoachCard({
   coach: { lesson: string; modelAnswer: string; practiceQuestion: string } | null;
   cached: boolean;
   sessionId: number;
-  skillId: number | null;
+  kind: "skill" | "question";
+  targetId: number | null;
+  promptText?: string | null;
   sr: { lastPct: number | null; reviewed: boolean; nextReviewLabel: string | null } | null;
   onRated: () => void;
   onClose: () => void;
@@ -1235,21 +1281,26 @@ function CoachCard({
   const [pct, setPct] = useState(60);
   const [rating, setRating] = useState(false);
   const [rated, setRated] = useState<{ pct: number; label: string } | null>(null);
+  const isQuestion = kind === "question";
 
-  // 换技能时:滑块默认到上次理解度(或 60),清掉本次评分结果。
+  // 换目标时:滑块默认到上次理解度(或 60),清掉本次评分结果。
   useEffect(() => {
     setPct(sr?.lastPct ?? 60);
     setRated(null);
-  }, [skillId, sr?.lastPct]);
+  }, [targetId, kind, sr?.lastPct]);
 
   async function rate() {
-    if (!skillId) return;
+    if (!targetId) return;
     setRating(true);
     try {
-      const res = await fetch("/api/job-hunter/interview/coach/rate", {
+      const url = isQuestion
+        ? "/api/job-hunter/interview/explain/rate"
+        : "/api/job-hunter/interview/coach/rate";
+      const body = isQuestion ? { questionId: targetId, pct } : { sessionId, skillId: targetId, pct };
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, skillId, pct }),
+        body: JSON.stringify(body),
       });
       const j = await res.json().catch(() => null);
       if (res.ok && j?.success) {
@@ -1267,7 +1318,7 @@ function CoachCard({
     <div className="rounded-2xl border border-cyan-200 bg-cyan-50/50 p-5 shadow-sm">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <p className="text-sm font-semibold text-cyan-900">📚 弱点补强</p>
+          <p className="text-sm font-semibold text-cyan-900">{isQuestion ? "📘 这道题的讲解" : "📚 弱点补强"}</p>
           {coach && !loading && (
             <span
               className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
@@ -1294,13 +1345,23 @@ function CoachCard({
       {coach && !loading && (
         <p className="mt-1 text-xs text-slate-400">
           {cached
-            ? "这是之前保存的讲解(同一道题每次都给这篇);想换点「重新生成」。"
+            ? `这是之前保存的讲解(${isQuestion ? "这道题" : "该技能"}每次都给这篇);想换点「重新生成」。`
             : "已保存,下次打开还是这篇;想换点「重新生成」。"}
         </p>
       )}
-      {loading && <p className="mt-2 text-sm text-slate-500">正在载入讲解(首次需生成,约 20 秒)……</p>}
+      {loading && (
+        <p className="mt-2 text-sm text-slate-500">
+          {isQuestion ? "正在按这道题生成讲解(首次约 20 秒)……" : "正在载入讲解(首次需生成,约 20 秒)……"}
+        </p>
+      )}
       {coach && (
         <div className="mt-3 space-y-3 text-sm leading-relaxed text-slate-700">
+          {isQuestion && promptText && (
+            <div className="rounded-xl border border-slate-100 bg-white/70 p-3">
+              <p className="text-xs font-semibold text-slate-500">题目（可划词翻译）</p>
+              <TranslatableText text={promptText} className="mt-1 whitespace-pre-wrap font-medium text-slate-800" />
+            </div>
+          )}
           <div>
             <p className="text-xs font-semibold text-slate-500">讲解（可划词翻译）</p>
             <TranslatableText text={coach.lesson} className="mt-1 whitespace-pre-wrap" />
@@ -1361,17 +1422,18 @@ function CoachCard({
   );
 }
 
-/** 讲解复习面板:列出已生成讲解的技能(带遗忘曲线状态),点开进入讲解卡按理解度复习。 */
+/** 讲解复习面板:列出你点过「不会」并生成讲解的【题目】(带遗忘曲线状态),点开重读、按理解度复习。 */
 function CoachReviewPanel({
   sessionId,
   onOpen,
 }: {
   sessionId: number;
-  onOpen: (skillId: number) => void;
+  onOpen: (questionId: number) => void;
 }) {
   const [cards, setCards] = useState<
     | {
-        skillId: number;
+        questionId: number;
+        prompt: string;
         skill: string;
         category: string;
         lastPct: number | null;
@@ -1386,7 +1448,7 @@ function CoachReviewPanel({
   useEffect(() => {
     (async () => {
       try {
-        const r = await fetch(`/api/job-hunter/interview/coach/cards?sessionId=${sessionId}`);
+        const r = await fetch(`/api/job-hunter/interview/explain/cards?sessionId=${sessionId}`);
         const j = await r.json().catch(() => null);
         if (j?.success) {
           setCards(j.cards);
@@ -1414,16 +1476,17 @@ function CoachReviewPanel({
           </span>
         )}
       </div>
-      <p className="mt-1 text-xs text-cyan-700">你补强/看过讲解的技能,按遗忘曲线安排复习;点「复习」重读并更新理解度。</p>
+      <p className="mt-1 text-xs text-cyan-700">你点过「不会」看讲解的题目,按遗忘曲线安排复习;点「复习」重读并更新理解度。</p>
       <div className="mt-3 space-y-2">
         {cards.map((c) => (
           <div
-            key={c.skillId}
+            key={c.questionId}
             className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-white px-3 py-2"
           >
             <div className="min-w-0">
-              <div className="truncate text-sm font-medium text-slate-700">{c.skill}</div>
+              <div className="truncate text-sm font-medium text-slate-700">{c.prompt}</div>
               <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400">
+                <span className="rounded bg-slate-50 px-1 py-0.5 text-slate-500">{c.skill}</span>
                 <span className={`rounded px-1 py-0.5 font-medium ${SR_STATE_CLASS[c.state]}`}>
                   {SR_STATE_LABEL[c.state]}
                 </span>
@@ -1436,7 +1499,7 @@ function CoachReviewPanel({
                 <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600">待复习</span>
               )}
               <button
-                onClick={() => onOpen(c.skillId)}
+                onClick={() => onOpen(c.questionId)}
                 className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
               >
                 复习

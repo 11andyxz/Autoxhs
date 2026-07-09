@@ -3,6 +3,7 @@ import { getClient, getModel } from "@/lib/openai";
 import {
   BANK_SYSTEM,
   COACH_SYSTEM,
+  EXPLAIN_SYSTEM,
   ENGLISH_ANSWER_SYSTEM,
   FUNDAMENTALS_SYSTEM,
   GRADE_SYSTEM,
@@ -224,6 +225,28 @@ export function coachSkill(args: {
     content,
     COACH_JSON_SCHEMA as unknown as Record<string, unknown>,
     "coach",
+    normalizeCoach,
+  );
+}
+
+/** 针对「某一道具体题目」生成讲解(不是技能层面的泛讲):点「不会」时用。 */
+export function explainQuestion(args: {
+  language: string;
+  question: string;
+  referenceAnswer: string;
+  kbExcerpts: string[];
+}): Promise<Coach> {
+  const content = dataBlock([
+    { label: "INTERVIEW LANGUAGE", body: args.language },
+    { label: "QUESTION (explain THIS exact question)", body: args.question },
+    { label: "REFERENCE ANSWER (outline, may build on it)", body: args.referenceAnswer },
+    { label: "KNOWLEDGE BASE EXCERPTS", body: args.kbExcerpts.join("\n\n---\n\n") },
+  ]);
+  return callJson(
+    EXPLAIN_SYSTEM,
+    content,
+    COACH_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "explain",
     normalizeCoach,
   );
 }
