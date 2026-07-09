@@ -187,6 +187,7 @@ export default function InterviewPage() {
   const [coachSkillId, setCoachSkillId] = useState<number | null>(null);
   const [coach, setCoach] = useState<{ lesson: string; modelAnswer: string; practiceQuestion: string } | null>(null);
   const [coaching, setCoaching] = useState(false);
+  const [coachCached, setCoachCached] = useState(false);
 
   const [reviewExhausted, setReviewExhausted] = useState(false);
 
@@ -334,13 +335,16 @@ export default function InterviewPage() {
     setCoach(null);
     setCoaching(true);
     setTimeout(() => coachRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
-    const { ok, data, error } = await postJson<{ coach: typeof coach; success: boolean }>(
-      "/api/job-hunter/interview/coach",
-      { sessionId, skillId, regenerate },
-    );
+    const { ok, data, error } = await postJson<{
+      coach: typeof coach;
+      success: boolean;
+      cached?: boolean;
+    }>("/api/job-hunter/interview/coach", { sessionId, skillId, regenerate });
     setCoaching(false);
-    if (ok && data?.coach) setCoach(data.coach);
-    else setProgressError(error ?? "生成补强内容失败");
+    if (ok && data?.coach) {
+      setCoach(data.coach);
+      setCoachCached(!!data.cached);
+    } else setProgressError(error ?? "生成补强内容失败");
   }
 
   return (
@@ -432,6 +436,7 @@ export default function InterviewPage() {
                 <CoachCard
                   loading={coaching}
                   coach={coach}
+                  cached={coachCached}
                   onClose={() => {
                     setCoachSkillId(null);
                     setCoach(null);
@@ -1189,18 +1194,31 @@ function FeedbackList({
 function CoachCard({
   loading,
   coach,
+  cached,
   onClose,
   onRegenerate,
 }: {
   loading: boolean;
   coach: { lesson: string; modelAnswer: string; practiceQuestion: string } | null;
+  cached: boolean;
   onClose: () => void;
   onRegenerate: () => void;
 }) {
   return (
     <div className="rounded-2xl border border-cyan-200 bg-cyan-50/50 p-5 shadow-sm">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-semibold text-cyan-900">📚 弱点补强</p>
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-semibold text-cyan-900">📚 弱点补强</p>
+          {coach && !loading && (
+            <span
+              className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                cached ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"
+              }`}
+            >
+              {cached ? "已保存的讲解" : "刚生成并保存"}
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-3">
           <button
             onClick={onRegenerate}
@@ -1215,9 +1233,13 @@ function CoachCard({
         </div>
       </div>
       {coach && !loading && (
-        <p className="mt-1 text-xs text-slate-400">已保存，下次打开还是这篇；需要新的点「重新生成」。</p>
+        <p className="mt-1 text-xs text-slate-400">
+          {cached
+            ? "这是之前保存的讲解(同一道题每次都给这篇);想换点「重新生成」。"
+            : "已保存,下次打开还是这篇;想换点「重新生成」。"}
+        </p>
       )}
-      {loading && <p className="mt-2 text-sm text-slate-500">正在生成讲解……</p>}
+      {loading && <p className="mt-2 text-sm text-slate-500">正在载入讲解(首次需生成,约 20 秒)……</p>}
       {coach && (
         <div className="mt-3 space-y-3 text-sm leading-relaxed text-slate-700">
           <div>
