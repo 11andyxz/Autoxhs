@@ -103,6 +103,10 @@ const SR_STATE_CLASS: Record<SrState, string> = {
   mastered: "bg-emerald-50 text-emerald-700",
 };
 
+// 背答案闪卡的自评三档(与单词本一致)
+type RecallGrade = "forgot" | "vague" | "clear";
+const RECALL_LABEL: Record<RecallGrade, string> = { forgot: "不记得", vague: "似乎记得", clear: "清楚" };
+
 function masteryColor(m: number): string {
   if (m < 40) return "bg-rose-500";
   if (m < 70) return "bg-amber-500";
@@ -524,6 +528,8 @@ export default function InterviewPage() {
                   onNext={isBank ? startReview : () => nextQuestion()}
                   nextLabel={isBank ? "下一张（复习）→" : "下一题 →"}
                   onExplain={() => requestExplain(question.questionId)}
+                  isBank={isBank}
+                  onRated={() => sessionId && loadProgress(sessionId)}
                 />
               )}
             </div>
@@ -807,6 +813,8 @@ function PracticeCard({
   onNext,
   nextLabel = "下一题 →",
   onExplain,
+  isBank = false,
+  onRated,
 }: {
   question: CurrentQuestion;
   answer: string;
@@ -818,6 +826,8 @@ function PracticeCard({
   onNext: () => void;
   nextLabel?: string;
   onExplain: () => void;
+  isBank?: boolean;
+  onRated?: () => void;
 }) {
   // 录音能力探测放到挂载后,避免 SSR/水合不一致。
   const [canRecord, setCanRecord] = useState(false);
@@ -1044,6 +1054,54 @@ function PracticeCard({
     prevAnswerRef.current = null;
   }, [question.questionId]);
 
+  // —— 背答案闪卡(题库复习模式):显示参考答案 → 自评三档 → 排下次复习 ——
+  const [refAnswer, setRefAnswer] = useState<string | null>(null);
+  const [loadingRef, setLoadingRef] = useState(false);
+  const [rating, setRating] = useState(false);
+  const [rated, setRated] = useState<{ grade: RecallGrade; label: string } | null>(null);
+
+  useEffect(() => {
+    setRefAnswer(null);
+    setLoadingRef(false);
+    setRating(false);
+    setRated(null);
+  }, [question.questionId]);
+
+  async function revealAnswer() {
+    if (refAnswer != null || loadingRef) return;
+    setLoadingRef(true);
+    try {
+      const r = await fetch(`/api/job-hunter/interview/answer-key?questionId=${question.questionId}`);
+      const j = await r.json().catch(() => null);
+      setRefAnswer(j?.success ? j.referenceAnswer || "(无参考答案)" : "读取参考答案失败,请重试");
+    } catch {
+      setRefAnswer("网络异常,请重试");
+    } finally {
+      setLoadingRef(false);
+    }
+  }
+
+  async function selfRate(g: RecallGrade) {
+    if (rating) return;
+    setRating(true);
+    try {
+      const r = await fetch("/api/job-hunter/interview/self-rate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ questionId: question.questionId, grade: g }),
+      });
+      const j = await r.json().catch(() => null);
+      if (r.ok && j?.success) {
+        setRated({ grade: g, label: j.nextReviewLabel });
+        onRated?.();
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setRating(false);
+    }
+  }
+
   const answerLocked = grading || !!grade;
 
   return (
@@ -1073,8 +1131,82 @@ function PracticeCard({
       />
       {speechError && <p className="mt-1 text-xs text-rose-500">{speechError}</p>}
 
-      {/* 语音作答工具条 */}
-      {!answerLocked && (
+      {/* —— 背答案闪卡(题库复习):看题 → 显示参考答案 → 自评三档排复习 —— */}
+      {isBank && (
+        <>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <button
+              onClick={onExplain}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
+            >
+              🤔 不会，直接看讲解
+            </button>
+          </div>
+
+          {refAnswer == null ? (
+            <button
+              onClick={revealAnswer}
+              disabled={loadingRef}
+              className="mt-3 rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:opacity-60"
+            >
+              {loadingRef ? "读取中…" : "👀 显示参考答案"}
+            </button>
+          ) : (
+            <div className="mt-3">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs font-semibold text-slate-500">参考答案（可划词翻译）</p>
+                <TranslatableText
+                  text={refAnswer}
+                  className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-800"
+                />
+              </div>
+              {!rated ? (
+                <>
+                  <p className="mt-3 text-xs text-slate-500">刚才凭记忆答得怎么样?(排下次复习)</p>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={() => selfRate("forgot")}
+                      disabled={rating}
+                      className="flex-1 rounded-xl bg-rose-100 px-3 py-2 text-sm font-medium text-rose-700 transition hover:bg-rose-200 disabled:opacity-60"
+                    >
+                      不记得
+                    </button>
+                    <button
+                      onClick={() => selfRate("vague")}
+                      disabled={rating}
+                      className="flex-1 rounded-xl bg-amber-100 px-3 py-2 text-sm font-medium text-amber-700 transition hover:bg-amber-200 disabled:opacity-60"
+                    >
+                      似乎记得
+                    </button>
+                    <button
+                      onClick={() => selfRate("clear")}
+                      disabled={rating}
+                      className="flex-1 rounded-xl bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-200 disabled:opacity-60"
+                    >
+                      清楚
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <span className="text-xs text-emerald-600">
+                    已记下（{RECALL_LABEL[rated.grade]}）：{rated.label}再复习。
+                  </span>
+                  <button
+                    onClick={onNext}
+                    className="rounded-xl bg-cyan-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-cyan-700"
+                  >
+                    {nextLabel}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* 语音作答工具条(练习模式:打字/语音作答 + AI 评分) */}
+      {!isBank && !answerLocked && (
         <div className="mt-4 flex flex-wrap items-center gap-2">
           {canRecord ? (
             <button
@@ -1116,34 +1248,37 @@ function PracticeCard({
         </div>
       )}
 
-      {canUndoEnglish && !answerLocked && (
+      {!isBank && canUndoEnglish && !answerLocked && (
         <p className="mt-2 text-xs text-indigo-600">
           ✅ 已按你的作答生成英文面试版，可再编辑后「提交作答」；提交的就是这份英文答案。
         </p>
       )}
 
-      <textarea
-        value={answer}
-        onChange={(e) => setAnswer(e.target.value)}
-        placeholder="可先用中文作答，再点「🌐 转成英文面试版」；也可直接打字或「🎙️ 语音作答」……"
-        rows={7}
-        disabled={answerLocked}
-        className="mt-2 w-full resize-y rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 disabled:bg-slate-50"
-      />
+      {!isBank && (
+        <textarea
+          value={answer}
+          onChange={(e) => setAnswer(e.target.value)}
+          placeholder="可先用中文作答，再点「🌐 转成英文面试版」；也可直接打字或「🎙️ 语音作答」……"
+          rows={7}
+          disabled={answerLocked}
+          className="mt-2 w-full resize-y rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 disabled:bg-slate-50"
+        />
+      )}
 
       {error && <p className="mt-2 text-sm text-rose-600">{error}</p>}
 
-      {!grade ? (
-        <button
-          onClick={onSubmit}
-          disabled={grading}
-          className="mt-3 rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:opacity-60"
-        >
-          {grading ? "AI 正在评分…" : "提交作答"}
-        </button>
-      ) : (
-        <GradeView grade={grade} onNext={onNext} nextLabel={nextLabel} />
-      )}
+      {!isBank &&
+        (!grade ? (
+          <button
+            onClick={onSubmit}
+            disabled={grading}
+            className="mt-3 rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:opacity-60"
+          >
+            {grading ? "AI 正在评分…" : "提交作答"}
+          </button>
+        ) : (
+          <GradeView grade={grade} onNext={onNext} nextLabel={nextLabel} />
+        ))}
     </div>
   );
 }
