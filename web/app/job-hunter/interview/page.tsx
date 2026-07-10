@@ -2151,7 +2151,7 @@ function VocabManager() {
               {cur.example && (
                 <div className="rounded-lg bg-white p-2 text-sm">
                   <div className="flex items-start justify-between gap-2">
-                    <span className="text-slate-700">{cur.example}</span>
+                    <TranslatableText text={cur.example} className="min-w-0 text-slate-700" />
                     <div className="flex shrink-0 items-center gap-1">
                       <button
                         onClick={() => speak(cur.example)}
