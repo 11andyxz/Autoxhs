@@ -1258,6 +1258,16 @@ export async function updateVocabDemo(id: number, demo: string, demoNote: string
   ]);
 }
 
+/** 只补「英文读法」en(+音标),不动例句/例子;给旧词(en 为空、发音会读成中文)回填用。 */
+export async function updateVocabReading(id: number, en: string, ipa: string): Promise<void> {
+  const p = getPool();
+  await p.execute("UPDATE ip_vocab SET en = ?, ipa = ? WHERE id = ?", [
+    en.slice(0, 255),
+    ipa.slice(0, 255),
+    id,
+  ]);
+}
+
 /** 复习后按 SM-2 更新单词的调度(SQL 侧 DATE_ADD,避免时区漂移)。 */
 export async function updateVocabSr(
   id: number,

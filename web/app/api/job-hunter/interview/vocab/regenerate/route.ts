@@ -1,8 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { generateVocabDemo, generateVocabExample } from "@/lib/job-hunter/interview/ai";
+import { generateVocabDemo, generateVocabExample, translateTerm } from "@/lib/job-hunter/interview/ai";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
-import { getVocab, updateVocabDemo, updateVocabExample } from "@/lib/job-hunter/interview/repo";
+import {
+  getVocab,
+  updateVocabDemo,
+  updateVocabExample,
+  updateVocabReading,
+} from "@/lib/job-hunter/interview/repo";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +20,7 @@ export const maxDuration = 60;
 export async function POST(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
 
-  let body: { id?: unknown; demoOnly?: unknown };
+  let body: { id?: unknown; demoOnly?: unknown; enOnly?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -24,10 +29,19 @@ export async function POST(req: NextRequest) {
   const id = Number(body.id);
   if (!Number.isInteger(id) || id <= 0) return bad("缺少单词 id。");
   const demoOnly = body.demoOnly === true;
+  const enOnly = body.enOnly === true;
 
   try {
     const row = await getVocab(id);
     if (!row) return bad("单词不存在。", 404);
+
+    if (enOnly) {
+      // 只补英文读法(旧词 en 为空 → 发音会读成中文);用词典把中文/符号译出英文读法 + 音标。
+      const t = await translateTerm(row.term, row.example || row.zh);
+      const en = (t.en || "").trim();
+      if (en) await updateVocabReading(id, en, t.ipa || row.ipa);
+      return NextResponse.json({ success: true, id, en: en || row.en, ipa: (en && t.ipa) || row.ipa });
+    }
 
     if (demoOnly) {
       const d = await generateVocabDemo(row.term, row.en, row.zh, row.example);
