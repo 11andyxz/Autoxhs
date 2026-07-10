@@ -128,6 +128,8 @@ export function ensureInterviewSchema(): Promise<void> {
         note VARCHAR(1000) NOT NULL DEFAULT '',
         example MEDIUMTEXT NOT NULL,
         example_zh VARCHAR(1000) NOT NULL DEFAULT '',
+        demo MEDIUMTEXT NULL,
+        demo_note VARCHAR(500) NOT NULL DEFAULT '',
         ease_factor DECIMAL(4,2) NOT NULL DEFAULT 2.50,
         interval_days INT NOT NULL DEFAULT 0,
         repetitions INT NOT NULL DEFAULT 0,
@@ -256,6 +258,16 @@ export function ensureInterviewSchema(): Promise<void> {
         ["ER_DUP_FIELDNAME"],
       );
       await markMigrationDone("ip_vocab_en_v1");
+    }
+
+    // ---- 迁移 ip_vocab_demo_v1:单词本每张卡再带一个「例子」(尽量是代码片段)demo + 中文说明。
+    if (!(await migrationDone("ip_vocab_demo_v1"))) {
+      await execIgnoring("ALTER TABLE ip_vocab ADD COLUMN demo MEDIUMTEXT NULL", ["ER_DUP_FIELDNAME"]);
+      await execIgnoring(
+        "ALTER TABLE ip_vocab ADD COLUMN demo_note VARCHAR(500) NOT NULL DEFAULT ''",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await markMigrationDone("ip_vocab_demo_v1");
     }
 
     // ---- 迁移 ip_coach_sr_v1:讲解也纳入遗忘曲线(SM-2 + 理解度%)所需的列。
@@ -1085,6 +1097,8 @@ export type VocabRow = {
   note: string;
   example: string;
   example_zh: string;
+  demo: string | null;
+  demo_note: string;
   ease_factor: number;
   interval_days: number;
   repetitions: number;
@@ -1108,15 +1122,17 @@ export async function addVocab(v: {
   note: string;
   example: string;
   exampleZh: string;
+  demo: string;
+  demoNote: string;
 }): Promise<{ id: number; existed: boolean }> {
   await ensureInterviewSchema();
   const p = getPool();
   const norm = vocabNorm(v.term);
   const [res] = await p.execute<ResultSetHeader>(
-    `INSERT INTO ip_vocab (term, term_norm, en, ipa, zh, note, example, example_zh, due_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    `INSERT INTO ip_vocab (term, term_norm, en, ipa, zh, note, example, example_zh, demo, demo_note, due_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
      ON DUPLICATE KEY UPDATE en = VALUES(en), ipa = VALUES(ipa), zh = VALUES(zh), note = VALUES(note),
-       example = VALUES(example), example_zh = VALUES(example_zh)`,
+       example = VALUES(example), example_zh = VALUES(example_zh), demo = VALUES(demo), demo_note = VALUES(demo_note)`,
     [
       v.term.trim().slice(0, 255),
       norm,
@@ -1126,6 +1142,8 @@ export async function addVocab(v: {
       v.note.slice(0, 1000),
       v.example.slice(0, 4000) || "(no example)",
       v.exampleZh.slice(0, 1000),
+      v.demo.slice(0, 4000) || null,
+      v.demoNote.slice(0, 500),
     ],
   );
   const existed = res.affectedRows === 2; // mysql: 1=插入,2=更新已存在行
@@ -1149,7 +1167,7 @@ export async function listVocab(): Promise<VocabRow[]> {
   await ensureInterviewSchema();
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    `SELECT id, term, en, ipa, zh, note, example, example_zh, ease_factor, interval_days,
+    `SELECT id, term, en, ipa, zh, note, example, example_zh, demo, demo_note, ease_factor, interval_days,
             repetitions, lapses, due_at, last_reviewed_at, last_grade,
             (last_reviewed_at IS NULL OR due_at IS NULL OR due_at <= NOW()) AS is_due
        FROM ip_vocab
@@ -1190,7 +1208,7 @@ export async function getVocabCounts(): Promise<VocabCounts> {
 export async function getVocab(id: number): Promise<VocabRow | null> {
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    `SELECT id, term, en, ipa, zh, note, example, example_zh, ease_factor, interval_days,
+    `SELECT id, term, en, ipa, zh, note, example, example_zh, demo, demo_note, ease_factor, interval_days,
             repetitions, lapses, due_at, last_reviewed_at, last_grade, 1 AS is_due
        FROM ip_vocab WHERE id = ?`,
     [id],
@@ -1207,18 +1225,37 @@ export async function getVocab(id: number): Promise<VocabRow | null> {
   };
 }
 
-/** 只更新单词的例句 + 英文读法(用于「换个例句」/ 修复中英混杂的旧例句),不动复习进度。 */
+/** 更新单词的例句 + 英文读法 + 例子(用于「换个例子」/ 修复旧例句),不动复习进度。 */
 export async function updateVocabExample(
   id: number,
   en: string,
   example: string,
   exampleZh: string,
+  demo: string,
+  demoNote: string,
 ): Promise<void> {
   const p = getPool();
   await p.execute(
-    "UPDATE ip_vocab SET en = ?, example = ?, example_zh = ? WHERE id = ?",
-    [en.slice(0, 255), example.slice(0, 4000) || "(no example)", exampleZh.slice(0, 1000), id],
+    "UPDATE ip_vocab SET en = ?, example = ?, example_zh = ?, demo = ?, demo_note = ? WHERE id = ?",
+    [
+      en.slice(0, 255),
+      example.slice(0, 4000) || "(no example)",
+      exampleZh.slice(0, 1000),
+      demo.slice(0, 4000) || null,
+      demoNote.slice(0, 500),
+      id,
+    ],
   );
+}
+
+/** 只补/换「例子」(demo,尽量代码片段),保留原例句;给旧词回填用。 */
+export async function updateVocabDemo(id: number, demo: string, demoNote: string): Promise<void> {
+  const p = getPool();
+  await p.execute("UPDATE ip_vocab SET demo = ?, demo_note = ? WHERE id = ?", [
+    demo.slice(0, 4000) || null,
+    demoNote.slice(0, 500),
+    id,
+  ]);
 }
 
 /** 复习后按 SM-2 更新单词的调度(SQL 侧 DATE_ADD,避免时区漂移)。 */

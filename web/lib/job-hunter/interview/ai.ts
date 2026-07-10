@@ -11,6 +11,7 @@ import {
   REPAIR,
   SKILLS_SYSTEM,
   TRANSLATE_SYSTEM,
+  VOCAB_DEMO_SYSTEM,
   VOCAB_EXAMPLE_SYSTEM,
   dataBlock,
 } from "./prompt";
@@ -21,6 +22,7 @@ import {
   QUESTION_JSON_SCHEMA,
   SKILLS_JSON_SCHEMA,
   TRANSLATE_JSON_SCHEMA,
+  VOCAB_DEMO_JSON_SCHEMA,
   VOCAB_EXAMPLE_JSON_SCHEMA,
   SchemaValidationError,
   normalizeBank,
@@ -40,6 +42,13 @@ const TIMEOUT_MS = 90_000;
 
 function isZodError(err: unknown): boolean {
   return !!err && typeof err === "object" && (err as { name?: string }).name === "ZodError";
+}
+
+/** 兜底:模型偶尔仍把代码用 ```lang ... ``` 围栏包起来,渲染成代码块时不需要,去掉。 */
+function stripFences(s: string): string {
+  const t = s.trim();
+  const m = t.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);
+  return (m ? m[1] : t).trim();
 }
 
 /** 通用:结构化 JSON 调用,仅在格式/校验错误时自动重试一次 */
@@ -310,7 +319,7 @@ export function generateVocabExample(
   en: string,
   zh: string,
   context: string,
-): Promise<{ example: string; exampleZh: string; en: string }> {
+): Promise<{ example: string; exampleZh: string; en: string; demo: string; demoNote: string }> {
   const content = dataBlock([
     { label: "TERM (as the learner saved it)", body: term },
     { label: "ENGLISH READING (how to say the term in English; may be empty)", body: en },
@@ -323,14 +332,50 @@ export function generateVocabExample(
     VOCAB_EXAMPLE_JSON_SCHEMA as unknown as Record<string, unknown>,
     "vocab_example",
     (raw) => {
-      const o = (raw ?? {}) as { example?: unknown; en?: unknown; exampleZh?: unknown };
+      const o = (raw ?? {}) as {
+        example?: unknown;
+        en?: unknown;
+        exampleZh?: unknown;
+        demo?: unknown;
+        demoNote?: unknown;
+      };
       const example = typeof o.example === "string" ? o.example.trim().slice(0, 1000) : "";
       if (!example) throw new SchemaValidationError("例句为空");
       return {
         example,
         en: typeof o.en === "string" ? o.en.trim().slice(0, 255) : "",
         exampleZh: typeof o.exampleZh === "string" ? o.exampleZh.trim().slice(0, 1000) : "",
+        demo: typeof o.demo === "string" ? stripFences(o.demo).slice(0, 1500) : "",
+        demoNote: typeof o.demoNote === "string" ? o.demoNote.trim().slice(0, 500) : "",
       };
+    },
+    { timeoutMs: 30_000 },
+  );
+}
+
+/** 只生成「例子」(demo,尽量是代码片段) —— 给已有例句的旧词回填,不动例句本身。 */
+export function generateVocabDemo(
+  term: string,
+  en: string,
+  zh: string,
+  example: string,
+): Promise<{ demo: string; demoNote: string }> {
+  const content = dataBlock([
+    { label: "TERM (as the learner saved it)", body: term },
+    { label: "ENGLISH READING (may be empty)", body: en },
+    { label: "TERM MEANING (Chinese)", body: zh },
+    { label: "ENGLISH EXAMPLE SENTENCE already on the card", body: example },
+  ]);
+  return callJson(
+    VOCAB_DEMO_SYSTEM,
+    content,
+    VOCAB_DEMO_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "vocab_demo",
+    (raw) => {
+      const o = (raw ?? {}) as { demo?: unknown; demoNote?: unknown };
+      const demo = typeof o.demo === "string" ? stripFences(o.demo).slice(0, 1500) : "";
+      if (!demo) throw new SchemaValidationError("例子为空");
+      return { demo, demoNote: typeof o.demoNote === "string" ? o.demoNote.trim().slice(0, 500) : "" };
     },
     { timeoutMs: 30_000 },
   );

@@ -26,6 +26,8 @@ export async function GET(req: NextRequest) {
       note: w.note,
       example: w.example,
       exampleZh: w.example_zh,
+      demo: w.demo ?? "",
+      demoNote: w.demo_note,
       state: srState({ reviewed: w.last_reviewed_at != null, interval_days: w.interval_days }),
       isDue: w.is_due === 1,
       dueAt: w.due_at,
@@ -60,8 +62,27 @@ export async function POST(req: NextRequest) {
     const gen = await generateVocabExample(term, en, zh, context);
     // 优先用划词浮层给的英文读法(权威);为空时退回模型在例句里实际用的英文写法。
     const enOut = en.trim() || gen.en;
-    const { id, existed } = await addVocab({ term, en: enOut, ipa, zh, note, example: gen.example, exampleZh: gen.exampleZh });
-    return NextResponse.json({ success: true, id, existed, en: enOut, example: gen.example, exampleZh: gen.exampleZh });
+    const { id, existed } = await addVocab({
+      term,
+      en: enOut,
+      ipa,
+      zh,
+      note,
+      example: gen.example,
+      exampleZh: gen.exampleZh,
+      demo: gen.demo,
+      demoNote: gen.demoNote,
+    });
+    return NextResponse.json({
+      success: true,
+      id,
+      existed,
+      en: enOut,
+      example: gen.example,
+      exampleZh: gen.exampleZh,
+      demo: gen.demo,
+      demoNote: gen.demoNote,
+    });
   } catch (err) {
     return fail(err, "vocab-add");
   }

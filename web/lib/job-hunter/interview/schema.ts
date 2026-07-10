@@ -274,8 +274,29 @@ export const VOCAB_EXAMPLE_JSON_SCHEMA = {
     },
     en: { type: "string", description: "例句里实际使用的英文单词/短语(原形,用于高亮/发音)" },
     exampleZh: { type: "string", description: "该例句的简体中文翻译" },
+    demo: {
+      type: "string",
+      description:
+        "一个简单明了的例子:优先给最小可运行的代码片段(≤6行,选最贴切的语言 SQL/Java/JS/TS/HTTP/YAML/shell 等)演示该词/概念;不适合代码时给极简具体示例(如一行请求/响应)。纯代码/示例本身,别加解释文字,别用 markdown 反引号围栏。",
+    },
+    demoNote: { type: "string", description: "一句简体中文说明这个例子在演示什么/要注意的点(可空)" },
   },
-  required: ["example", "en", "exampleZh"],
+  required: ["example", "en", "exampleZh", "demo", "demoNote"],
+} as const;
+
+/** 只补「例子」(demo)——给旧词回填,不动已有例句。 */
+export const VOCAB_DEMO_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    demo: {
+      type: "string",
+      description:
+        "一个简单明了的例子:优先给最小可运行的代码片段(≤6行,选最贴切的语言)演示该词/概念;不适合代码时给极简具体示例。纯代码/示例本身,别加解释文字,别用 markdown 反引号围栏。",
+    },
+    demoNote: { type: "string", description: "一句简体中文说明这个例子在演示什么(可空)" },
+  },
+  required: ["demo", "demoNote"],
 } as const;
 
 /* ---------------- 4) 补强 ---------------- */
