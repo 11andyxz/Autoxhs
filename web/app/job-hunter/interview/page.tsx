@@ -2162,7 +2162,7 @@ function VocabManager() {
                       <button
                         onClick={() => regenExample(cur.id)}
                         disabled={regenId === cur.id}
-                        title="换一组例句 + 例子(纯英文)"
+                        title="换个例句(纯英文)"
                         className="rounded border border-slate-200 px-1 text-xs text-slate-400 transition hover:text-cyan-700 disabled:opacity-50"
                       >
                         {regenId === cur.id ? "…" : "🔄"}
@@ -2170,24 +2170,6 @@ function VocabManager() {
                     </div>
                   </div>
                   {cur.exampleZh && <div className="mt-1 text-xs text-slate-400">{cur.exampleZh}</div>}
-                </div>
-              )}
-              {cur.demo && (
-                <div className="rounded-lg border border-slate-200 bg-white p-2">
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-slate-500">例子</span>
-                    <button
-                      onClick={() => navigator.clipboard?.writeText(cur.demo)}
-                      title="复制"
-                      className="rounded border border-slate-200 px-1 text-xs text-slate-400 transition hover:text-cyan-700"
-                    >
-                      📋
-                    </button>
-                  </div>
-                  <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-slate-900 p-2.5 font-mono text-xs leading-relaxed text-slate-100">
-                    {cur.demo}
-                  </pre>
-                  {cur.demoNote && <div className="mt-1 text-xs text-slate-400">{cur.demoNote}</div>}
                 </div>
               )}
               <div className="flex gap-2 pt-1">
