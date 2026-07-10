@@ -268,10 +268,14 @@ export const VOCAB_EXAMPLE_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    example: { type: "string", description: "含该词的一句英文例句(tech/面试语境,自然、不太长)" },
+    example: {
+      type: "string",
+      description: "一句纯英文例句(tech/面试语境,自然、不太长);必须全英文,不得含任何中文或原始非英文写法",
+    },
+    en: { type: "string", description: "例句里实际使用的英文单词/短语(原形,用于高亮/发音)" },
     exampleZh: { type: "string", description: "该例句的简体中文翻译" },
   },
-  required: ["example", "exampleZh"],
+  required: ["example", "en", "exampleZh"],
 } as const;
 
 /* ---------------- 4) 补强 ---------------- */

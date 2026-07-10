@@ -20,6 +20,7 @@ export async function GET(req: NextRequest) {
     const words = rows.map((w) => ({
       id: w.id,
       term: w.term,
+      en: w.en,
       ipa: w.ipa,
       zh: w.zh,
       note: w.note,
@@ -40,7 +41,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
 
-  let body: { term?: unknown; ipa?: unknown; zh?: unknown; note?: unknown; context?: unknown };
+  let body: { term?: unknown; en?: unknown; ipa?: unknown; zh?: unknown; note?: unknown; context?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -49,15 +50,18 @@ export async function POST(req: NextRequest) {
   const term = typeof body.term === "string" ? body.term.trim() : "";
   if (!term) return bad("没有要加入的单词。");
   if (term.length > MAX_TERM) return bad("请选择单个词或短语。");
+  const en = typeof body.en === "string" ? body.en : "";
   const ipa = typeof body.ipa === "string" ? body.ipa : "";
   const zh = typeof body.zh === "string" ? body.zh : "";
   const note = typeof body.note === "string" ? body.note : "";
   const context = typeof body.context === "string" ? body.context.slice(0, MAX_CONTEXT) : "";
 
   try {
-    const { example, exampleZh } = await generateVocabExample(term, zh, context);
-    const { id, existed } = await addVocab({ term, ipa, zh, note, example, exampleZh });
-    return NextResponse.json({ success: true, id, existed, example, exampleZh });
+    const gen = await generateVocabExample(term, en, zh, context);
+    // 优先用划词浮层给的英文读法(权威);为空时退回模型在例句里实际用的英文写法。
+    const enOut = en.trim() || gen.en;
+    const { id, existed } = await addVocab({ term, en: enOut, ipa, zh, note, example: gen.example, exampleZh: gen.exampleZh });
+    return NextResponse.json({ success: true, id, existed, en: enOut, example: gen.example, exampleZh: gen.exampleZh });
   } catch (err) {
     return fail(err, "vocab-add");
   }

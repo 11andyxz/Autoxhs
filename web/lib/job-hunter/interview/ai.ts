@@ -307,11 +307,13 @@ export function translateTerm(
 /** 为单词本生成一句 tech/面试语境的英文例句(+中文翻译),优先贴合提供的上下文。 */
 export function generateVocabExample(
   term: string,
+  en: string,
   zh: string,
   context: string,
-): Promise<{ example: string; exampleZh: string }> {
+): Promise<{ example: string; exampleZh: string; en: string }> {
   const content = dataBlock([
-    { label: "TERM", body: term },
+    { label: "TERM (as the learner saved it)", body: term },
+    { label: "ENGLISH READING (how to say the term in English; may be empty)", body: en },
     { label: "TERM MEANING (Chinese)", body: zh },
     { label: "CONTEXT (where the learner saw it; may be empty)", body: context },
   ]);
@@ -321,10 +323,14 @@ export function generateVocabExample(
     VOCAB_EXAMPLE_JSON_SCHEMA as unknown as Record<string, unknown>,
     "vocab_example",
     (raw) => {
-      const o = (raw ?? {}) as { example?: unknown; exampleZh?: unknown };
+      const o = (raw ?? {}) as { example?: unknown; en?: unknown; exampleZh?: unknown };
       const example = typeof o.example === "string" ? o.example.trim().slice(0, 1000) : "";
       if (!example) throw new SchemaValidationError("例句为空");
-      return { example, exampleZh: typeof o.exampleZh === "string" ? o.exampleZh.trim().slice(0, 1000) : "" };
+      return {
+        example,
+        en: typeof o.en === "string" ? o.en.trim().slice(0, 255) : "",
+        exampleZh: typeof o.exampleZh === "string" ? o.exampleZh.trim().slice(0, 1000) : "",
+      };
     },
     { timeoutMs: 30_000 },
   );

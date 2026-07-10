@@ -628,6 +628,7 @@ function TranslatableText({ text, className }: { text: string; className?: strin
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           term,
+          en: res?.en || "",
           ipa: res?.ipa || "",
           zh: res?.zh || "",
           note: res?.note || "",
@@ -1936,6 +1937,7 @@ function KbManager() {
 type VocabItem = {
   id: number;
   term: string;
+  en: string;
   ipa: string;
   zh: string;
   note: string;
@@ -1960,6 +1962,7 @@ function VocabManager() {
   const [idx, setIdx] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const [grading, setGrading] = useState(false);
+  const [regenId, setRegenId] = useState<number | null>(null);
   const [lastLabel, setLastLabel] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -2039,6 +2042,28 @@ function VocabManager() {
     }
   }
 
+  async function regenExample(id: number) {
+    setRegenId(id);
+    try {
+      const r = await fetch("/api/job-hunter/interview/vocab/regenerate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const j = await r.json().catch(() => null);
+      if (r.ok && j?.success) {
+        const patch = (w: VocabItem) =>
+          w.id === id ? { ...w, en: j.en ?? w.en, example: j.example, exampleZh: j.exampleZh } : w;
+        setWords((ws) => ws.map(patch));
+        setQueue((q) => q.map(patch));
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setRegenId(null);
+    }
+  }
+
   async function remove(id: number) {
     await fetch(`/api/job-hunter/interview/vocab?id=${id}`, { method: "DELETE" });
     load();
@@ -2056,6 +2081,8 @@ function VocabManager() {
   }
 
   const cur = queue.length > 0 ? queue[idx] : null;
+  // 英文读法 ≠ 原词(即选中的是中文/符号):音标应挂在「读作」行,而不是原词后面。
+  const enDiffers = !!cur?.en && cur.en.toLowerCase() !== cur.term.trim().toLowerCase();
 
   return (
     <div className="w-full rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -2084,14 +2111,21 @@ function VocabManager() {
           </div>
           <div className="mt-1 flex items-center gap-2">
             <span className="text-lg font-bold text-slate-800">{cur.term}</span>
-            {cur.ipa && <span className="text-sm text-slate-500">{cur.ipa}</span>}
+            {/* 普通词:音标直接跟在词后;符号/短语(读法≠原词)则把音标放到「读作」行 */}
+            {cur.ipa && !enDiffers && <span className="text-sm text-slate-500">{cur.ipa}</span>}
             <button
-              onClick={() => speak(cur.term)}
+              onClick={() => speak(cur.en || cur.term)}
               className="rounded-md border border-slate-200 px-1.5 py-0.5 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700"
             >
               🔊
             </button>
           </div>
+          {enDiffers && (
+            <div className="mt-0.5 text-xs text-slate-500">
+              读作 <span className="font-medium text-slate-700">{cur.en}</span>
+              {cur.ipa && <span className="ml-1 text-slate-500">{cur.ipa}</span>}
+            </div>
+          )}
           {!revealed ? (
             <button
               onClick={() => setRevealed(true)}
@@ -2107,12 +2141,22 @@ function VocabManager() {
                 <div className="rounded-lg bg-white p-2 text-sm">
                   <div className="flex items-start justify-between gap-2">
                     <span className="text-slate-700">{cur.example}</span>
-                    <button
-                      onClick={() => speak(cur.example)}
-                      className="shrink-0 rounded border border-slate-200 px-1 text-xs text-slate-400 transition hover:text-cyan-700"
-                    >
-                      🔊
-                    </button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        onClick={() => speak(cur.example)}
+                        className="rounded border border-slate-200 px-1 text-xs text-slate-400 transition hover:text-cyan-700"
+                      >
+                        🔊
+                      </button>
+                      <button
+                        onClick={() => regenExample(cur.id)}
+                        disabled={regenId === cur.id}
+                        title="换个全英文例句"
+                        className="rounded border border-slate-200 px-1 text-xs text-slate-400 transition hover:text-cyan-700 disabled:opacity-50"
+                      >
+                        {regenId === cur.id ? "…" : "🔄"}
+                      </button>
+                    </div>
                   </div>
                   {cur.exampleZh && <div className="mt-1 text-xs text-slate-400">{cur.exampleZh}</div>}
                 </div>

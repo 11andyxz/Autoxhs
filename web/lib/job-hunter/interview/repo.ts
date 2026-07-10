@@ -122,6 +122,7 @@ export function ensureInterviewSchema(): Promise<void> {
         id INT AUTO_INCREMENT PRIMARY KEY,
         term VARCHAR(255) NOT NULL,
         term_norm VARCHAR(255) NOT NULL UNIQUE,
+        en VARCHAR(255) NOT NULL DEFAULT '',
         ipa VARCHAR(255) NOT NULL DEFAULT '',
         zh VARCHAR(500) NOT NULL DEFAULT '',
         note VARCHAR(1000) NOT NULL DEFAULT '',
@@ -246,6 +247,15 @@ export function ensureInterviewSchema(): Promise<void> {
         ["ER_DUP_FIELDNAME"],
       );
       await markMigrationDone("ip_fundamentals_v1");
+    }
+
+    // ---- 迁移 ip_vocab_en_v1:单词本存「英文读法」(en),让例句/发音都用英文而非选中的中文。
+    if (!(await migrationDone("ip_vocab_en_v1"))) {
+      await execIgnoring(
+        "ALTER TABLE ip_vocab ADD COLUMN en VARCHAR(255) NOT NULL DEFAULT ''",
+        ["ER_DUP_FIELDNAME"],
+      );
+      await markMigrationDone("ip_vocab_en_v1");
     }
 
     // ---- 迁移 ip_coach_sr_v1:讲解也纳入遗忘曲线(SM-2 + 理解度%)所需的列。
@@ -1069,6 +1079,7 @@ export async function hasKb(): Promise<boolean> {
 export type VocabRow = {
   id: number;
   term: string;
+  en: string;
   ipa: string;
   zh: string;
   note: string;
@@ -1091,6 +1102,7 @@ function vocabNorm(term: string): string {
 /** 加入单词本(按归一化词去重:已存在则刷新音标/释义/例句,但保留复习进度)。 */
 export async function addVocab(v: {
   term: string;
+  en: string;
   ipa: string;
   zh: string;
   note: string;
@@ -1101,13 +1113,14 @@ export async function addVocab(v: {
   const p = getPool();
   const norm = vocabNorm(v.term);
   const [res] = await p.execute<ResultSetHeader>(
-    `INSERT INTO ip_vocab (term, term_norm, ipa, zh, note, example, example_zh, due_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
-     ON DUPLICATE KEY UPDATE ipa = VALUES(ipa), zh = VALUES(zh), note = VALUES(note),
+    `INSERT INTO ip_vocab (term, term_norm, en, ipa, zh, note, example, example_zh, due_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+     ON DUPLICATE KEY UPDATE en = VALUES(en), ipa = VALUES(ipa), zh = VALUES(zh), note = VALUES(note),
        example = VALUES(example), example_zh = VALUES(example_zh)`,
     [
       v.term.trim().slice(0, 255),
       norm,
+      v.en.slice(0, 255),
       v.ipa.slice(0, 255),
       v.zh.slice(0, 500),
       v.note.slice(0, 1000),
@@ -1136,7 +1149,7 @@ export async function listVocab(): Promise<VocabRow[]> {
   await ensureInterviewSchema();
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    `SELECT id, term, ipa, zh, note, example, example_zh, ease_factor, interval_days,
+    `SELECT id, term, en, ipa, zh, note, example, example_zh, ease_factor, interval_days,
             repetitions, lapses, due_at, last_reviewed_at, last_grade,
             (last_reviewed_at IS NULL OR due_at IS NULL OR due_at <= NOW()) AS is_due
        FROM ip_vocab
@@ -1177,7 +1190,7 @@ export async function getVocabCounts(): Promise<VocabCounts> {
 export async function getVocab(id: number): Promise<VocabRow | null> {
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    `SELECT id, term, ipa, zh, note, example, example_zh, ease_factor, interval_days,
+    `SELECT id, term, en, ipa, zh, note, example, example_zh, ease_factor, interval_days,
             repetitions, lapses, due_at, last_reviewed_at, last_grade, 1 AS is_due
        FROM ip_vocab WHERE id = ?`,
     [id],
@@ -1192,6 +1205,20 @@ export async function getVocab(id: number): Promise<VocabRow | null> {
     lapses: Number(r.lapses),
     is_due: Number(r.is_due),
   };
+}
+
+/** 只更新单词的例句 + 英文读法(用于「换个例句」/ 修复中英混杂的旧例句),不动复习进度。 */
+export async function updateVocabExample(
+  id: number,
+  en: string,
+  example: string,
+  exampleZh: string,
+): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    "UPDATE ip_vocab SET en = ?, example = ?, example_zh = ? WHERE id = ?",
+    [en.slice(0, 255), example.slice(0, 4000) || "(no example)", exampleZh.slice(0, 1000), id],
+  );
 }
 
 /** 复习后按 SM-2 更新单词的调度(SQL 侧 DATE_ADD,避免时区漂移)。 */
