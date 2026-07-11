@@ -15,7 +15,7 @@ const MAX_CONTEXT = 2000;
 export async function POST(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
 
-  let body: { text?: unknown; context?: unknown };
+  let body: { text?: unknown; context?: unknown; company?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -25,12 +25,13 @@ export async function POST(req: NextRequest) {
   if (!term) return bad("没有选中要翻译的内容。");
   if (term.length > MAX_TERM) return bad("请选中单个词或短语。");
   const context = typeof body.context === "string" ? body.context.slice(0, MAX_CONTEXT) : "";
+  const company = typeof body.company === "string" ? body.company.slice(0, 120) : "";
 
   try {
-    // 顺带查一下是否已在单词本(失败不影响翻译)。
+    // 顺带查一下是否已在(该公司的)单词本(失败不影响翻译)。
     const [{ en, ipa, zh, note }, inVocab] = await Promise.all([
       translateTerm(term, context),
-      vocabExists(term).catch(() => false),
+      vocabExists(term, company).catch(() => false),
     ]);
     return NextResponse.json({ success: true, en, ipa, zh, note, inVocab });
   } catch (err) {

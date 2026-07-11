@@ -1,8 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+
+// 当前「活动公司」:划词加入单词本时归到这家公司(=当前题目的公司,退回选中的公司筛选)。
+const CompanyContext = createContext<string>("");
+const UNCLASSIFIED = "未分类";
 
 type QuestionType = "concept" | "scenario" | "system-design" | "behavioral";
 
@@ -42,6 +46,7 @@ type BankItem = {
   dueAt: string | null;
   lastReviewedAt: string | null;
   source: string;
+  company: string;
 };
 
 type Progress = {
@@ -58,6 +63,7 @@ type CurrentQuestion = {
   type: QuestionType;
   prompt: string;
   srState?: SrState;
+  company?: string;
 };
 
 type BiText = { zh: string; en: string };
@@ -203,6 +209,9 @@ export default function InterviewPage() {
 
   const [reviewExhausted, setReviewExhausted] = useState(false);
 
+  // 公司筛选:""=全部/总复习;其他=只看/只复习该公司。影响题库列表、复习范围、加词归属。
+  const [companyFilter, setCompanyFilter] = useState("");
+
   const [banks, setBanks] = useState<BankSummary[] | null>(null);
 
   const practiceRef = useRef<HTMLDivElement | null>(null);
@@ -281,7 +290,9 @@ export default function InterviewPage() {
     setReviewExhausted(false);
     setFetchingQuestion(true);
     try {
-      const res = await fetch(`/api/job-hunter/interview/next?sessionId=${sessionId}`);
+      const res = await fetch(
+        `/api/job-hunter/interview/next?sessionId=${sessionId}&company=${encodeURIComponent(companyFilter)}`,
+      );
       const json = await res.json().catch(() => null);
       setFetchingQuestion(false);
       if (!res.ok || !json?.success) {
@@ -313,6 +324,7 @@ export default function InterviewPage() {
       type: item.type,
       prompt: item.prompt,
       srState: item.state,
+      company: item.company,
     });
     setTimeout(() => practiceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   }
@@ -397,7 +409,22 @@ export default function InterviewPage() {
     );
   }
 
+  // 公司维度的派生数据(全部客户端算,数据都在 progress.bank 里)。
+  const bankItems = progress?.bank ?? [];
+  const companyList = Array.from(new Set(bankItems.map((b) => b.company).filter(Boolean))).sort();
+  const scopedBank = companyFilter ? bankItems.filter((b) => b.company === companyFilter) : bankItems;
+  const scopedCounts: SrCounts = {
+    total: scopedBank.length,
+    fresh: scopedBank.filter((b) => b.state === "new").length,
+    due: scopedBank.filter((b) => b.isDue && b.state !== "new").length,
+    later: scopedBank.filter((b) => !b.isDue).length,
+    mastered: scopedBank.filter((b) => b.state === "mastered").length,
+  };
+  // 加词归属的公司:当前题目的公司优先,退回选中的公司筛选。
+  const activeCompany = question?.company || companyFilter;
+
   return (
+    <CompanyContext.Provider value={activeCompany}>
     <main className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
       <div className="mx-auto max-w-3xl px-4 py-12 sm:py-16">
         <Link href={sessionId ? "/job-hunter" : "/"} className="text-sm text-slate-400 hover:text-slate-600">
@@ -438,10 +465,24 @@ export default function InterviewPage() {
 
         {progress && (
           <div className="space-y-6">
-            {/* 复习面板(题库模式):遗忘曲线的今日到期 / 新题 / 已掌握 */}
-            {isBank && progress.srCounts && (
+            {/* 公司筛选:全部(总复习) + 各公司;影响复习范围、题库列表、加词归属 */}
+            {isBank && companyList.length > 0 && (
+              <CompanyBar
+                companies={companyList}
+                selected={companyFilter}
+                counts={bankItems}
+                onSelect={(c) => {
+                  setCompanyFilter(c);
+                  setReviewExhausted(false);
+                }}
+              />
+            )}
+
+            {/* 复习面板(题库模式):遗忘曲线的今日到期 / 新题 / 已掌握(按所选公司) */}
+            {isBank && (
               <ReviewDashboard
-                counts={progress.srCounts}
+                counts={scopedCounts}
+                company={companyFilter}
                 busy={fetchingQuestion || grading}
                 exhausted={reviewExhausted}
                 hasQuestion={!!question}
@@ -453,6 +494,7 @@ export default function InterviewPage() {
               <FundamentalsPanel
                 sessionId={sessionId}
                 count={(progress.bank ?? []).filter((b) => b.source === "fundamentals").length}
+                defaultCompany={companyFilter}
                 onDone={() => loadProgress(sessionId)}
               />
             )}
@@ -535,9 +577,23 @@ export default function InterviewPage() {
               )}
             </div>
 
-            {/* 题库列表(题库模式) */}
+            {/* 题库列表(题库模式;按所选公司筛选,可逐题设公司) */}
             {isBank && progress.bank && progress.bank.length > 0 && (
-              <BankPanel items={progress.bank} onPractice={practiceBankItem} busy={fetchingQuestion || grading} />
+              <BankPanel
+                items={scopedBank}
+                company={companyFilter}
+                companyOptions={companyList}
+                onPractice={practiceBankItem}
+                onSetCompany={async (id, c) => {
+                  await fetch("/api/job-hunter/interview/question-company", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ questionId: id, company: c }),
+                  });
+                  if (sessionId) loadProgress(sessionId);
+                }}
+                busy={fetchingQuestion || grading}
+              />
             )}
 
             {progress.recentAnswers.length > 0 && (
@@ -547,6 +603,7 @@ export default function InterviewPage() {
         )}
       </div>
     </main>
+    </CompanyContext.Provider>
   );
 }
 
@@ -624,6 +681,7 @@ function TranslatableText({
   className?: string;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const company = useContext(CompanyContext); // 加词时归到这家公司的单词本
   // 翻译上下文:传了 text 用 text;否则(用 children 渲染时)取渲染后的纯文本。
   const contextText = () => text ?? ref.current?.textContent ?? "";
   const popRef = useRef<HTMLDivElement | null>(null);
@@ -649,6 +707,7 @@ function TranslatableText({
           ipa: res?.ipa || "",
           zh: res?.zh || "",
           note: res?.note || "",
+          company,
           context: contextText().slice(0, 1000),
         }),
       });
@@ -697,7 +756,7 @@ function TranslatableText({
     fetch("/api/job-hunter/interview/translate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: term, context: contextText().slice(0, 1500) }),
+      body: JSON.stringify({ text: term, company, context: contextText().slice(0, 1500) }),
     })
       .then((r) => r.json())
       .then((j) => {
@@ -1943,22 +2002,32 @@ function HistoryPanel({ answers }: { answers: AnswerSummary[] }) {
 function FundamentalsPanel({
   sessionId,
   count,
+  defaultCompany,
   onDone,
 }: {
   sessionId: number;
   count: number;
+  defaultCompany: string;
   onDone: () => void;
 }) {
   const [topics, setTopics] = useState("");
+  const [company, setCompany] = useState(defaultCompany);
   const [busy, setBusy] = useState<"gen" | "clear" | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // 切换公司筛选时,同步八股文的公司输入(方便「选中某公司→直接给它出八股文」)。
+  useEffect(() => {
+    setCompany(defaultCompany);
+  }, [defaultCompany]);
 
   async function run(action: "gen" | "clear") {
     setBusy(action);
     setError(null);
     try {
       const body =
-        action === "clear" ? { sessionId, clear: true } : { sessionId, topics: topics.trim() };
+        action === "clear"
+          ? { sessionId, clear: true }
+          : { sessionId, topics: topics.trim(), company: company.trim() };
       const res = await fetch("/api/job-hunter/interview/fundamentals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1989,9 +2058,16 @@ function FundamentalsPanel({
         )}
       </div>
       <p className="mt-1 text-xs leading-relaxed text-amber-700">
-        输入想练的技术(逗号分隔),按这些出经典概念题、追加进本题库并按遗忘曲线复习;<b>留空</b>则按这份简历的技术栈自动出。生成较慢(约 1 分钟)。
+        输入想练的技术(逗号分隔),按这些出经典概念题、追加进本题库并按遗忘曲线复习;<b>留空</b>则按这份简历的技术栈自动出。填「公司」这批就归到那家公司(可按公司复习)。生成较慢(约 1 分钟)。
       </p>
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+      <input
+        value={company}
+        onChange={(e) => setCompany(e.target.value)}
+        placeholder="公司(可选,如 RouterTech;这批题归到这家公司)"
+        disabled={!!busy}
+        className="mt-3 w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400 disabled:bg-slate-50"
+      />
+      <div className="mt-2 flex flex-col gap-2 sm:flex-row">
         <input
           value={topics}
           onChange={(e) => setTopics(e.target.value)}
@@ -2081,14 +2157,56 @@ function BankPicker({ banks }: { banks: BankSummary[] | null }) {
   );
 }
 
+/** 公司筛选条:选「全部」= 总复习;选某公司 = 只复习/只看这家。 */
+function CompanyBar({
+  companies,
+  selected,
+  counts,
+  onSelect,
+}: {
+  companies: string[];
+  selected: string;
+  counts: BankItem[];
+  onSelect: (c: string) => void;
+}) {
+  const dueOf = (co: string) => counts.filter((b) => (co === "" || b.company === co) && b.isDue).length;
+  const chip = (label: string, value: string) => {
+    const active = selected === value;
+    const due = dueOf(value);
+    return (
+      <button
+        key={value || "__all__"}
+        onClick={() => onSelect(value)}
+        className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+          active ? "bg-indigo-600 text-white" : "border border-slate-200 text-slate-600 hover:border-indigo-300"
+        }`}
+      >
+        {label}
+        {due > 0 && <span className={`ml-1 ${active ? "text-indigo-100" : "text-rose-500"}`}>· {due}</span>}
+      </button>
+    );
+  };
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+      <p className="mb-2 text-xs font-semibold text-slate-500">🏢 按公司复习（选「全部」= 总复习；徽标 = 待复习数）</p>
+      <div className="flex flex-wrap gap-1.5">
+        {chip("全部", "")}
+        {companies.map((c) => chip(c, c))}
+      </div>
+    </div>
+  );
+}
+
 function ReviewDashboard({
   counts,
+  company,
   busy,
   exhausted,
   hasQuestion,
   onStart,
 }: {
   counts: SrCounts;
+  company?: string;
   busy: boolean;
   exhausted: boolean;
   hasQuestion: boolean;
@@ -2098,7 +2216,9 @@ function ReviewDashboard({
   return (
     <div className="rounded-2xl border border-indigo-200 bg-gradient-to-b from-indigo-50/70 to-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-semibold text-indigo-900">🧠 遗忘曲线复习</p>
+        <p className="text-sm font-semibold text-indigo-900">
+          🧠 遗忘曲线复习{company ? `· ${company}` : "· 总复习"}
+        </p>
         <span className="text-xs text-slate-400">共 {counts.total} 题</span>
       </div>
       <div className="mt-3 grid grid-cols-4 gap-2 text-center">
@@ -2153,18 +2273,100 @@ function Stat({
   );
 }
 
+/** 题库列表里逐题设/改「公司」标签(datalist 复用已有公司)。 */
+function QuestionCompanyEditor({
+  id,
+  company,
+  onSet,
+}: {
+  id: number;
+  company: string;
+  onSet: (id: number, company: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(company);
+  useEffect(() => setVal(company), [company]);
+
+  if (editing) {
+    const save = () => {
+      onSet(id, val.trim());
+      setEditing(false);
+    };
+    return (
+      <span className="inline-flex items-center gap-1">
+        <input
+          list="bank-company-options"
+          value={val}
+          autoFocus
+          onChange={(e) => setVal(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") save();
+            if (e.key === "Escape") {
+              setVal(company);
+              setEditing(false);
+            }
+          }}
+          placeholder="公司名"
+          className="w-28 rounded border border-indigo-300 px-1 py-0.5 text-[11px] outline-none"
+        />
+        <button onClick={save} className="text-[11px] font-medium text-indigo-600">
+          存
+        </button>
+        <button
+          onClick={() => {
+            setVal(company);
+            setEditing(false);
+          }}
+          className="text-[11px] text-slate-400"
+        >
+          ×
+        </button>
+      </span>
+    );
+  }
+  return company ? (
+    <button
+      onClick={() => setEditing(true)}
+      title="点击改公司"
+      className="rounded bg-indigo-50 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100"
+    >
+      🏢 {company}
+    </button>
+  ) : (
+    <button
+      onClick={() => setEditing(true)}
+      className="rounded border border-dashed border-slate-300 px-1.5 py-0.5 text-[11px] text-slate-400 transition hover:border-indigo-300 hover:text-indigo-600"
+    >
+      ＋公司
+    </button>
+  );
+}
+
 function BankPanel({
   items,
+  company,
+  companyOptions,
   onPractice,
+  onSetCompany,
   busy,
 }: {
   items: BankItem[];
+  company: string;
+  companyOptions: string[];
   onPractice: (i: BankItem) => void;
+  onSetCompany: (id: number, company: string) => void;
   busy: boolean;
 }) {
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <p className="text-sm font-semibold text-slate-800">题库（{items.length} 题 · 按遗忘曲线复习）</p>
+      <p className="text-sm font-semibold text-slate-800">
+        题库（{items.length} 题{company ? ` · ${company}` : " · 全部"} · 按遗忘曲线复习）
+      </p>
+      <datalist id="bank-company-options">
+        {companyOptions.map((c) => (
+          <option key={c} value={c} />
+        ))}
+      </datalist>
       <div className="mt-3 space-y-2">
         {items.map((it) => (
           <div
@@ -2179,6 +2381,7 @@ function BankPanel({
                 <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500">
                   {TYPE_LABEL[it.type]}
                 </span>
+                <QuestionCompanyEditor id={it.id} company={it.company} onSet={onSetCompany} />
                 {it.source === "fundamentals" && (
                   <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">
                     八股
@@ -2345,6 +2548,7 @@ function KbManager() {
 type VocabItem = {
   id: number;
   term: string;
+  company: string;
   en: string;
   ipa: string;
   zh: string;
@@ -2374,7 +2578,18 @@ function VocabManager() {
   const [grading, setGrading] = useState(false);
   const [regenId, setRegenId] = useState<number | null>(null);
   const [lastLabel, setLastLabel] = useState<string | null>(null);
+  const [vocabCompany, setVocabCompany] = useState(""); // ""=全部/总;否则只看该公司的词
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // 按公司筛词 + 客户端算计数(词都在 words 里)。
+  const companyOptions = Array.from(new Set(words.map((w) => w.company).filter(Boolean))).sort();
+  const filteredWords = vocabCompany ? words.filter((w) => w.company === vocabCompany) : words;
+  const scopedCounts = {
+    total: filteredWords.length,
+    due: filteredWords.filter((w) => w.isDue).length,
+    fresh: filteredWords.filter((w) => w.state === "new").length,
+    mastered: filteredWords.filter((w) => w.state === "mastered").length,
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -2411,7 +2626,7 @@ function VocabManager() {
   }
 
   function startReview() {
-    const due = words.filter((w) => w.isDue);
+    const due = filteredWords.filter((w) => w.isDue);
     if (!due.length) {
       setMsg("今日没有到期的单词 🎉");
       return;
@@ -2506,20 +2721,46 @@ function VocabManager() {
   return (
     <div className="w-full rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-semibold text-slate-800">📓 单词本 · 遗忘曲线复习</p>
+        <p className="text-sm font-semibold text-slate-800">
+          📓 单词本 · 遗忘曲线复习{vocabCompany ? ` · ${vocabCompany}` : " · 全部"}
+        </p>
         <button onClick={() => setOpen(false)} className="text-xs text-slate-400 hover:text-slate-600">
           收起
         </button>
       </div>
 
-      {counts && (
-        <div className="mt-3 grid grid-cols-4 gap-2 text-center">
-          <Stat label="待复习" value={counts.due} tone="rose" />
-          <Stat label="新词" value={counts.fresh} tone="sky" />
-          <Stat label="已掌握" value={counts.mastered} tone="emerald" />
-          <Stat label="总数" value={counts.total} tone="slate" />
+      {/* 按公司筛词(全部=总;每家一个本) */}
+      {companyOptions.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {["", ...companyOptions].map((c) => {
+            const active = vocabCompany === c;
+            const n = (c ? words.filter((w) => w.company === c) : words).filter((w) => w.isDue).length;
+            return (
+              <button
+                key={c || "__all__"}
+                onClick={() => {
+                  setVocabCompany(c);
+                  setQueue([]);
+                  setMsg(null);
+                }}
+                className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
+                  active ? "bg-indigo-600 text-white" : "border border-slate-200 text-slate-600 hover:border-indigo-300"
+                }`}
+              >
+                {c || "全部"}
+                {n > 0 && <span className={`ml-1 ${active ? "text-indigo-100" : "text-rose-500"}`}>· {n}</span>}
+              </button>
+            );
+          })}
         </div>
       )}
+
+      <div className="mt-3 grid grid-cols-4 gap-2 text-center">
+        <Stat label="待复习" value={scopedCounts.due} tone="rose" />
+        <Stat label="新词" value={scopedCounts.fresh} tone="sky" />
+        <Stat label="已掌握" value={scopedCounts.mastered} tone="emerald" />
+        <Stat label="总数" value={scopedCounts.total} tone="slate" />
+      </div>
 
       {msg && <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">{msg}</p>}
 
@@ -2611,22 +2852,27 @@ function VocabManager() {
         <div className="mt-4">
           <button
             onClick={startReview}
-            disabled={loading || !counts || counts.due === 0}
+            disabled={loading || scopedCounts.due === 0}
             className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {counts && counts.due > 0 ? `开始复习（${counts.due} 待复习）` : "暂无到期单词"}
+            {scopedCounts.due > 0
+              ? `开始复习（${scopedCounts.due} 待复习${vocabCompany ? " · " + vocabCompany : ""}）`
+              : "暂无到期单词"}
           </button>
         </div>
       )}
 
-      {words.length > 0 && (
+      {filteredWords.length > 0 && (
         <div className="mt-4 border-t border-slate-100 pt-3">
-          <p className="text-xs font-semibold text-slate-500">全部单词（{words.length}）</p>
+          <p className="text-xs font-semibold text-slate-500">
+            {vocabCompany ? `${vocabCompany} 的单词` : "全部单词"}（{filteredWords.length}）
+          </p>
           <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto">
-            {words.map((w) => (
+            {filteredWords.map((w) => (
               <li key={w.id} className="flex items-center justify-between gap-2 text-sm">
                 <span className="min-w-0 truncate">
                   <span className="font-medium text-slate-700">{w.term}</span>
+                  {w.company && <span className="ml-1.5 text-[10px] text-indigo-500">🏢{w.company}</span>}
                   <span className="ml-2 text-xs text-slate-400">{w.zh}</span>
                   <span className={`ml-2 rounded px-1 py-0.5 text-[10px] font-medium ${SR_STATE_CLASS[w.state]}`}>
                     {SR_STATE_LABEL[w.state]}

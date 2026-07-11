@@ -27,7 +27,7 @@ const MAX_TOPICS = 200;
 export async function POST(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
 
-  let body: { sessionId?: unknown; topics?: unknown; clear?: unknown };
+  let body: { sessionId?: unknown; topics?: unknown; clear?: unknown; company?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -36,6 +36,7 @@ export async function POST(req: NextRequest) {
   const sessionId = Number(body.sessionId);
   if (!Number.isInteger(sessionId) || sessionId <= 0) return bad("缺少 sessionId。");
   const topics = typeof body.topics === "string" ? body.topics.trim().slice(0, MAX_TOPICS) : "";
+  const company = typeof body.company === "string" ? body.company.trim().slice(0, 120) : "";
 
   try {
     const session = await getSession(sessionId);
@@ -73,7 +74,7 @@ export async function POST(req: NextRequest) {
       })
       .filter((x): x is NonNullable<typeof x> => x !== null);
 
-    const added = await insertBankQuestions(sessionId, items, "fundamentals");
+    const added = await insertBankQuestions(sessionId, items, "fundamentals", company);
     const total = await countFundamentals(sessionId);
     return NextResponse.json({ success: true, added, count: total });
   } catch (err) {

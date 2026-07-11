@@ -43,6 +43,7 @@ export async function GET(req: NextRequest) {
       dueAt: b.due_at,
       lastReviewedAt: b.last_reviewed_at,
       source: b.source,
+      company: b.company,
     }));
     return NextResponse.json({
       success: true,

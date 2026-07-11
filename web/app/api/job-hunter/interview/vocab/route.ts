@@ -24,6 +24,7 @@ export async function GET(req: NextRequest) {
       ipa: w.ipa,
       zh: w.zh,
       note: w.note,
+      company: w.company,
       example: w.example,
       exampleZh: w.example_zh,
       demo: w.demo ?? "",
@@ -43,7 +44,15 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
 
-  let body: { term?: unknown; en?: unknown; ipa?: unknown; zh?: unknown; note?: unknown; context?: unknown };
+  let body: {
+    term?: unknown;
+    en?: unknown;
+    ipa?: unknown;
+    zh?: unknown;
+    note?: unknown;
+    context?: unknown;
+    company?: unknown;
+  };
   try {
     body = await req.json();
   } catch {
@@ -57,6 +66,7 @@ export async function POST(req: NextRequest) {
   const zh = typeof body.zh === "string" ? body.zh : "";
   const note = typeof body.note === "string" ? body.note : "";
   const context = typeof body.context === "string" ? body.context.slice(0, MAX_CONTEXT) : "";
+  const company = typeof body.company === "string" ? body.company.slice(0, 120) : "";
 
   try {
     const gen = await generateVocabExample(term, en, zh, context);
@@ -64,6 +74,7 @@ export async function POST(req: NextRequest) {
     const enOut = en.trim() || gen.en;
     const { id, existed } = await addVocab({
       term,
+      company,
       en: enOut,
       ipa,
       zh,

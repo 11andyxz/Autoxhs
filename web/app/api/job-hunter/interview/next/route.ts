@@ -17,12 +17,14 @@ export async function GET(req: NextRequest) {
 
   const sessionId = Number(req.nextUrl.searchParams.get("sessionId"));
   if (!Number.isInteger(sessionId) || sessionId <= 0) return bad("缺少 sessionId。");
+  // company 非空=只复习该公司的题;""=总复习(全部)。
+  const company = (req.nextUrl.searchParams.get("company") || "").slice(0, 120);
 
   try {
     const session = await getSession(sessionId);
     if (!session) return bad("训练会话不存在。", 404);
 
-    const [card, counts] = await Promise.all([getNextCard(sessionId), getSrCounts(sessionId)]);
+    const [card, counts] = await Promise.all([getNextCard(sessionId, company), getSrCounts(sessionId)]);
     if (!card) {
       return NextResponse.json({ success: true, card: null, counts });
     }
@@ -34,6 +36,7 @@ export async function GET(req: NextRequest) {
         skill: { id: card.skill_id, name: card.skill, category: card.category },
         type: card.type,
         prompt: card.prompt,
+        company: card.company,
         srState: srState({ reviewed: card.last_reviewed_at != null, interval_days: card.interval_days }),
       },
     });

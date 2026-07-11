@@ -79,7 +79,9 @@ export function ensureInterviewSchema(): Promise<void> {
         prompt MEDIUMTEXT NOT NULL,
         reference_answer MEDIUMTEXT NOT NULL,
         rubric_json JSON NOT NULL,
+        company VARCHAR(120) NOT NULL DEFAULT '',
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_ip_q_company (session_id, company),
         CONSTRAINT fk_ip_q_session FOREIGN KEY (session_id) REFERENCES ip_session(id) ON DELETE CASCADE,
         CONSTRAINT fk_ip_q_skill FOREIGN KEY (skill_id) REFERENCES ip_skill(id) ON DELETE CASCADE
       )
@@ -121,7 +123,8 @@ export function ensureInterviewSchema(): Promise<void> {
       CREATE TABLE IF NOT EXISTS ip_vocab (
         id INT AUTO_INCREMENT PRIMARY KEY,
         term VARCHAR(255) NOT NULL,
-        term_norm VARCHAR(255) NOT NULL UNIQUE,
+        term_norm VARCHAR(255) NOT NULL,
+        company VARCHAR(120) NOT NULL DEFAULT '',
         en VARCHAR(255) NOT NULL DEFAULT '',
         ipa VARCHAR(255) NOT NULL DEFAULT '',
         zh VARCHAR(500) NOT NULL DEFAULT '',
@@ -138,6 +141,7 @@ export function ensureInterviewSchema(): Promise<void> {
         last_reviewed_at DATETIME NULL,
         last_grade VARCHAR(10) NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uniq_term_company (term_norm, company),
         INDEX idx_ip_vocab_due (due_at)
       )
     `);
@@ -329,6 +333,26 @@ export function ensureInterviewSchema(): Promise<void> {
         "ER_DUP_FIELDNAME",
       ]);
       await markMigrationDone("ip_explain_extras_v2");
+    }
+
+    // ---- 迁移 ip_company_v1:题目 + 单词本按「公司」分类。
+    // 单词本改成 (term_norm, company) 复合唯一——同一个词可分别进不同公司的单词本(各自复习进度)。
+    if (!(await migrationDone("ip_company_v1"))) {
+      await execIgnoring("ALTER TABLE ip_question ADD COLUMN company VARCHAR(120) NOT NULL DEFAULT ''", [
+        "ER_DUP_FIELDNAME",
+      ]);
+      await execIgnoring("ALTER TABLE ip_question ADD INDEX idx_ip_q_company (session_id, company)", [
+        "ER_DUP_KEYNAME",
+      ]);
+      await execIgnoring("ALTER TABLE ip_vocab ADD COLUMN company VARCHAR(120) NOT NULL DEFAULT ''", [
+        "ER_DUP_FIELDNAME",
+      ]);
+      // 旧的 term_norm 单列唯一 → 换成 (term_norm, company) 复合唯一。
+      await execIgnoring("ALTER TABLE ip_vocab DROP INDEX term_norm", ["ER_CANT_DROP_FIELD_OR_KEY"]);
+      await execIgnoring("ALTER TABLE ip_vocab ADD UNIQUE KEY uniq_term_company (term_norm, company)", [
+        "ER_DUP_KEYNAME",
+      ]);
+      await markMigrationDone("ip_company_v1");
     }
 
     // ---- 迁移 ip_coach_sr_v1:讲解也纳入遗忘曲线(SM-2 + 理解度%)所需的列。
@@ -614,9 +638,11 @@ export async function insertBankQuestions(
   sessionId: number,
   items: BankInsertItem[],
   source: "bank" | "fundamentals" = "bank",
+  company = "",
 ): Promise<number> {
   if (!items.length) return 0;
   const p = getPool();
+  const co = company.slice(0, 120);
   const values = items.map((q) => [
     sessionId,
     q.skillId,
@@ -625,10 +651,11 @@ export async function insertBankQuestions(
     q.referenceAnswer,
     JSON.stringify(q.rubric),
     source,
+    co,
   ]);
   const [res] = await p.query<ResultSetHeader>(
-    "INSERT INTO ip_question (session_id, skill_id, type, prompt, reference_answer, rubric_json, source, due_at) VALUES " +
-      values.map(() => "(?, ?, ?, ?, ?, ?, ?, NOW())").join(", "),
+    "INSERT INTO ip_question (session_id, skill_id, type, prompt, reference_answer, rubric_json, source, company, due_at) VALUES " +
+      values.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, NOW())").join(", "),
     values.flat(),
   );
   return res.affectedRows ?? items.length;
@@ -668,31 +695,42 @@ export type NextCardRow = {
   prompt: string;
   interval_days: number;
   last_reviewed_at: string | null;
+  company: string;
 };
 
 /**
  * 取下一张要复习的卡:优先已到期的复习题(复习过 且 due_at<=NOW(),先到期先复习),
  * 其次未练过的新题(last_reviewed_at 为空),都没有则返回 null(今日已清空)。
+ * company 非空时只在该公司范围内取(""=总复习/全部)。
  * 注意:用 last_reviewed_at 判断新题——答砸后 SM-2 会把 repetitions 归零,
  * 若按 repetitions=0 判断,重学中的失败卡会被误当新题、无视 due_at 立刻重现。
  */
-export async function getNextCard(sessionId: number): Promise<NextCardRow | null> {
+export async function getNextCard(sessionId: number, company = ""): Promise<NextCardRow | null> {
   const p = getPool();
+  const companyClause = company ? "AND q.company = ?" : "";
+  const params = company ? [sessionId, company] : [sessionId];
   const [rows] = await p.query<RowDataPacket[]>(
     `SELECT q.id, q.skill_id, s.name AS skill, s.category, q.type, q.prompt,
-            q.interval_days, q.last_reviewed_at
+            q.interval_days, q.last_reviewed_at, q.company
        FROM ip_question q
        JOIN ip_skill s ON s.id = q.skill_id
       WHERE q.session_id = ?
         AND (q.last_reviewed_at IS NULL OR q.due_at IS NULL OR q.due_at <= NOW())
+        ${companyClause}
       ORDER BY (q.last_reviewed_at IS NOT NULL AND q.due_at IS NOT NULL AND q.due_at <= NOW()) DESC,
                q.due_at ASC, q.id ASC
       LIMIT 1`,
-    [sessionId],
+    params,
   );
   const r = rows[0] as NextCardRow | undefined;
   if (!r) return null;
   return { ...r, interval_days: Number(r.interval_days) };
+}
+
+/** 逐题设置/修改「公司」标签(空字符串=未分类)。 */
+export async function setQuestionCompany(questionId: number, company: string): Promise<void> {
+  const p = getPool();
+  await p.execute("UPDATE ip_question SET company = ? WHERE id = ?", [company.slice(0, 120), questionId]);
 }
 
 export type BankItemRow = {
@@ -709,6 +747,7 @@ export type BankItemRow = {
   due_at: string | null;
   last_reviewed_at: string | null;
   source: string;
+  company: string;
   is_due: number; // 1 = 已到期/可复习
 };
 
@@ -718,7 +757,7 @@ export async function getBankList(sessionId: number): Promise<BankItemRow[]> {
   const [rows] = await p.execute<RowDataPacket[]>(
     `SELECT q.id, q.skill_id, s.name AS skill, s.category, q.type, q.prompt,
             q.repetitions, q.interval_days, q.lapses, q.last_score,
-            q.due_at, q.last_reviewed_at, q.source,
+            q.due_at, q.last_reviewed_at, q.source, q.company,
             (q.last_reviewed_at IS NULL OR q.due_at IS NULL OR q.due_at <= NOW()) AS is_due
        FROM ip_question q
        JOIN ip_skill s ON s.id = q.skill_id
@@ -1236,6 +1275,7 @@ export async function hasKb(): Promise<boolean> {
 export type VocabRow = {
   id: number;
   term: string;
+  company: string;
   en: string;
   ipa: string;
   zh: string;
@@ -1258,9 +1298,10 @@ function vocabNorm(term: string): string {
   return term.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 255);
 }
 
-/** 加入单词本(按归一化词去重:已存在则刷新音标/释义/例句,但保留复习进度)。 */
+/** 加入单词本(按「归一化词+公司」去重:同词同公司刷新内容保留进度;不同公司各存一份)。 */
 export async function addVocab(v: {
   term: string;
+  company: string;
   en: string;
   ipa: string;
   zh: string;
@@ -1273,14 +1314,16 @@ export async function addVocab(v: {
   await ensureInterviewSchema();
   const p = getPool();
   const norm = vocabNorm(v.term);
+  const co = v.company.slice(0, 120);
   const [res] = await p.execute<ResultSetHeader>(
-    `INSERT INTO ip_vocab (term, term_norm, en, ipa, zh, note, example, example_zh, demo, demo_note, due_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    `INSERT INTO ip_vocab (term, term_norm, company, en, ipa, zh, note, example, example_zh, demo, demo_note, due_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
      ON DUPLICATE KEY UPDATE en = VALUES(en), ipa = VALUES(ipa), zh = VALUES(zh), note = VALUES(note),
        example = VALUES(example), example_zh = VALUES(example_zh), demo = VALUES(demo), demo_note = VALUES(demo_note)`,
     [
       v.term.trim().slice(0, 255),
       norm,
+      co,
       v.en.slice(0, 255),
       v.ipa.slice(0, 255),
       v.zh.slice(0, 500),
@@ -1292,27 +1335,30 @@ export async function addVocab(v: {
     ],
   );
   const existed = res.affectedRows === 2; // mysql: 1=插入,2=更新已存在行
-  const [rows] = await p.execute<RowDataPacket[]>("SELECT id FROM ip_vocab WHERE term_norm = ?", [norm]);
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT id FROM ip_vocab WHERE term_norm = ? AND company = ?",
+    [norm, co],
+  );
   return { id: Number(rows[0]?.id ?? res.insertId), existed };
 }
 
-/** 该词是否已在单词本(按归一化词判断);划词浮层用它显示「已加入」。 */
-export async function vocabExists(term: string): Promise<boolean> {
+/** 该词是否已在(该公司的)单词本;划词浮层用它显示「已加入」。 */
+export async function vocabExists(term: string, company = ""): Promise<boolean> {
   await ensureInterviewSchema();
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    "SELECT 1 FROM ip_vocab WHERE term_norm = ? LIMIT 1",
-    [vocabNorm(term)],
+    "SELECT 1 FROM ip_vocab WHERE term_norm = ? AND company = ? LIMIT 1",
+    [vocabNorm(term), company.slice(0, 120)],
   );
   return rows.length > 0;
 }
 
-/** 全部生词(复习题先、按到期排序);is_due=1 表示现在可复习(新词或已到期)。 */
+/** 全部生词(复习题先、按到期排序);is_due=1 表示现在可复习(新词或已到期)。带 company,前端按公司筛。 */
 export async function listVocab(): Promise<VocabRow[]> {
   await ensureInterviewSchema();
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    `SELECT id, term, en, ipa, zh, note, example, example_zh, demo, demo_note, ease_factor, interval_days,
+    `SELECT id, term, company, en, ipa, zh, note, example, example_zh, demo, demo_note, ease_factor, interval_days,
             repetitions, lapses, due_at, last_reviewed_at, last_grade,
             (last_reviewed_at IS NULL OR due_at IS NULL OR due_at <= NOW()) AS is_due
        FROM ip_vocab
