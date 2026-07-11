@@ -2718,7 +2718,9 @@ function VocabManager() {
   // 英文读法 ≠ 原词(即选中的是中文/符号):音标应挂在「读作」行,而不是原词后面。
   const enDiffers = !!cur?.en && cur.en.toLowerCase() !== cur.term.trim().toLowerCase();
 
+  // 单词本内划词加词,归到单词本当前选中的公司(而不是外层页面的活动公司)。
   return (
+    <CompanyContext.Provider value={vocabCompany}>
     <div className="w-full rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
         <p className="text-sm font-semibold text-slate-800">
@@ -2888,5 +2890,6 @@ function VocabManager() {
       )}
       {loading && <p className="mt-2 text-xs text-slate-400">加载中…</p>}
     </div>
+    </CompanyContext.Provider>
   );
 }
