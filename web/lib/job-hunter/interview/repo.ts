@@ -1073,13 +1073,18 @@ export async function saveExplainExtras(questionId: number, extras: ExplainExtra
   ]);
 }
 
-/** 重新生成讲解时,连附加料一起清掉(下次自动重生)。 */
+/**
+ * 重新生成讲解时,连附加料一起清掉(下次自动重生)。
+ * 也删掉追问笔记:笔记按位置 diagram_ord 挂在旧图上,重生后图全变了,旧笔记要么错位到无关新图、
+ * 要么(新图更少时)永远显示不出来也删不掉。旧图的内容已不存在,笔记本就作废,一并清掉。
+ */
 export async function clearExplainExtras(questionId: number): Promise<void> {
   const p = getPool();
   await p.execute(
     "UPDATE ip_explain SET keywords_json = NULL, diagrams_json = NULL WHERE question_id = ?",
     [questionId],
   );
+  await p.execute("DELETE FROM ip_explain_note WHERE question_id = ?", [questionId]);
 }
 
 /* ---------------- 追问笔记(对某张示意图追问后「添加」的答案) ---------------- */

@@ -1679,6 +1679,7 @@ function DiagramCard({
 }) {
   const [asking, setAsking] = useState(false);
   const [question, setQuestion] = useState("");
+  const [answeredQ, setAnsweredQ] = useState(""); // 产生当前答案的那个问题(冻结,防之后编辑输入框导致 Q/A 错配)
   const [loading, setLoading] = useState(false);
   const [answer, setAnswer] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -1695,8 +1696,10 @@ function DiagramCard({
         body: JSON.stringify({ questionId, diagramOrd, question: q }),
       });
       const j = await r.json().catch(() => null);
+      setAnsweredQ(q);
       setAnswer(r.ok && j?.success ? j.answer : j?.error || "回答失败,请重试");
     } catch {
+      setAnsweredQ(q);
       setAnswer("网络异常,请重试");
     } finally {
       setLoading(false);
@@ -1706,7 +1709,7 @@ function DiagramCard({
   async function addNote() {
     if (!answer || adding) return;
     setAdding(true);
-    const text = `Q: ${question.trim()}\nA: ${answer}`;
+    const text = `Q: ${answeredQ}\nA: ${answer}`;
     try {
       const r = await fetch("/api/job-hunter/interview/explain/note", {
         method: "POST",
