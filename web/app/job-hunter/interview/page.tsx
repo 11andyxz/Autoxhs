@@ -1419,11 +1419,72 @@ function CoachCard({
   const [rated, setRated] = useState<{ pct: number; label: string } | null>(null);
   const isQuestion = kind === "question";
 
+  // —— 讲解「附加料」:关键词 + SVG 示意图 + 异步意象配图 ——
+  const [extras, setExtras] = useState<{
+    keywords: { term: string; note: string }[];
+    diagrams: { svg: string; caption: string }[];
+    imageCaptions: string[];
+  } | null>(null);
+  const [extrasLoading, setExtrasLoading] = useState(false);
+  const [imgReady, setImgReady] = useState<Set<number>>(new Set());
+  const [imgFailed, setImgFailed] = useState<Set<number>>(new Set());
+
   // 换目标时:滑块默认到上次理解度(或 60),清掉本次评分结果。
   useEffect(() => {
     setPct(sr?.lastPct ?? 60);
     setRated(null);
   }, [targetId, kind, sr?.lastPct]);
+
+  // 讲解文字就绪后(仅单题讲解):拉附加料 → 逐张把缺的配图生成出来(异步,不挡文字)。
+  const lessonKey = coach?.lesson;
+  useEffect(() => {
+    if (!isQuestion || !targetId || !lessonKey || loading) return;
+    let cancelled = false;
+    setExtras(null);
+    setImgReady(new Set());
+    setImgFailed(new Set());
+    setExtrasLoading(true);
+    (async () => {
+      try {
+        const r = await fetch("/api/job-hunter/interview/explain/extras", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ questionId: targetId }),
+        });
+        const j = await r.json().catch(() => null);
+        if (cancelled) return;
+        setExtrasLoading(false);
+        if (!r.ok || !j?.success) return;
+        const captions: string[] = (j.imagePlan ?? []).map((p: { caption?: string }) => p.caption ?? "");
+        setExtras({ keywords: j.keywords ?? [], diagrams: j.diagrams ?? [], imageCaptions: captions });
+        const ready = new Set<number>((j.readyOrds ?? []) as number[]);
+        setImgReady(new Set(ready));
+        // 逐张生成缺失的配图(串行,避免并发打满生图额度);每张好了就显示。
+        for (let ord = 0; ord < captions.length; ord++) {
+          if (cancelled) return;
+          if (ready.has(ord)) continue;
+          try {
+            const ir = await fetch("/api/job-hunter/interview/explain/image", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ questionId: targetId, ord }),
+            });
+            const ij = await ir.json().catch(() => null);
+            if (cancelled) return;
+            if (ir.ok && ij?.success) setImgReady((prev) => new Set(prev).add(ord));
+            else setImgFailed((prev) => new Set(prev).add(ord));
+          } catch {
+            if (!cancelled) setImgFailed((prev) => new Set(prev).add(ord));
+          }
+        }
+      } catch {
+        if (!cancelled) setExtrasLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isQuestion, targetId, lessonKey, loading]);
 
   async function rate() {
     if (!targetId) return;
@@ -1510,6 +1571,80 @@ function CoachCard({
             <p className="text-xs font-semibold text-slate-500">练习题（可划词翻译）</p>
             <TranslatableText text={coach.practiceQuestion} className="mt-1 whitespace-pre-wrap" />
           </div>
+
+          {/* 附加料:面试关键词 + SVG 示意图 + 异步意象配图(仅单题讲解) */}
+          {isQuestion && (extrasLoading || extras) && (
+            <div className="space-y-3">
+              {extras && extras.keywords.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-slate-500">🗣️ 面试官爱听的关键词</p>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {extras.keywords.map((k, i) => (
+                      <span
+                        key={i}
+                        title={k.note}
+                        className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-xs"
+                      >
+                        <span className="font-semibold text-amber-800">{k.term}</span>
+                        {k.note && <span className="ml-1 text-amber-700/70">· {k.note}</span>}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {extras && extras.diagrams.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-slate-500">📊 示意图</p>
+                  <div className="mt-1.5 space-y-2">
+                    {extras.diagrams.map((d, i) => (
+                      <div key={i} className="overflow-x-auto rounded-xl border border-slate-100 bg-white p-2">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(d.svg)}`}
+                          alt={d.caption || "示意图"}
+                          className="mx-auto max-w-full"
+                        />
+                        {d.caption && <p className="mt-1 text-xs text-slate-400">{d.caption}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {extras && extras.imageCaptions.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-slate-500">🖼️ 配图（自动生成，稍等片刻）</p>
+                  <div className="mt-1.5 grid grid-cols-2 gap-2">
+                    {extras.imageCaptions.map((cap, ord) => (
+                      <div key={ord} className="rounded-xl border border-slate-100 bg-white p-2">
+                        {imgReady.has(ord) ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={`/api/job-hunter/interview/explain/image/raw?questionId=${targetId}&ord=${ord}`}
+                            alt={cap || "配图"}
+                            className="w-full rounded"
+                          />
+                        ) : imgFailed.has(ord) ? (
+                          <div className="flex h-28 items-center justify-center text-xs text-rose-400">这张没生成成功</div>
+                        ) : (
+                          <div className="flex h-28 items-center justify-center gap-1.5 text-xs text-slate-400">
+                            <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-cyan-500" />
+                            生成中…
+                          </div>
+                        )}
+                        {cap && <p className="mt-1 text-xs text-slate-400">{cap}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {extrasLoading && !extras && (
+                <p className="text-xs text-slate-400">正在整理面试关键词 / 示意图…</p>
+              )}
+            </div>
+          )}
 
           {/* 理解度滑块 → 遗忘曲线复习 */}
           <div className="mt-1 rounded-xl border border-cyan-100 bg-white/70 p-3">

@@ -2,7 +2,7 @@ import type { RowDataPacket, ResultSetHeader } from "mysql2";
 
 import { getPool } from "@/lib/serviceFee/db";
 
-import type { Coach, Grade, QuestionType } from "./schema";
+import type { Coach, ExplainExtras, Grade, QuestionType } from "./schema";
 
 /**
  * 面试训练的持久化层。复用收费计算器的同一个 MySQL 连接池(getPool),
@@ -169,6 +169,9 @@ export function ensureInterviewSchema(): Promise<void> {
         lesson MEDIUMTEXT NOT NULL,
         model_answer MEDIUMTEXT NOT NULL,
         practice_question MEDIUMTEXT NOT NULL,
+        keywords_json MEDIUMTEXT NULL,
+        diagrams_json MEDIUMTEXT NULL,
+        image_plan_json MEDIUMTEXT NULL,
         ease_factor DECIMAL(4,2) NOT NULL DEFAULT 2.50,
         interval_days INT NOT NULL DEFAULT 0,
         repetitions INT NOT NULL DEFAULT 0,
@@ -179,6 +182,19 @@ export function ensureInterviewSchema(): Promise<void> {
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         CONSTRAINT fk_ip_explain_q FOREIGN KEY (question_id) REFERENCES ip_question(id) ON DELETE CASCADE
+      )
+    `);
+
+    // 讲解的「意象配图」(gpt-image 生成,base64 存库;每题 N 张,ord 区分)。异步生成、可持久化。
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS ip_explain_image (
+        question_id INT NOT NULL,
+        ord INT NOT NULL,
+        caption VARCHAR(500) NOT NULL DEFAULT '',
+        b64 LONGTEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (question_id, ord),
+        CONSTRAINT fk_ip_explain_img_q FOREIGN KEY (question_id) REFERENCES ip_question(id) ON DELETE CASCADE
       )
     `);
 
@@ -268,6 +284,29 @@ export function ensureInterviewSchema(): Promise<void> {
         ["ER_DUP_FIELDNAME"],
       );
       await markMigrationDone("ip_vocab_demo_v1");
+    }
+
+    // ---- 迁移 ip_explain_extras_v1:讲解附加料(关键词/SVG示意图/生图计划)所需的列 + 配图表。
+    if (!(await migrationDone("ip_explain_extras_v1"))) {
+      for (const col of [
+        "ADD COLUMN keywords_json MEDIUMTEXT NULL",
+        "ADD COLUMN diagrams_json MEDIUMTEXT NULL",
+        "ADD COLUMN image_plan_json MEDIUMTEXT NULL",
+      ]) {
+        await execIgnoring(`ALTER TABLE ip_explain ${col}`, ["ER_DUP_FIELDNAME"]);
+      }
+      await p.query(`
+        CREATE TABLE IF NOT EXISTS ip_explain_image (
+          question_id INT NOT NULL,
+          ord INT NOT NULL,
+          caption VARCHAR(500) NOT NULL DEFAULT '',
+          b64 LONGTEXT NOT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (question_id, ord),
+          CONSTRAINT fk_ip_explain_img_q FOREIGN KEY (question_id) REFERENCES ip_question(id) ON DELETE CASCADE
+        )
+      `);
+      await markMigrationDone("ip_explain_extras_v1");
     }
 
     // ---- 迁移 ip_coach_sr_v1:讲解也纳入遗忘曲线(SM-2 + 理解度%)所需的列。
@@ -977,6 +1016,92 @@ export async function listExplainCards(sessionId: number): Promise<ExplainCardRo
     last_pct: r.last_pct == null ? null : Number(r.last_pct),
     is_due: Number(r.is_due),
   }));
+}
+
+/* ---------------- 讲解附加料:关键词 + SVG 示意图 + 生图计划 + 配图 ---------------- */
+
+/** 读取某题讲解的附加料;keywords_json 为空视为「还没生成」→ 返回 null。 */
+export async function getExplainExtras(questionId: number): Promise<ExplainExtras | null> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT keywords_json, diagrams_json, image_plan_json FROM ip_explain WHERE question_id = ?",
+    [questionId],
+  );
+  const r = rows[0] as
+    | { keywords_json: string | null; diagrams_json: string | null; image_plan_json: string | null }
+    | undefined;
+  if (!r || r.keywords_json == null) return null;
+  const parse = <T>(s: string | null): T[] => {
+    if (!s) return [];
+    try {
+      const v = JSON.parse(s);
+      return Array.isArray(v) ? (v as T[]) : [];
+    } catch {
+      return [];
+    }
+  };
+  return {
+    keywords: parse(r.keywords_json),
+    diagrams: parse(r.diagrams_json),
+    imagePlan: parse(r.image_plan_json),
+  };
+}
+
+export async function saveExplainExtras(questionId: number, extras: ExplainExtras): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    "UPDATE ip_explain SET keywords_json = ?, diagrams_json = ?, image_plan_json = ? WHERE question_id = ?",
+    [
+      JSON.stringify(extras.keywords).slice(0, 16_000_000),
+      JSON.stringify(extras.diagrams).slice(0, 16_000_000),
+      JSON.stringify(extras.imagePlan).slice(0, 16_000_000),
+      questionId,
+    ],
+  );
+}
+
+/** 重新生成讲解时,连附加料 + 已生成的配图一起清掉(下次自动重生)。 */
+export async function clearExplainExtras(questionId: number): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    "UPDATE ip_explain SET keywords_json = NULL, diagrams_json = NULL, image_plan_json = NULL WHERE question_id = ?",
+    [questionId],
+  );
+  await p.execute("DELETE FROM ip_explain_image WHERE question_id = ?", [questionId]);
+}
+
+export async function getExplainImageB64(questionId: number, ord: number): Promise<string | null> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT b64 FROM ip_explain_image WHERE question_id = ? AND ord = ?",
+    [questionId, ord],
+  );
+  const r = rows[0] as { b64: string } | undefined;
+  return r ? r.b64 : null;
+}
+
+export async function saveExplainImage(
+  questionId: number,
+  ord: number,
+  caption: string,
+  b64: string,
+): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    `INSERT INTO ip_explain_image (question_id, ord, caption, b64) VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE caption = VALUES(caption), b64 = VALUES(b64)`,
+    [questionId, ord, caption.slice(0, 500), b64],
+  );
+}
+
+/** 某题已生成好的配图序号(给前端知道哪些 ord 直接读图、哪些还要生成)。 */
+export async function listExplainImageOrds(questionId: number): Promise<number[]> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT ord FROM ip_explain_image WHERE question_id = ? ORDER BY ord ASC",
+    [questionId],
+  );
+  return (rows as { ord: number }[]).map((r) => Number(r.ord));
 }
 
 export type AnswerSummary = {

@@ -449,3 +449,106 @@ export function normalizeBank(input: unknown): BankResult {
   // 对齐 ip_session.language VARCHAR(50)
   return { language: t(parsed.language, 50) || "English", questions };
 }
+
+/* ---------------- 讲解「附加料」:面试关键词 + SVG 示意图 + 生图计划 ---------------- */
+
+export const MAX_KEYWORDS = 12;
+export const MAX_DIAGRAMS = 3;
+export const MAX_CONCEPT_IMAGES = 4;
+
+export const EXPLAIN_EXTRAS_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    keywords: {
+      type: "array",
+      description: "面试官最想听到的英文术语/加分词(6~12 个)",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          term: { type: "string", description: "面试里该说出口的英文术语/短语" },
+          note: { type: "string", description: "一句中文小注:何时/为何用它" },
+        },
+        required: ["term", "note"],
+      },
+    },
+    diagrams: {
+      type: "array",
+      description: "1~3 张自包含 SVG 技术示意图(文字清晰、无 script/外链)",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          svg: { type: "string", description: "自包含 <svg viewBox=…>…</svg>,内联、无脚本/外链、文字拼写正确、简洁易读" },
+          caption: { type: "string", description: "中文说明" },
+        },
+        required: ["svg", "caption"],
+      },
+    },
+    imagePlan: {
+      type: "array",
+      description: "给生图模型的 1~4 条意象配图提示(按需,少也可以)",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          prompt: { type: "string", description: "英文提示,描述简洁的意象/隐喻画面;别依赖精确文字/代码(生图模型渲染文字差)" },
+          caption: { type: "string", description: "中文说明这张图画的是什么" },
+        },
+        required: ["prompt", "caption"],
+      },
+    },
+  },
+  required: ["keywords", "diagrams", "imagePlan"],
+} as const;
+
+export type ExplainKeyword = { term: string; note: string };
+export type ExplainDiagram = { svg: string; caption: string };
+export type ExplainImagePlanItem = { prompt: string; caption: string };
+export type ExplainExtras = {
+  keywords: ExplainKeyword[];
+  diagrams: ExplainDiagram[];
+  imagePlan: ExplainImagePlanItem[];
+};
+
+/**
+ * SVG 只保留安全子集:必须是 <svg>…</svg>,去掉 script/事件处理器/foreignObject/危险链接。
+ * 前端仍用 <img data-uri> 二次隔离(img 里的 SVG 不执行脚本)。
+ */
+export function sanitizeSvg(svg: string): string {
+  let s = (svg || "").trim();
+  const start = s.indexOf("<svg");
+  const end = s.lastIndexOf("</svg>");
+  if (start < 0 || end < 0) return "";
+  s = s.slice(start, end + 6);
+  s = s.replace(/<script[\s\S]*?<\/script>/gi, "");
+  s = s.replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, "");
+  s = s.replace(/\son\w+\s*=\s*"[^"]*"/gi, "");
+  s = s.replace(/\son\w+\s*=\s*'[^']*'/gi, "");
+  s = s.replace(/(xlink:href|href)\s*=\s*("|')\s*(?:javascript:|data:text\/html)[^"']*("|')/gi, '$1="#"');
+  return s.slice(0, 20000);
+}
+
+export function normalizeExplainExtras(raw: unknown): ExplainExtras {
+  const o = (raw ?? {}) as { keywords?: unknown; diagrams?: unknown; imagePlan?: unknown };
+  const keywords = (Array.isArray(o.keywords) ? o.keywords : [])
+    .map((k) => k as { term?: unknown; note?: unknown })
+    .filter((k) => typeof k.term === "string" && k.term.trim())
+    .map((k) => ({ term: t(String(k.term), 80), note: t(typeof k.note === "string" ? k.note : "", 140) }))
+    .slice(0, MAX_KEYWORDS);
+  const diagrams = (Array.isArray(o.diagrams) ? o.diagrams : [])
+    .map((d) => d as { svg?: unknown; caption?: unknown })
+    .map((d) => ({
+      svg: sanitizeSvg(typeof d.svg === "string" ? d.svg : ""),
+      caption: t(typeof d.caption === "string" ? d.caption : "", 200),
+    }))
+    .filter((d) => d.svg)
+    .slice(0, MAX_DIAGRAMS);
+  const imagePlan = (Array.isArray(o.imagePlan) ? o.imagePlan : [])
+    .map((p) => p as { prompt?: unknown; caption?: unknown })
+    .filter((p) => typeof p.prompt === "string" && p.prompt.trim())
+    .map((p) => ({ prompt: t(String(p.prompt), 800), caption: t(typeof p.caption === "string" ? p.caption : "", 200) }))
+    .slice(0, MAX_CONCEPT_IMAGES);
+  return { keywords, diagrams, imagePlan };
+}

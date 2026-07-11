@@ -4,6 +4,7 @@ import { explainQuestion } from "@/lib/job-hunter/interview/ai";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
 import { kbContextFor } from "@/lib/job-hunter/interview/kb";
 import {
+  clearExplainExtras,
   getExplain,
   getExplainSr,
   getQuestion,
@@ -70,6 +71,8 @@ export async function POST(req: NextRequest) {
       kbExcerpts,
     });
     await saveExplain(questionId, coach);
+    // 重新生成讲解 → 旧的关键词/示意图/配图作废,清掉让它们随新讲解重生。
+    if (regenerate) await clearExplainExtras(questionId);
     return NextResponse.json({
       success: true,
       coach,

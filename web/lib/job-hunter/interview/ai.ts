@@ -3,6 +3,7 @@ import { getClient, getModel } from "@/lib/openai";
 import {
   BANK_SYSTEM,
   COACH_SYSTEM,
+  EXPLAIN_EXTRAS_SYSTEM,
   EXPLAIN_SYSTEM,
   ENGLISH_ANSWER_SYSTEM,
   FUNDAMENTALS_SYSTEM,
@@ -18,6 +19,7 @@ import {
 import {
   BANK_JSON_SCHEMA,
   COACH_JSON_SCHEMA,
+  EXPLAIN_EXTRAS_JSON_SCHEMA,
   GRADE_JSON_SCHEMA,
   QUESTION_JSON_SCHEMA,
   SKILLS_JSON_SCHEMA,
@@ -27,11 +29,13 @@ import {
   SchemaValidationError,
   normalizeBank,
   normalizeCoach,
+  normalizeExplainExtras,
   normalizeGrade,
   normalizeQuestion,
   normalizeSkills,
   type BankResult,
   type Coach,
+  type ExplainExtras,
   type Grade,
   type QuestionGen,
   type QuestionType,
@@ -258,6 +262,44 @@ export function explainQuestion(args: {
     "explain",
     normalizeCoach,
   );
+}
+
+/** 讲解的「附加料」:面试官爱听的关键词 + SVG 示意图 + 生图计划(一次文本调用)。 */
+export function generateExplainExtras(args: {
+  question: string;
+  lesson: string;
+  modelAnswer: string;
+}): Promise<ExplainExtras> {
+  const content = dataBlock([
+    { label: "QUESTION", body: args.question },
+    { label: "EXPLANATION (lesson)", body: args.lesson },
+    { label: "MODEL ANSWER", body: args.modelAnswer },
+  ]);
+  return callJson(
+    EXPLAIN_EXTRAS_SYSTEM,
+    content,
+    EXPLAIN_EXTRAS_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "explain_extras",
+    normalizeExplainExtras,
+    { timeoutMs: 60_000, maxRetries: 0 },
+  );
+}
+
+/** 按一条提示生成一张「意象配图」(gpt-image),返回 PNG 字节。慢,单张单调。 */
+export async function generateConceptImage(prompt: string): Promise<Buffer> {
+  const client = getClient(58_000, 0); // 留在 Vercel 60s 上限内;超时干净失败,前端可标失败
+  const result = await client.images.generate({
+    model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
+    prompt:
+      "A clean, simple, modern conceptual illustration for a tech-interview study flashcard. " +
+      "Friendly, professional, minimal, lots of whitespace. Avoid rendering long text, labels, or code — focus on the visual idea. " +
+      prompt,
+    size: "1024x1024",
+    quality: "low",
+  });
+  const b64 = result.data?.[0]?.b64_json;
+  if (!b64) throw new Error("生图返回为空");
+  return Buffer.from(b64, "base64");
 }
 
 /** 把候选人的作答(可中文/混合)改写成「面试可用的英文版作答」,保留其真实内容。 */
