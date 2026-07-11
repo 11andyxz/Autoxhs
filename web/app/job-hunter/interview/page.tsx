@@ -1430,11 +1430,12 @@ function CoachCard({
   const [rated, setRated] = useState<{ pct: number; label: string } | null>(null);
   const isQuestion = kind === "question";
 
-  // —— 讲解「附加料」:面试关键词 + SVG 示意图 ——
+  // —— 讲解「附加料」:面试关键词 + SVG 示意图 + 追问笔记 ——
   const [extras, setExtras] = useState<{
     keywords: { term: string; note: string }[];
-    diagrams: { svg: string; caption: string }[];
+    diagrams: { svg: string; caption: string; text: string }[];
   } | null>(null);
+  const [notes, setNotes] = useState<{ id: number; diagramOrd: number; text: string }[]>([]);
   const [extrasLoading, setExtrasLoading] = useState(false);
 
   // 换目标时:滑块默认到上次理解度(或 60),清掉本次评分结果。
@@ -1450,6 +1451,7 @@ function CoachCard({
     let cancelled = false;
     const ac = new AbortController();
     setExtras(null);
+    setNotes([]);
     setExtrasLoading(true);
     (async () => {
       try {
@@ -1464,6 +1466,7 @@ function CoachCard({
         setExtrasLoading(false);
         if (!r.ok || !j?.success) return;
         setExtras({ keywords: j.keywords ?? [], diagrams: j.diagrams ?? [] });
+        setNotes(j.notes ?? []);
       } catch {
         if (!cancelled) setExtrasLoading(false);
       }
@@ -1582,20 +1585,20 @@ function CoachCard({
 
               {extras && extras.diagrams.length > 0 && (
                 <div>
-                  <p className="text-xs font-semibold text-slate-500">📊 示意图（说明可划词翻译）</p>
+                  <p className="text-xs font-semibold text-slate-500">📊 示意图（图中文字/说明可划词翻译；可追问）</p>
                   <div className="mt-1.5 space-y-2">
                     {extras.diagrams.map((d, i) => (
-                      <div key={i} className="overflow-x-auto rounded-xl border border-slate-100 bg-white p-2">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(d.svg)}`}
-                          alt={d.caption || "示意图"}
-                          className="mx-auto max-w-full"
-                        />
-                        {d.caption && (
-                          <TranslatableText text={d.caption} className="mt-1 text-xs text-slate-400" />
-                        )}
-                      </div>
+                      <DiagramCard
+                        key={i}
+                        svg={d.svg}
+                        caption={d.caption}
+                        svgText={d.text}
+                        questionId={targetId ?? 0}
+                        diagramOrd={i}
+                        notes={notes.filter((n) => n.diagramOrd === i)}
+                        onAddNote={(note) => setNotes((prev) => [...prev, note])}
+                        onDeleteNote={(id) => setNotes((prev) => prev.filter((n) => n.id !== id))}
+                      />
                     ))}
                   </div>
                 </div>
@@ -1648,6 +1651,177 @@ function CoachCard({
               )}
             </div>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 一张示意图卡:SVG 图 + 说明 + 图中文字(均可划词翻译) + 「追问这张图」+ 已添加的笔记。 */
+function DiagramCard({
+  svg,
+  caption,
+  svgText,
+  questionId,
+  diagramOrd,
+  notes,
+  onAddNote,
+  onDeleteNote,
+}: {
+  svg: string;
+  caption: string;
+  svgText: string;
+  questionId: number;
+  diagramOrd: number;
+  notes: { id: number; diagramOrd: number; text: string }[];
+  onAddNote: (n: { id: number; diagramOrd: number; text: string }) => void;
+  onDeleteNote: (id: number) => void;
+}) {
+  const [asking, setAsking] = useState(false);
+  const [question, setQuestion] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [answer, setAnswer] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  async function ask() {
+    const q = question.trim();
+    if (!q || loading) return;
+    setLoading(true);
+    setAnswer(null);
+    try {
+      const r = await fetch("/api/job-hunter/interview/explain/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ questionId, diagramOrd, question: q }),
+      });
+      const j = await r.json().catch(() => null);
+      setAnswer(r.ok && j?.success ? j.answer : j?.error || "回答失败,请重试");
+    } catch {
+      setAnswer("网络异常,请重试");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function addNote() {
+    if (!answer || adding) return;
+    setAdding(true);
+    const text = `Q: ${question.trim()}\nA: ${answer}`;
+    try {
+      const r = await fetch("/api/job-hunter/interview/explain/note", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ questionId, diagramOrd, text }),
+      });
+      const j = await r.json().catch(() => null);
+      if (r.ok && j?.success) {
+        onAddNote({ id: j.id, diagramOrd, text });
+        setAnswer(null);
+        setQuestion("");
+        setAsking(false);
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function delNote(id: number) {
+    onDeleteNote(id); // 乐观删除
+    try {
+      await fetch(`/api/job-hunter/interview/explain/note?id=${id}`, { method: "DELETE" });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-100 bg-white p-2">
+      <div className="overflow-x-auto">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`}
+          alt={caption || "示意图"}
+          className="mx-auto max-w-full"
+        />
+      </div>
+      {caption && <TranslatableText text={caption} className="mt-1 text-xs text-slate-400" />}
+      {svgText && (
+        <div className="mt-1">
+          <p className="text-[10px] font-medium text-slate-400">图中文字（可划词翻译）</p>
+          <TranslatableText text={svgText} className="text-xs leading-relaxed text-slate-500" />
+        </div>
+      )}
+
+      {/* 已添加的笔记 */}
+      {notes.length > 0 && (
+        <div className="mt-2 space-y-1.5">
+          {notes.map((n) => (
+            <div key={n.id} className="rounded-lg border border-amber-100 bg-amber-50/60 p-2">
+              <div className="flex items-start justify-between gap-2">
+                <TranslatableText text={n.text} className="min-w-0 whitespace-pre-wrap text-xs text-slate-600" />
+                <button
+                  onClick={() => delNote(n.id)}
+                  className="shrink-0 text-[10px] text-slate-300 transition hover:text-rose-500"
+                >
+                  删除
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 追问这张图 */}
+      {!asking ? (
+        <button
+          onClick={() => setAsking(true)}
+          className="mt-2 rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700"
+        >
+          💬 追问这张图
+        </button>
+      ) : (
+        <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50/60 p-2">
+          <div className="flex items-center gap-1.5">
+            <input
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") ask();
+              }}
+              placeholder="对这张图有什么想问的？"
+              className="min-w-0 flex-1 rounded-md border border-slate-200 px-2 py-1 text-xs outline-none focus:border-cyan-400"
+            />
+            <button
+              onClick={ask}
+              disabled={loading || !question.trim()}
+              className="shrink-0 rounded-md bg-cyan-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-cyan-700 disabled:opacity-50"
+            >
+              {loading ? "…" : "问"}
+            </button>
+            <button
+              onClick={() => {
+                setAsking(false);
+                setAnswer(null);
+              }}
+              className="shrink-0 text-[10px] text-slate-400 hover:text-slate-600"
+            >
+              收起
+            </button>
+          </div>
+          {answer && (
+            <div className="mt-1.5">
+              <TranslatableText text={answer} className="whitespace-pre-wrap text-xs text-slate-700" />
+              <button
+                onClick={addNote}
+                disabled={adding}
+                className="mt-1 rounded-md border border-amber-300 px-2 py-0.5 text-[11px] font-medium text-amber-700 transition hover:bg-amber-50 disabled:opacity-50"
+              >
+                {adding ? "添加中…" : "➕ 添加到笔记"}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

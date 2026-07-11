@@ -3,6 +3,7 @@ import { getClient, getModel } from "@/lib/openai";
 import {
   BANK_SYSTEM,
   COACH_SYSTEM,
+  DIAGRAM_ASK_SYSTEM,
   EXPLAIN_EXTRAS_SYSTEM,
   EXPLAIN_SYSTEM,
   ENGLISH_ANSWER_SYSTEM,
@@ -291,6 +292,34 @@ export function generateExplainExtras(args: {
     normalizeExplainExtras,
     { timeoutMs: EXTRAS_TIMEOUT_MS, maxRetries: 0 }, // 本地 200s / Vercel 55s(压在 60s 内)
   );
+}
+
+/** 「追问这张图」:据某张示意图(文字/说明)+讲解,回答候选人的追问(中文、简洁)。返回纯文本。 */
+export async function answerAboutDiagram(args: {
+  questionPrompt: string;
+  diagramText: string;
+  caption: string;
+  lesson: string;
+  followup: string;
+}): Promise<string> {
+  const client = getClient(TIMEOUT_MS);
+  const content = dataBlock([
+    { label: "INTERVIEW QUESTION", body: args.questionPrompt },
+    { label: "DIAGRAM TEXT LABELS", body: args.diagramText },
+    { label: "DIAGRAM CAPTION", body: args.caption },
+    { label: "EXPLANATION (lesson)", body: args.lesson },
+    { label: "FOLLOW-UP (the candidate's question about this diagram)", body: args.followup },
+  ]);
+  const response = await client.responses.create({
+    model: getModel(),
+    input: [
+      { role: "system", content: DIAGRAM_ASK_SYSTEM },
+      { role: "user", content },
+    ],
+  });
+  const text = (response.output_text ?? "").trim();
+  if (!text) throw new SchemaValidationError("回答为空");
+  return text;
 }
 
 /** 把候选人的作答(可中文/混合)改写成「面试可用的英文版作答」,保留其真实内容。 */

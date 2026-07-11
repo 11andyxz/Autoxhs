@@ -199,6 +199,19 @@ export function ensureInterviewSchema(): Promise<void> {
       )
     `);
 
+    // 讲解「追问笔记」:对某张示意图(diagram_ord)追问后,把答案「添加」进笔记,挂在该图下方。
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS ip_explain_note (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        question_id INT NOT NULL,
+        diagram_ord INT NOT NULL DEFAULT 0,
+        text MEDIUMTEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_ip_note_q (question_id),
+        CONSTRAINT fk_ip_explain_note_q FOREIGN KEY (question_id) REFERENCES ip_question(id) ON DELETE CASCADE
+      )
+    `);
+
     // ---- 迁移 ip_bank_v1:题库绑定简历 + 每题间隔重复(遗忘曲线)所需的列 ----
     // 整块由标记守卫,只跑一次;每条 ALTER 又用 execIgnoring 容忍「已存在」,可安全重跑(自愈)。
     if (!(await migrationDone("ip_bank_v1"))) {
@@ -1067,6 +1080,43 @@ export async function clearExplainExtras(questionId: number): Promise<void> {
     "UPDATE ip_explain SET keywords_json = NULL, diagrams_json = NULL WHERE question_id = ?",
     [questionId],
   );
+}
+
+/* ---------------- 追问笔记(对某张示意图追问后「添加」的答案) ---------------- */
+
+export type ExplainNoteRow = { id: number; diagram_ord: number; text: string };
+
+export async function addExplainNote(
+  questionId: number,
+  diagramOrd: number,
+  text: string,
+): Promise<number> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const [res] = await p.execute<ResultSetHeader>(
+    "INSERT INTO ip_explain_note (question_id, diagram_ord, text) VALUES (?, ?, ?)",
+    [questionId, diagramOrd, text.slice(0, 8000)],
+  );
+  return res.insertId;
+}
+
+export async function listExplainNotes(questionId: number): Promise<ExplainNoteRow[]> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT id, diagram_ord, text FROM ip_explain_note WHERE question_id = ? ORDER BY id ASC",
+    [questionId],
+  );
+  return (rows as ExplainNoteRow[]).map((r) => ({
+    id: Number(r.id),
+    diagram_ord: Number(r.diagram_ord),
+    text: r.text,
+  }));
+}
+
+export async function deleteExplainNote(id: number): Promise<void> {
+  const p = getPool();
+  await p.execute("DELETE FROM ip_explain_note WHERE id = ?", [id]);
 }
 
 export type AnswerSummary = {

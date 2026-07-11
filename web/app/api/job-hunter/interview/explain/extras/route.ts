@@ -2,7 +2,14 @@ import { type NextRequest, NextResponse } from "next/server";
 
 import { generateExplainExtras } from "@/lib/job-hunter/interview/ai";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
-import { getExplain, getExplainExtras, getQuestion, saveExplainExtras } from "@/lib/job-hunter/interview/repo";
+import {
+  getExplain,
+  getExplainExtras,
+  getQuestion,
+  listExplainNotes,
+  saveExplainExtras,
+} from "@/lib/job-hunter/interview/repo";
+import { extractSvgText } from "@/lib/job-hunter/interview/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,11 +49,14 @@ export async function POST(req: NextRequest) {
       cached = false;
     }
 
+    const notes = await listExplainNotes(questionId);
     return NextResponse.json({
       success: true,
       cached,
       keywords: extras.keywords,
-      diagrams: extras.diagrams,
+      // 附上从 SVG 抽出的文字(供「图中文字划词翻译」)。
+      diagrams: extras.diagrams.map((d) => ({ svg: d.svg, caption: d.caption, text: extractSvgText(d.svg) })),
+      notes: notes.map((n) => ({ id: n.id, diagramOrd: n.diagram_ord, text: n.text })),
     });
   } catch (err) {
     return fail(err, "explain-extras");

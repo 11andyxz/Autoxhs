@@ -515,6 +515,27 @@ export function sanitizeSvg(svg: string): string {
   return s.slice(0, 20000);
 }
 
+/** 抽出 SVG 里各 <text> 元素的文字(用 · 连接):供「图中文字划词翻译」+ 追问时给 AI 当上下文。 */
+export function extractSvgText(svg: string): string {
+  const parts: string[] = [];
+  const re = /<text\b[^>]*>([\s\S]*?)<\/text>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(svg)) !== null) {
+    const inner = m[1]
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (inner) parts.push(inner);
+  }
+  // 去掉相邻重复(有些 SVG 会重复标签),保序
+  const seen = new Set<string>();
+  const uniq = parts.filter((s) => (seen.has(s) ? false : (seen.add(s), true)));
+  return uniq.join(" · ").slice(0, 2000);
+}
+
 export function normalizeExplainExtras(raw: unknown): ExplainExtras {
   const o = (raw ?? {}) as { keywords?: unknown; diagrams?: unknown };
   const keywords = (Array.isArray(o.keywords) ? o.keywords : [])
