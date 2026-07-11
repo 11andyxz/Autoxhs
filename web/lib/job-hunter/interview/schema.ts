@@ -474,7 +474,7 @@ export const EXPLAIN_EXTRAS_JSON_SCHEMA = {
     },
     diagrams: {
       type: "array",
-      description: "1~3 张自包含 SVG 技术示意图(文字清晰、无 script/外链)",
+      description: "4~6 张自包含 SVG 技术示意图:每个子概念一张、覆盖完整、精简(文字清晰、无 script/外链)",
       items: {
         type: "object",
         additionalProperties: false,
