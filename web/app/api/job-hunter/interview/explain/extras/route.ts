@@ -2,21 +2,15 @@ import { type NextRequest, NextResponse } from "next/server";
 
 import { generateExplainExtras } from "@/lib/job-hunter/interview/ai";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
-import {
-  getExplain,
-  getExplainExtras,
-  getQuestion,
-  listExplainImageOrds,
-  saveExplainExtras,
-} from "@/lib/job-hunter/interview/repo";
+import { getExplain, getExplainExtras, getQuestion, saveExplainExtras } from "@/lib/job-hunter/interview/repo";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /**
- * 讲解「附加料」:面试关键词 + SVG 示意图 + 生图计划。
- * 已生成则直接返回(cached);否则据讲解文本生成并存库。imagePlan 只把 caption/张数给前端,prompt 留后端。
+ * 讲解「附加料」:面试关键词 + SVG 示意图。
+ * 已生成则直接返回(cached);否则据讲解文本生成并存库。
  */
 export async function POST(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
@@ -35,34 +29,24 @@ export async function POST(req: NextRequest) {
     const coach = await getExplain(questionId);
     if (!coach) return bad("请先生成讲解。", 404);
 
-    const cachedExtras = regenerate ? null : await getExplainExtras(questionId);
-    let extras;
-    let version: number;
+    let extras = regenerate ? null : await getExplainExtras(questionId);
     let cached = true;
-    if (cachedExtras) {
-      extras = cachedExtras;
-      version = cachedExtras.version;
-    } else {
+    if (!extras) {
       const q = await getQuestion(questionId);
       extras = await generateExplainExtras({
         question: q?.prompt ?? "",
         lesson: coach.lesson,
         modelAnswer: coach.modelAnswer,
       });
-      version = await saveExplainExtras(questionId, extras); // 版本 +1 + 清旧配图
+      await saveExplainExtras(questionId, extras);
       cached = false;
     }
 
-    const readyOrds = await listExplainImageOrds(questionId);
     return NextResponse.json({
       success: true,
       cached,
-      extrasVersion: version,
       keywords: extras.keywords,
       diagrams: extras.diagrams,
-      // 只暴露张数 + caption,别把生图 prompt 发给前端。
-      imagePlan: extras.imagePlan.map((p) => ({ caption: p.caption })),
-      readyOrds,
     });
   } catch (err) {
     return fail(err, "explain-extras");

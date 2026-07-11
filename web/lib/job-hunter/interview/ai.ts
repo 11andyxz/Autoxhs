@@ -281,25 +281,8 @@ export function generateExplainExtras(args: {
     EXPLAIN_EXTRAS_JSON_SCHEMA as unknown as Record<string, unknown>,
     "explain_extras",
     normalizeExplainExtras,
-    { timeoutMs: 60_000, maxRetries: 0 },
+    { timeoutMs: 55_000, maxRetries: 0 }, // 压在 Vercel 60s 内;超时干净失败
   );
-}
-
-/** 按一条提示生成一张「意象配图」(gpt-image),返回 PNG 字节。慢,单张单调。 */
-export async function generateConceptImage(prompt: string): Promise<Buffer> {
-  const client = getClient(58_000, 0); // 留在 Vercel 60s 上限内;超时干净失败,前端可标失败
-  const result = await client.images.generate({
-    model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
-    prompt:
-      "A clean, simple, modern conceptual illustration for a tech-interview study flashcard. " +
-      "Friendly, professional, minimal, lots of whitespace. Avoid rendering long text, labels, or code — focus on the visual idea. " +
-      prompt,
-    size: "1024x1024",
-    quality: "low",
-  });
-  const b64 = result.data?.[0]?.b64_json;
-  if (!b64) throw new Error("生图返回为空");
-  return Buffer.from(b64, "base64");
 }
 
 /** 把候选人的作答(可中文/混合)改写成「面试可用的英文版作答」,保留其真实内容。 */

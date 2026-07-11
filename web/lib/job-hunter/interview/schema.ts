@@ -453,8 +453,7 @@ export function normalizeBank(input: unknown): BankResult {
 /* ---------------- 讲解「附加料」:面试关键词 + SVG 示意图 + 生图计划 ---------------- */
 
 export const MAX_KEYWORDS = 12;
-export const MAX_DIAGRAMS = 3;
-export const MAX_CONCEPT_IMAGES = 4;
+export const MAX_DIAGRAMS = 6;
 
 export const EXPLAIN_EXTRAS_JSON_SCHEMA = {
   type: "object",
@@ -486,30 +485,15 @@ export const EXPLAIN_EXTRAS_JSON_SCHEMA = {
         required: ["svg", "caption"],
       },
     },
-    imagePlan: {
-      type: "array",
-      description: "给生图模型的 1~4 条意象配图提示(按需,少也可以)",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          prompt: { type: "string", description: "英文提示,描述简洁的意象/隐喻画面;别依赖精确文字/代码(生图模型渲染文字差)" },
-          caption: { type: "string", description: "中文说明这张图画的是什么" },
-        },
-        required: ["prompt", "caption"],
-      },
-    },
   },
-  required: ["keywords", "diagrams", "imagePlan"],
+  required: ["keywords", "diagrams"],
 } as const;
 
 export type ExplainKeyword = { term: string; note: string };
 export type ExplainDiagram = { svg: string; caption: string };
-export type ExplainImagePlanItem = { prompt: string; caption: string };
 export type ExplainExtras = {
   keywords: ExplainKeyword[];
   diagrams: ExplainDiagram[];
-  imagePlan: ExplainImagePlanItem[];
 };
 
 /**
@@ -531,7 +515,7 @@ export function sanitizeSvg(svg: string): string {
 }
 
 export function normalizeExplainExtras(raw: unknown): ExplainExtras {
-  const o = (raw ?? {}) as { keywords?: unknown; diagrams?: unknown; imagePlan?: unknown };
+  const o = (raw ?? {}) as { keywords?: unknown; diagrams?: unknown };
   const keywords = (Array.isArray(o.keywords) ? o.keywords : [])
     .map((k) => k as { term?: unknown; note?: unknown })
     .filter((k) => typeof k.term === "string" && k.term.trim())
@@ -545,10 +529,5 @@ export function normalizeExplainExtras(raw: unknown): ExplainExtras {
     }))
     .filter((d) => d.svg)
     .slice(0, MAX_DIAGRAMS);
-  const imagePlan = (Array.isArray(o.imagePlan) ? o.imagePlan : [])
-    .map((p) => p as { prompt?: unknown; caption?: unknown })
-    .filter((p) => typeof p.prompt === "string" && p.prompt.trim())
-    .map((p) => ({ prompt: t(String(p.prompt), 800), caption: t(typeof p.caption === "string" ? p.caption : "", 200) }))
-    .slice(0, MAX_CONCEPT_IMAGES);
-  return { keywords, diagrams, imagePlan };
+  return { keywords, diagrams };
 }

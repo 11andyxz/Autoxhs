@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 type QuestionType = "concept" | "scenario" | "system-design" | "behavioral";
@@ -614,8 +614,18 @@ function SkillPanel({
  * 可划词翻译的英文文本块:选中一个词/短语 → 浮层显示其中文释义(结合上下文,OpenAI)。
  * 用于只读英文(题干、参考答案),帮助英文面试备考时随手查词。
  */
-function TranslatableText({ text, className }: { text: string; className?: string }) {
+function TranslatableText({
+  text,
+  children,
+  className,
+}: {
+  text?: string;
+  children?: ReactNode;
+  className?: string;
+}) {
   const ref = useRef<HTMLDivElement | null>(null);
+  // 翻译上下文:传了 text 用 text;否则(用 children 渲染时)取渲染后的纯文本。
+  const contextText = () => text ?? ref.current?.textContent ?? "";
   const popRef = useRef<HTMLDivElement | null>(null);
   const [pop, setPop] = useState<{ x: number; y: number; term: string } | null>(null);
   const [loading, setLoading] = useState(false);
@@ -639,7 +649,7 @@ function TranslatableText({ text, className }: { text: string; className?: strin
           ipa: res?.ipa || "",
           zh: res?.zh || "",
           note: res?.note || "",
-          context: text.slice(0, 1000),
+          context: contextText().slice(0, 1000),
         }),
       });
       const j = await r.json().catch(() => null);
@@ -687,7 +697,7 @@ function TranslatableText({ text, className }: { text: string; className?: strin
     fetch("/api/job-hunter/interview/translate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: term, context: text.slice(0, 1500) }),
+      body: JSON.stringify({ text: term, context: contextText().slice(0, 1500) }),
     })
       .then((r) => r.json())
       .then((j) => {
@@ -724,7 +734,7 @@ function TranslatableText({ text, className }: { text: string; className?: strin
   return (
     <>
       <div ref={ref} onMouseUp={onMouseUp} className={className}>
-        {text}
+        {children ?? text}
       </div>
       {pop &&
         typeof document !== "undefined" &&
@@ -1420,16 +1430,12 @@ function CoachCard({
   const [rated, setRated] = useState<{ pct: number; label: string } | null>(null);
   const isQuestion = kind === "question";
 
-  // —— 讲解「附加料」:关键词 + SVG 示意图 + 异步意象配图 ——
+  // —— 讲解「附加料」:面试关键词 + SVG 示意图 ——
   const [extras, setExtras] = useState<{
     keywords: { term: string; note: string }[];
     diagrams: { svg: string; caption: string }[];
-    imageCaptions: string[];
   } | null>(null);
   const [extrasLoading, setExtrasLoading] = useState(false);
-  const [extrasVersion, setExtrasVersion] = useState(0); // 缓存刷新:重生后 version 变→ <img> URL 变
-  const [imgReady, setImgReady] = useState<Set<number>>(new Set());
-  const [imgFailed, setImgFailed] = useState<Set<number>>(new Set());
 
   // 换目标时:滑块默认到上次理解度(或 60),清掉本次评分结果。
   useEffect(() => {
@@ -1437,15 +1443,13 @@ function CoachCard({
     setRated(null);
   }, [targetId, kind, sr?.lastPct]);
 
-  // 讲解文字就绪后(仅单题讲解):拉附加料 → 逐张把缺的配图生成出来(异步,不挡文字)。
+  // 讲解文字就绪后(仅单题讲解):拉附加料(面试关键词 + SVG 示意图),不挡文字。
   const lessonKey = coach?.lesson;
   useEffect(() => {
     if (!isQuestion || !targetId || !lessonKey || loading) return;
     let cancelled = false;
     const ac = new AbortController();
     setExtras(null);
-    setImgReady(new Set());
-    setImgFailed(new Set());
     setExtrasLoading(true);
     (async () => {
       try {
@@ -1459,30 +1463,7 @@ function CoachCard({
         if (cancelled) return;
         setExtrasLoading(false);
         if (!r.ok || !j?.success) return;
-        const captions: string[] = (j.imagePlan ?? []).map((p: { caption?: string }) => p.caption ?? "");
-        setExtrasVersion(Number(j.extrasVersion ?? 0));
-        setExtras({ keywords: j.keywords ?? [], diagrams: j.diagrams ?? [], imageCaptions: captions });
-        const ready = new Set<number>((j.readyOrds ?? []) as number[]);
-        setImgReady(new Set(ready));
-        // 逐张生成缺失的配图(串行,避免并发打满生图额度);每张好了就显示。
-        for (let ord = 0; ord < captions.length; ord++) {
-          if (cancelled) return;
-          if (ready.has(ord)) continue;
-          try {
-            const ir = await fetch("/api/job-hunter/interview/explain/image", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ questionId: targetId, ord }),
-              signal: ac.signal,
-            });
-            const ij = await ir.json().catch(() => null);
-            if (cancelled) return;
-            if (ir.ok && ij?.success && ij.ready) setImgReady((prev) => new Set(prev).add(ord));
-            else setImgFailed((prev) => new Set(prev).add(ord));
-          } catch {
-            if (!cancelled) setImgFailed((prev) => new Set(prev).add(ord));
-          }
-        }
+        setExtras({ keywords: j.keywords ?? [], diagrams: j.diagrams ?? [] });
       } catch {
         if (!cancelled) setExtrasLoading(false);
       }
@@ -1579,22 +1560,21 @@ function CoachCard({
             <TranslatableText text={coach.practiceQuestion} className="mt-1 whitespace-pre-wrap" />
           </div>
 
-          {/* 附加料:面试关键词 + SVG 示意图 + 异步意象配图(仅单题讲解) */}
+          {/* 附加料:面试关键词 + SVG 示意图(仅单题讲解;均可划词翻译) */}
           {isQuestion && (extrasLoading || extras) && (
             <div className="space-y-3">
               {extras && extras.keywords.length > 0 && (
                 <div>
-                  <p className="text-xs font-semibold text-slate-500">🗣️ 面试官爱听的关键词</p>
+                  <p className="text-xs font-semibold text-slate-500">🗣️ 面试官爱听的关键词（可划词翻译）</p>
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
                     {extras.keywords.map((k, i) => (
-                      <span
+                      <TranslatableText
                         key={i}
-                        title={k.note}
                         className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-xs"
                       >
                         <span className="font-semibold text-amber-800">{k.term}</span>
                         {k.note && <span className="ml-1 text-amber-700/70">· {k.note}</span>}
-                      </span>
+                      </TranslatableText>
                     ))}
                   </div>
                 </div>
@@ -1602,7 +1582,7 @@ function CoachCard({
 
               {extras && extras.diagrams.length > 0 && (
                 <div>
-                  <p className="text-xs font-semibold text-slate-500">📊 示意图</p>
+                  <p className="text-xs font-semibold text-slate-500">📊 示意图（说明可划词翻译）</p>
                   <div className="mt-1.5 space-y-2">
                     {extras.diagrams.map((d, i) => (
                       <div key={i} className="overflow-x-auto rounded-xl border border-slate-100 bg-white p-2">
@@ -1612,35 +1592,9 @@ function CoachCard({
                           alt={d.caption || "示意图"}
                           className="mx-auto max-w-full"
                         />
-                        {d.caption && <p className="mt-1 text-xs text-slate-400">{d.caption}</p>}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {extras && extras.imageCaptions.length > 0 && (
-                <div>
-                  <p className="text-xs font-semibold text-slate-500">🖼️ 配图（自动生成，稍等片刻）</p>
-                  <div className="mt-1.5 grid grid-cols-2 gap-2">
-                    {extras.imageCaptions.map((cap, ord) => (
-                      <div key={ord} className="rounded-xl border border-slate-100 bg-white p-2">
-                        {imgReady.has(ord) ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={`/api/job-hunter/interview/explain/image/raw?questionId=${targetId}&ord=${ord}&v=${extrasVersion}`}
-                            alt={cap || "配图"}
-                            className="w-full rounded"
-                          />
-                        ) : imgFailed.has(ord) ? (
-                          <div className="flex h-28 items-center justify-center text-xs text-rose-400">这张没生成成功</div>
-                        ) : (
-                          <div className="flex h-28 items-center justify-center gap-1.5 text-xs text-slate-400">
-                            <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-cyan-500" />
-                            生成中…
-                          </div>
+                        {d.caption && (
+                          <TranslatableText text={d.caption} className="mt-1 text-xs text-slate-400" />
                         )}
-                        {cap && <p className="mt-1 text-xs text-slate-400">{cap}</p>}
                       </div>
                     ))}
                   </div>
