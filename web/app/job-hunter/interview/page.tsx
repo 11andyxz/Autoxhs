@@ -492,6 +492,7 @@ export default function InterviewPage() {
             <div ref={coachRef}>
               {coachTarget !== null && (
                 <CoachCard
+                  key={`${coachTarget.kind}-${coachTarget.id}`}
                   loading={coaching}
                   coach={coach}
                   cached={coachCached}
@@ -1426,6 +1427,7 @@ function CoachCard({
     imageCaptions: string[];
   } | null>(null);
   const [extrasLoading, setExtrasLoading] = useState(false);
+  const [extrasVersion, setExtrasVersion] = useState(0); // 缓存刷新:重生后 version 变→ <img> URL 变
   const [imgReady, setImgReady] = useState<Set<number>>(new Set());
   const [imgFailed, setImgFailed] = useState<Set<number>>(new Set());
 
@@ -1440,6 +1442,7 @@ function CoachCard({
   useEffect(() => {
     if (!isQuestion || !targetId || !lessonKey || loading) return;
     let cancelled = false;
+    const ac = new AbortController();
     setExtras(null);
     setImgReady(new Set());
     setImgFailed(new Set());
@@ -1450,12 +1453,14 @@ function CoachCard({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ questionId: targetId }),
+          signal: ac.signal,
         });
         const j = await r.json().catch(() => null);
         if (cancelled) return;
         setExtrasLoading(false);
         if (!r.ok || !j?.success) return;
         const captions: string[] = (j.imagePlan ?? []).map((p: { caption?: string }) => p.caption ?? "");
+        setExtrasVersion(Number(j.extrasVersion ?? 0));
         setExtras({ keywords: j.keywords ?? [], diagrams: j.diagrams ?? [], imageCaptions: captions });
         const ready = new Set<number>((j.readyOrds ?? []) as number[]);
         setImgReady(new Set(ready));
@@ -1468,10 +1473,11 @@ function CoachCard({
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ questionId: targetId, ord }),
+              signal: ac.signal,
             });
             const ij = await ir.json().catch(() => null);
             if (cancelled) return;
-            if (ir.ok && ij?.success) setImgReady((prev) => new Set(prev).add(ord));
+            if (ir.ok && ij?.success && ij.ready) setImgReady((prev) => new Set(prev).add(ord));
             else setImgFailed((prev) => new Set(prev).add(ord));
           } catch {
             if (!cancelled) setImgFailed((prev) => new Set(prev).add(ord));
@@ -1483,6 +1489,7 @@ function CoachCard({
     })();
     return () => {
       cancelled = true;
+      ac.abort();
     };
   }, [isQuestion, targetId, lessonKey, loading]);
 
@@ -1621,7 +1628,7 @@ function CoachCard({
                         {imgReady.has(ord) ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
-                            src={`/api/job-hunter/interview/explain/image/raw?questionId=${targetId}&ord=${ord}`}
+                            src={`/api/job-hunter/interview/explain/image/raw?questionId=${targetId}&ord=${ord}&v=${extrasVersion}`}
                             alt={cap || "配图"}
                             className="w-full rounded"
                           />

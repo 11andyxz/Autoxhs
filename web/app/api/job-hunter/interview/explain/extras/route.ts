@@ -35,16 +35,21 @@ export async function POST(req: NextRequest) {
     const coach = await getExplain(questionId);
     if (!coach) return bad("请先生成讲解。", 404);
 
-    let extras = regenerate ? null : await getExplainExtras(questionId);
+    const cachedExtras = regenerate ? null : await getExplainExtras(questionId);
+    let extras;
+    let version: number;
     let cached = true;
-    if (!extras) {
+    if (cachedExtras) {
+      extras = cachedExtras;
+      version = cachedExtras.version;
+    } else {
       const q = await getQuestion(questionId);
       extras = await generateExplainExtras({
         question: q?.prompt ?? "",
         lesson: coach.lesson,
         modelAnswer: coach.modelAnswer,
       });
-      await saveExplainExtras(questionId, extras);
+      version = await saveExplainExtras(questionId, extras); // 版本 +1 + 清旧配图
       cached = false;
     }
 
@@ -52,6 +57,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       cached,
+      extrasVersion: version,
       keywords: extras.keywords,
       diagrams: extras.diagrams,
       // 只暴露张数 + caption,别把生图 prompt 发给前端。

@@ -172,6 +172,7 @@ export function ensureInterviewSchema(): Promise<void> {
         keywords_json MEDIUMTEXT NULL,
         diagrams_json MEDIUMTEXT NULL,
         image_plan_json MEDIUMTEXT NULL,
+        extras_version INT NOT NULL DEFAULT 0,
         ease_factor DECIMAL(4,2) NOT NULL DEFAULT 2.50,
         interval_days INT NOT NULL DEFAULT 0,
         repetitions INT NOT NULL DEFAULT 0,
@@ -307,6 +308,14 @@ export function ensureInterviewSchema(): Promise<void> {
         )
       `);
       await markMigrationDone("ip_explain_extras_v1");
+    }
+
+    // ---- 迁移 ip_explain_extras_v2:附加料版本号(计划变更即 +1);用于配图写入的版本守卫 + 前端缓存刷新。
+    if (!(await migrationDone("ip_explain_extras_v2"))) {
+      await execIgnoring("ALTER TABLE ip_explain ADD COLUMN extras_version INT NOT NULL DEFAULT 0", [
+        "ER_DUP_FIELDNAME",
+      ]);
+      await markMigrationDone("ip_explain_extras_v2");
     }
 
     // ---- 迁移 ip_coach_sr_v1:讲解也纳入遗忘曲线(SM-2 + 理解度%)所需的列。
@@ -1020,15 +1029,22 @@ export async function listExplainCards(sessionId: number): Promise<ExplainCardRo
 
 /* ---------------- 讲解附加料:关键词 + SVG 示意图 + 生图计划 + 配图 ---------------- */
 
-/** 读取某题讲解的附加料;keywords_json 为空视为「还没生成」→ 返回 null。 */
-export async function getExplainExtras(questionId: number): Promise<ExplainExtras | null> {
+/** 读取某题讲解的附加料 + 版本号;keywords_json 为空视为「还没生成」→ 返回 null。 */
+export async function getExplainExtras(
+  questionId: number,
+): Promise<(ExplainExtras & { version: number }) | null> {
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    "SELECT keywords_json, diagrams_json, image_plan_json FROM ip_explain WHERE question_id = ?",
+    "SELECT keywords_json, diagrams_json, image_plan_json, extras_version FROM ip_explain WHERE question_id = ?",
     [questionId],
   );
   const r = rows[0] as
-    | { keywords_json: string | null; diagrams_json: string | null; image_plan_json: string | null }
+    | {
+        keywords_json: string | null;
+        diagrams_json: string | null;
+        image_plan_json: string | null;
+        extras_version: number;
+      }
     | undefined;
   if (!r || r.keywords_json == null) return null;
   const parse = <T>(s: string | null): T[] => {
@@ -1044,13 +1060,16 @@ export async function getExplainExtras(questionId: number): Promise<ExplainExtra
     keywords: parse(r.keywords_json),
     diagrams: parse(r.diagrams_json),
     imagePlan: parse(r.image_plan_json),
+    version: Number(r.extras_version),
   };
 }
 
-export async function saveExplainExtras(questionId: number, extras: ExplainExtras): Promise<void> {
+/** 写入附加料:计划变了 → 版本 +1 + 清掉旧配图(按新计划重生);返回新版本号。 */
+export async function saveExplainExtras(questionId: number, extras: ExplainExtras): Promise<number> {
   const p = getPool();
   await p.execute(
-    "UPDATE ip_explain SET keywords_json = ?, diagrams_json = ?, image_plan_json = ? WHERE question_id = ?",
+    `UPDATE ip_explain SET keywords_json = ?, diagrams_json = ?, image_plan_json = ?,
+       extras_version = extras_version + 1 WHERE question_id = ?`,
     [
       JSON.stringify(extras.keywords).slice(0, 16_000_000),
       JSON.stringify(extras.diagrams).slice(0, 16_000_000),
@@ -1058,13 +1077,20 @@ export async function saveExplainExtras(questionId: number, extras: ExplainExtra
       questionId,
     ],
   );
+  await p.execute("DELETE FROM ip_explain_image WHERE question_id = ?", [questionId]);
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT extras_version FROM ip_explain WHERE question_id = ?",
+    [questionId],
+  );
+  return Number((rows[0] as { extras_version?: number } | undefined)?.extras_version ?? 0);
 }
 
-/** 重新生成讲解时,连附加料 + 已生成的配图一起清掉(下次自动重生)。 */
+/** 重新生成讲解时,连附加料 + 已生成的配图一起清掉(下次自动重生),并 bump 版本。 */
 export async function clearExplainExtras(questionId: number): Promise<void> {
   const p = getPool();
   await p.execute(
-    "UPDATE ip_explain SET keywords_json = NULL, diagrams_json = NULL, image_plan_json = NULL WHERE question_id = ?",
+    `UPDATE ip_explain SET keywords_json = NULL, diagrams_json = NULL, image_plan_json = NULL,
+       extras_version = extras_version + 1 WHERE question_id = ?`,
     [questionId],
   );
   await p.execute("DELETE FROM ip_explain_image WHERE question_id = ?", [questionId]);
@@ -1080,18 +1106,26 @@ export async function getExplainImageB64(questionId: number, ord: number): Promi
   return r ? r.b64 : null;
 }
 
+/**
+ * 存配图,但用「版本守卫」:只有当 ip_explain.extras_version 仍等于生成时捕获的版本才写入。
+ * 这样计划已被重新生成/清空(版本已 bump)时,这张过期的在途配图不会覆盖回去(no-op)。
+ * 返回是否真的写入了。
+ */
 export async function saveExplainImage(
   questionId: number,
   ord: number,
   caption: string,
   b64: string,
-): Promise<void> {
+  expectedVersion: number,
+): Promise<boolean> {
   const p = getPool();
-  await p.execute(
-    `INSERT INTO ip_explain_image (question_id, ord, caption, b64) VALUES (?, ?, ?, ?)
+  const [res] = await p.execute<ResultSetHeader>(
+    `INSERT INTO ip_explain_image (question_id, ord, caption, b64)
+     SELECT ?, ?, ?, ? FROM ip_explain WHERE question_id = ? AND extras_version = ?
      ON DUPLICATE KEY UPDATE caption = VALUES(caption), b64 = VALUES(b64)`,
-    [questionId, ord, caption.slice(0, 500), b64],
+    [questionId, ord, caption.slice(0, 500), b64, questionId, expectedVersion],
   );
+  return res.affectedRows > 0;
 }
 
 /** 某题已生成好的配图序号(给前端知道哪些 ord 直接读图、哪些还要生成)。 */
