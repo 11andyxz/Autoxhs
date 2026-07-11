@@ -453,7 +453,8 @@ export function normalizeBank(input: unknown): BankResult {
 /* ---------------- 讲解「附加料」:面试关键词 + SVG 示意图 + 生图计划 ---------------- */
 
 export const MAX_KEYWORDS = 12;
-export const MAX_DIAGRAMS = 6;
+// 绝对上限(normalize 切片用);实际每次生成的目标张数按环境注入(本地多、Vercel 压 60s 内)。
+export const MAX_DIAGRAMS = 12;
 
 export const EXPLAIN_EXTRAS_JSON_SCHEMA = {
   type: "object",
@@ -474,7 +475,7 @@ export const EXPLAIN_EXTRAS_JSON_SCHEMA = {
     },
     diagrams: {
       type: "array",
-      description: "4~6 张自包含 SVG 技术示意图:每个子概念一张、覆盖完整、精简(文字清晰、无 script/外链)",
+      description: "自包含 SVG 技术示意图:每个子概念一张、覆盖完整、精简(文字清晰、无 script/外链);张数上限见 DIAGRAM BUDGET",
       items: {
         type: "object",
         additionalProperties: false,

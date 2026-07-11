@@ -264,7 +264,13 @@ export function explainQuestion(args: {
   );
 }
 
-/** 讲解的「附加料」:面试官爱听的关键词 + SVG 示意图 + 生图计划(一次文本调用)。 */
+// Vercel 有 60s 函数上限;本地 next dev 没有。本地/线上共用同一 Aiven 库,
+// 所以本地可以多生成 SVG(更长超时),存库后线上直接读库、不受 60s 限制。
+const ON_VERCEL = !!process.env.VERCEL;
+const EXTRAS_MAX_DIAGRAMS = ON_VERCEL ? 6 : 12; // 上限见 schema.MAX_DIAGRAMS=12
+const EXTRAS_TIMEOUT_MS = ON_VERCEL ? 55_000 : 200_000;
+
+/** 讲解的「附加料」:面试官爱听的关键词 + SVG 示意图(一次文本调用)。张数按环境注入。 */
 export function generateExplainExtras(args: {
   question: string;
   lesson: string;
@@ -275,13 +281,15 @@ export function generateExplainExtras(args: {
     { label: "EXPLANATION (lesson)", body: args.lesson },
     { label: "MODEL ANSWER", body: args.modelAnswer },
   ]);
+  // 「张数预算」是开发者指令,放系统提示(可信),不放 DATA 块。
+  const system = `${EXPLAIN_EXTRAS_SYSTEM}\n\nDIAGRAM BUDGET: produce up to ${EXTRAS_MAX_DIAGRAMS} diagrams — as many as it takes to give ONE per sub-concept and cover the whole topic (fewer is fine only if the topic genuinely has fewer sub-concepts). Keep each SVG concise.`;
   return callJson(
-    EXPLAIN_EXTRAS_SYSTEM,
+    system,
     content,
     EXPLAIN_EXTRAS_JSON_SCHEMA as unknown as Record<string, unknown>,
     "explain_extras",
     normalizeExplainExtras,
-    { timeoutMs: 55_000, maxRetries: 0 }, // 压在 Vercel 60s 内;超时干净失败
+    { timeoutMs: EXTRAS_TIMEOUT_MS, maxRetries: 0 }, // 本地 200s / Vercel 55s(压在 60s 内)
   );
 }
 
