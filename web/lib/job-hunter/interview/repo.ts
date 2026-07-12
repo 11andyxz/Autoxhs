@@ -145,6 +145,26 @@ export function ensureInterviewSchema(): Promise<void> {
         INDEX idx_ip_vocab_due (due_at)
       )
     `);
+    // 知识块(全局,不绑定会话):划词选一整块/问答加入,跟单词本同框按遗忘曲线复习。
+    // front 可空(问答时=问题;划词块=空,复习时直接看正文自评)。company 按公司归类。
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS ip_knowledge (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        company VARCHAR(120) NOT NULL DEFAULT '',
+        front MEDIUMTEXT NULL,
+        content MEDIUMTEXT NOT NULL,
+        svg MEDIUMTEXT NULL,
+        ease_factor DECIMAL(4,2) NOT NULL DEFAULT 2.50,
+        interval_days INT NOT NULL DEFAULT 0,
+        repetitions INT NOT NULL DEFAULT 0,
+        lapses INT NOT NULL DEFAULT 0,
+        due_at DATETIME NULL,
+        last_reviewed_at DATETIME NULL,
+        last_grade VARCHAR(10) NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_ip_knowledge_due (due_at)
+      )
+    `);
     // 弱点补强内容(每个技能一份,持久化):生成后固定展示,除非手动重新生成。
     await p.query(`
       CREATE TABLE IF NOT EXISTS ip_coach (
@@ -1493,4 +1513,105 @@ export async function updateVocabSr(
 export async function deleteVocab(id: number): Promise<void> {
   const p = getPool();
   await p.execute("DELETE FROM ip_vocab WHERE id = ?", [id]);
+}
+
+/* ---------------- 知识块(跟单词本同框复习) ---------------- */
+
+export type KnowledgeRow = {
+  id: number;
+  company: string;
+  front: string | null;
+  content: string;
+  svg: string | null;
+  ease_factor: number;
+  interval_days: number;
+  repetitions: number;
+  lapses: number;
+  due_at: string | null;
+  last_reviewed_at: string | null;
+  last_grade: string | null;
+  is_due: number;
+};
+
+export async function addKnowledge(v: {
+  company: string;
+  front: string;
+  content: string;
+  svg?: string;
+}): Promise<number> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const [res] = await p.execute<ResultSetHeader>(
+    "INSERT INTO ip_knowledge (company, front, content, svg, due_at) VALUES (?, ?, ?, ?, NOW())",
+    [
+      v.company.slice(0, 120),
+      v.front.slice(0, 2000) || null,
+      v.content.slice(0, 8000),
+      (v.svg ?? "").slice(0, 20000) || null,
+    ],
+  );
+  return res.insertId;
+}
+
+export async function listKnowledge(): Promise<KnowledgeRow[]> {
+  await ensureInterviewSchema();
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    `SELECT id, company, front, content, svg, ease_factor, interval_days, repetitions, lapses,
+            due_at, last_reviewed_at, last_grade,
+            (last_reviewed_at IS NULL OR due_at IS NULL OR due_at <= NOW()) AS is_due
+       FROM ip_knowledge
+      ORDER BY (last_reviewed_at IS NOT NULL AND due_at IS NOT NULL AND due_at <= NOW()) DESC,
+               due_at ASC, id DESC`,
+  );
+  return (rows as KnowledgeRow[]).map((r) => ({
+    ...r,
+    ease_factor: Number(r.ease_factor),
+    interval_days: Number(r.interval_days),
+    repetitions: Number(r.repetitions),
+    lapses: Number(r.lapses),
+    is_due: Number(r.is_due),
+  }));
+}
+
+export async function getKnowledge(id: number): Promise<KnowledgeRow | null> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    `SELECT id, company, front, content, svg, ease_factor, interval_days, repetitions, lapses,
+            due_at, last_reviewed_at, last_grade, 1 AS is_due
+       FROM ip_knowledge WHERE id = ?`,
+    [id],
+  );
+  const r = rows[0] as KnowledgeRow | undefined;
+  if (!r) return null;
+  return {
+    ...r,
+    ease_factor: Number(r.ease_factor),
+    interval_days: Number(r.interval_days),
+    repetitions: Number(r.repetitions),
+    lapses: Number(r.lapses),
+    is_due: Number(r.is_due),
+  };
+}
+
+/** 复习后按 SM-2 更新知识块调度(与 updateVocabSr 同口径)。 */
+export async function updateKnowledgeSr(
+  id: number,
+  update: { ease_factor: number; interval_days: number; repetitions: number; lapses: number },
+  grade: string,
+): Promise<void> {
+  const p = getPool();
+  await p.execute(
+    `UPDATE ip_knowledge
+        SET ease_factor = ?, interval_days = ?, repetitions = ?, lapses = ?,
+            last_grade = ?, last_reviewed_at = NOW(),
+            due_at = DATE_ADD(NOW(), INTERVAL ? DAY)
+      WHERE id = ?`,
+    [update.ease_factor, update.interval_days, update.repetitions, update.lapses, grade, update.interval_days, id],
+  );
+}
+
+export async function deleteKnowledge(id: number): Promise<void> {
+  const p = getPool();
+  await p.execute("DELETE FROM ip_knowledge WHERE id = ?", [id]);
 }

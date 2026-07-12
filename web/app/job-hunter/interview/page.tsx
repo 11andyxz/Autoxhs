@@ -693,15 +693,32 @@ function TranslatableText({
   // 翻译上下文:传了 text 用 text;否则(用 children 渲染时)取渲染后的纯文本。
   const contextText = () => text ?? ref.current?.textContent ?? "";
   const popRef = useRef<HTMLDivElement | null>(null);
-  const [pop, setPop] = useState<{ x: number; y: number; term: string } | null>(null);
+  // isBlock=true 表示选中的是「一整块」(较长),给「加入知识块」;false 是词/短语,给翻译+加入单词本。
+  const [pop, setPop] = useState<{ x: number; y: number; term: string; isBlock: boolean } | null>(null);
   const [loading, setLoading] = useState(false);
   const [res, setRes] = useState<{ en: string; ipa: string; zh: string; note: string } | null>(null);
   const reqIdRef = useRef(0);
   // 发音:复用 /speak(OpenAI TTS)读出选中的词
   const termAudioRef = useRef<HTMLAudioElement | null>(null);
   const [speaking, setSpeaking] = useState(false);
-  // 加入单词本
+  // 加入单词本 / 加入知识块
   const [vocab, setVocab] = useState<"idle" | "adding" | "added" | "existed" | "error">("idle");
+  const [know, setKnow] = useState<"idle" | "adding" | "added" | "error">("idle");
+
+  async function addToKnowledge(content: string) {
+    setKnow("adding");
+    try {
+      const r = await fetch("/api/job-hunter/interview/knowledge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, company }),
+      });
+      const j = await r.json().catch(() => null);
+      setKnow(r.ok && j?.success ? "added" : "error");
+    } catch {
+      setKnow("error");
+    }
+  }
 
   async function addToVocab(term: string) {
     setVocab("adding");
@@ -748,7 +765,7 @@ function TranslatableText({
     const sel = typeof window !== "undefined" ? window.getSelection() : null;
     if (!sel || sel.isCollapsed) return;
     const term = sel.toString().trim();
-    if (!term || term.length > 80) return; // 只查词/短语
+    if (!term || term.length > 4000) return; // 词/短语查词;更长当「知识块」;超长不处理
     if (!ref.current || !ref.current.contains(sel.anchorNode)) return;
     let rect: DOMRect;
     try {
@@ -756,9 +773,15 @@ function TranslatableText({
     } catch {
       return;
     }
-    setPop({ x: rect.left + rect.width / 2, y: rect.bottom, term });
+    const isBlock = term.length > 80; // 较长 = 选中了一整块 → 加入知识块(不查词)
+    setPop({ x: rect.left + rect.width / 2, y: rect.bottom, term, isBlock });
     setRes(null);
     setVocab("idle");
+    setKnow("idle");
+    if (isBlock) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     const rid = ++reqIdRef.current;
     fetch("/api/job-hunter/interview/translate", {
@@ -818,47 +841,59 @@ function TranslatableText({
             }}
             className="rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-lg"
           >
-            {(() => {
-              const enReading = res?.en?.trim() || "";
-              const sameAsTerm = enReading.toLowerCase() === pop.term.trim().toLowerCase();
-              return (
-                <>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-slate-800">{pop.term}</span>
-                    {/* 普通单词:音标直接跟在词后 */}
-                    {res?.ipa && (sameAsTerm || !enReading) && (
-                      <span className="text-xs text-slate-500">{res.ipa}</span>
-                    )}
-                    <button
-                      onClick={() => speakTerm(enReading || pop.term)}
-                      disabled={speaking}
-                      title="发音"
-                      className="rounded-md border border-slate-200 px-1.5 py-0.5 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700 disabled:opacity-50"
-                    >
-                      {speaking ? "…" : "🔊"}
-                    </button>
-                  </div>
-                  {/* 符号/运算符:显示英文读法 + 音标(不会读它) */}
-                  {enReading && !sameAsTerm && (
-                    <div className="mt-0.5 text-xs text-slate-500">
-                      读作 <span className="font-medium text-slate-700">{enReading}</span>
-                      {res?.ipa && <span className="ml-1 text-slate-500">{res.ipa}</span>}
-                    </div>
-                  )}
-                </>
-              );
-            })()}
-            {loading ? (
-              <div className="mt-1 text-xs text-slate-400">翻译中…</div>
-            ) : res ? (
-              <div className="mt-1">
-                <div className="text-sm text-slate-700">{res.zh}</div>
-                {res.note && <div className="mt-0.5 text-xs text-slate-400">{res.note}</div>}
+            {pop.isBlock ? (
+              <div>
+                <p className="text-xs font-semibold text-violet-700">🧠 把这一整块加入知识块?</p>
+                <div className="mt-1 max-h-28 max-w-[300px] overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-slate-600">
+                  {pop.term.length > 300 ? pop.term.slice(0, 300) + "…" : pop.term}
+                </div>
               </div>
-            ) : null}
-            {res && (
-              <div className="mt-2 border-t border-slate-100 pt-2">
-                {vocab === "added" || vocab === "existed" ? (
+            ) : (
+              <>
+                {(() => {
+                  const enReading = res?.en?.trim() || "";
+                  const sameAsTerm = enReading.toLowerCase() === pop.term.trim().toLowerCase();
+                  return (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-slate-800">{pop.term}</span>
+                        {/* 普通单词:音标直接跟在词后 */}
+                        {res?.ipa && (sameAsTerm || !enReading) && (
+                          <span className="text-xs text-slate-500">{res.ipa}</span>
+                        )}
+                        <button
+                          onClick={() => speakTerm(enReading || pop.term)}
+                          disabled={speaking}
+                          title="发音"
+                          className="rounded-md border border-slate-200 px-1.5 py-0.5 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700 disabled:opacity-50"
+                        >
+                          {speaking ? "…" : "🔊"}
+                        </button>
+                      </div>
+                      {/* 符号/运算符:显示英文读法 + 音标(不会读它) */}
+                      {enReading && !sameAsTerm && (
+                        <div className="mt-0.5 text-xs text-slate-500">
+                          读作 <span className="font-medium text-slate-700">{enReading}</span>
+                          {res?.ipa && <span className="ml-1 text-slate-500">{res.ipa}</span>}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+                {loading ? (
+                  <div className="mt-1 text-xs text-slate-400">翻译中…</div>
+                ) : res ? (
+                  <div className="mt-1">
+                    <div className="text-sm text-slate-700">{res.zh}</div>
+                    {res.note && <div className="mt-0.5 text-xs text-slate-400">{res.note}</div>}
+                  </div>
+                ) : null}
+              </>
+            )}
+            <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-2">
+              {!pop.isBlock &&
+                res &&
+                (vocab === "added" || vocab === "existed" ? (
                   <span className="text-xs font-medium text-emerald-600">
                     {vocab === "existed" ? "✓ 已在单词本" : "✓ 已加入单词本"}
                   </span>
@@ -870,9 +905,19 @@ function TranslatableText({
                   >
                     {vocab === "adding" ? "加入中（生成例句）…" : vocab === "error" ? "重试加入单词本" : "➕ 加入单词本"}
                   </button>
-                )}
-              </div>
-            )}
+                ))}
+              {know === "added" ? (
+                <span className="text-xs font-medium text-violet-600">✓ 已加入知识块</span>
+              ) : (
+                <button
+                  onClick={() => addToKnowledge(pop.term)}
+                  disabled={know === "adding"}
+                  className="rounded-lg border border-violet-200 px-2.5 py-1 text-xs font-medium text-violet-600 transition hover:bg-violet-50 disabled:opacity-60"
+                >
+                  {know === "adding" ? "加入中…" : know === "error" ? "重试" : "🧠 加入知识块"}
+                </button>
+              )}
+            </div>
           </div>,
           document.body,
         )}
@@ -1744,6 +1789,25 @@ function DiagramCard({
   onAddNote: (n: { id: number; diagramOrd: number; text: string }) => void;
   onDeleteNote: (id: number) => void;
 }) {
+  const company = useContext(CompanyContext); // 加入知识块时归到这家公司
+  const [know, setKnow] = useState<"idle" | "adding" | "added">("idle");
+
+  async function addToKnowledge() {
+    if (know !== "idle") return;
+    setKnow("adding");
+    try {
+      const r = await fetch("/api/job-hunter/interview/knowledge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ svg, content: caption, company }),
+      });
+      const j = await r.json().catch(() => null);
+      setKnow(r.ok && j?.success ? "added" : "idle");
+    } catch {
+      setKnow("idle");
+    }
+  }
+
   const [asking, setAsking] = useState(false);
   const [question, setQuestion] = useState("");
   const [answeredQ, setAnsweredQ] = useState(""); // 产生当前答案的那个问题(冻结,防之后编辑输入框导致 Q/A 错配)
@@ -1843,14 +1907,23 @@ function DiagramCard({
         </div>
       )}
 
-      {/* 追问这张图 */}
+      {/* 追问这张图 + 加入知识块 */}
       {!asking ? (
-        <button
-          onClick={() => setAsking(true)}
-          className="mt-2 rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700"
-        >
-          💬 追问这张图
-        </button>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button
+            onClick={() => setAsking(true)}
+            className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700"
+          >
+            💬 追问这张图
+          </button>
+          <button
+            onClick={addToKnowledge}
+            disabled={know !== "idle"}
+            className="rounded-lg border border-violet-200 px-2.5 py-1 text-xs font-medium text-violet-600 transition hover:bg-violet-50 disabled:opacity-60"
+          >
+            {know === "added" ? "✓ 已加入知识块" : know === "adding" ? "加入中…" : "🧠 加入知识块"}
+          </button>
+        </div>
       ) : (
         <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50/60 p-2">
           <div className="flex items-center gap-1.5">
@@ -2681,41 +2754,253 @@ type VocabItem = {
 
 type VocabCounts = { total: number; due: number; fresh: number; mastered: number };
 
-/** 单词本:划词加入的生词按遗忘曲线复习(闪卡:显示词→揭示释义/例句→不记得/似乎记得/清楚 自评)。 */
+type KnowledgeItem = {
+  id: number;
+  company: string;
+  front: string;
+  content: string;
+  svg: string;
+  state: SrState;
+  isDue: boolean;
+  dueAt: string | null;
+};
+
+// 复习队列的一张卡:单词 或 知识块(放一起复习)。
+type ReviewCard = { kind: "vocab"; v: VocabItem } | { kind: "know"; k: KnowledgeItem };
+
+/** 单词闪卡(背面:释义/例句 + 「问一下这个词」→ 可加入知识块)。 */
+function VocabFlashcard({
+  v,
+  showBack,
+  speak,
+  regenExample,
+  regenId,
+}: {
+  v: VocabItem;
+  showBack: boolean;
+  speak: (t: string) => void;
+  regenExample: (id: number) => void;
+  regenId: number | null;
+}) {
+  const enDiffers = !!v.en && v.en.toLowerCase() !== v.term.trim().toLowerCase();
+  const company = useContext(CompanyContext);
+  const [askOpen, setAskOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [answeredQ, setAnsweredQ] = useState("");
+  const [ans, setAns] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [know, setKnow] = useState<"idle" | "adding" | "added">("idle");
+
+  useEffect(() => {
+    setAskOpen(false);
+    setQ("");
+    setAns(null);
+    setKnow("idle");
+  }, [v.id]);
+
+  async function ask() {
+    const qq = q.trim();
+    if (!qq || asking) return;
+    setAsking(true);
+    setAns(null);
+    try {
+      const r = await fetch("/api/job-hunter/interview/vocab/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ term: v.term, zh: v.zh, example: v.example, question: qq }),
+      });
+      const j = await r.json().catch(() => null);
+      setAnsweredQ(qq);
+      setAns(r.ok && j?.success ? j.answer : j?.error || "回答失败,请重试");
+    } catch {
+      setAns("网络异常,请重试");
+    } finally {
+      setAsking(false);
+    }
+  }
+
+  async function addAnsToKnowledge() {
+    if (!ans || know !== "idle") return;
+    setKnow("adding");
+    try {
+      const r = await fetch("/api/job-hunter/interview/knowledge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ front: answeredQ, content: ans, company }),
+      });
+      const j = await r.json().catch(() => null);
+      setKnow(r.ok && j?.success ? "added" : "idle");
+    } catch {
+      setKnow("idle");
+    }
+  }
+
+  return (
+    <>
+      <div className="mt-1 flex items-center gap-2">
+        <span className="text-lg font-bold text-slate-800">{v.term}</span>
+        {v.ipa && !enDiffers && <span className="text-sm text-slate-500">{v.ipa}</span>}
+        <button
+          onClick={() => speak(v.en || v.term)}
+          className="rounded-md border border-slate-200 px-1.5 py-0.5 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700"
+        >
+          🔊
+        </button>
+      </div>
+      {enDiffers && (
+        <div className="mt-0.5 text-xs text-slate-500">
+          读作 <span className="font-medium text-slate-700">{v.en}</span>
+          {v.ipa && <span className="ml-1 text-slate-500">{v.ipa}</span>}
+        </div>
+      )}
+      {showBack && (
+        <div className="mt-3 space-y-2">
+          <div className="text-sm text-slate-700">{v.zh}</div>
+          {v.note && <div className="text-xs text-slate-400">{v.note}</div>}
+          {v.example && (
+            <div className="rounded-lg bg-white p-2 text-sm">
+              <div className="flex items-start justify-between gap-2">
+                <TranslatableText text={v.example} className="min-w-0 text-slate-700" />
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    onClick={() => speak(v.example)}
+                    className="rounded border border-slate-200 px-1 text-xs text-slate-400 transition hover:text-cyan-700"
+                  >
+                    🔊
+                  </button>
+                  <button
+                    onClick={() => regenExample(v.id)}
+                    disabled={regenId === v.id}
+                    title="换个例句(纯英文)"
+                    className="rounded border border-slate-200 px-1 text-xs text-slate-400 transition hover:text-cyan-700 disabled:opacity-50"
+                  >
+                    {regenId === v.id ? "…" : "🔄"}
+                  </button>
+                </div>
+              </div>
+              {v.exampleZh && <div className="mt-1 text-xs text-slate-400">{v.exampleZh}</div>}
+            </div>
+          )}
+          {/* 问一下这个词 → 可加入知识块 */}
+          {!askOpen ? (
+            <button
+              onClick={() => setAskOpen(true)}
+              className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700"
+            >
+              💬 问一下这个词
+            </button>
+          ) : (
+            <div className="rounded-lg border border-slate-200 bg-white p-2">
+              <div className="flex items-center gap-1.5">
+                <input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") ask();
+                  }}
+                  placeholder="关于这个词想问什么？"
+                  className="min-w-0 flex-1 rounded-md border border-slate-200 px-2 py-1 text-xs outline-none focus:border-cyan-400"
+                />
+                <button
+                  onClick={ask}
+                  disabled={asking || !q.trim()}
+                  className="shrink-0 rounded-md bg-cyan-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-cyan-700 disabled:opacity-50"
+                >
+                  {asking ? "…" : "问"}
+                </button>
+              </div>
+              {ans && (
+                <div className="mt-1.5">
+                  <TranslatableText text={ans} className="whitespace-pre-wrap text-xs text-slate-700" />
+                  <button
+                    onClick={addAnsToKnowledge}
+                    disabled={know !== "idle"}
+                    className="mt-1 rounded-md border border-violet-200 px-2 py-0.5 text-[11px] font-medium text-violet-600 transition hover:bg-violet-50 disabled:opacity-60"
+                  >
+                    {know === "added" ? "✓ 已加入知识块" : know === "adding" ? "加入中…" : "🧠 加入知识块"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** 知识块闪卡:有 svg 则展示图;有 front(问答的问题)则先看正面、揭示正文;否则直接看正文自评。 */
+function KnowledgeFlashcard({ k, showBack }: { k: KnowledgeItem; showBack: boolean }) {
+  return (
+    <>
+      {k.front && <div className="mt-1 text-base font-semibold leading-relaxed text-slate-800">{k.front}</div>}
+      {k.svg && (
+        <div className="mt-1 overflow-x-auto rounded-lg border border-slate-100 bg-white p-2">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(k.svg)}`}
+            alt="知识卡片"
+            className="mx-auto max-w-full"
+          />
+        </div>
+      )}
+      {showBack && k.content && (
+        <TranslatableText
+          text={k.content}
+          className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700"
+        />
+      )}
+    </>
+  );
+}
+
+/** 单词本 + 知识块:划词加入的生词/知识块按遗忘曲线复习(同一个队列;闪卡自评)。 */
 function VocabManager() {
   const [open, setOpen] = useState(false);
   const [words, setWords] = useState<VocabItem[]>([]);
+  const [knows, setKnows] = useState<KnowledgeItem[]>([]);
   const [counts, setCounts] = useState<VocabCounts | null>(null);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
-  const [queue, setQueue] = useState<VocabItem[]>([]);
+  const [queue, setQueue] = useState<ReviewCard[]>([]);
   const [idx, setIdx] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const [grading, setGrading] = useState(false);
   const [regenId, setRegenId] = useState<number | null>(null);
   const [lastLabel, setLastLabel] = useState<string | null>(null);
-  const [vocabCompany, setVocabCompany] = useState(""); // ""=全部/总;否则只看该公司的词
+  const [vocabCompany, setVocabCompany] = useState(""); // ""=全部/总;否则只看该公司的词/知识块
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // 按公司筛词 + 客户端算计数(词都在 words 里)。
-  const companyOptions = Array.from(new Set(words.map((w) => w.company).filter(Boolean))).sort();
+  // 按公司筛词/知识块 + 客户端算计数(都在本地列表里)。
+  const companyOptions = Array.from(
+    new Set([...words.map((w) => w.company), ...knows.map((k) => k.company)].filter(Boolean)),
+  ).sort();
   const filteredWords = vocabCompany ? words.filter((w) => w.company === vocabCompany) : words;
+  const filteredKnows = vocabCompany ? knows.filter((k) => k.company === vocabCompany) : knows;
   const scopedCounts = {
-    total: filteredWords.length,
-    due: filteredWords.filter((w) => w.isDue).length,
-    fresh: filteredWords.filter((w) => w.state === "new").length,
-    mastered: filteredWords.filter((w) => w.state === "mastered").length,
+    total: filteredWords.length + filteredKnows.length,
+    due: filteredWords.filter((w) => w.isDue).length + filteredKnows.filter((k) => k.isDue).length,
+    fresh:
+      filteredWords.filter((w) => w.state === "new").length + filteredKnows.filter((k) => k.state === "new").length,
+    mastered:
+      filteredWords.filter((w) => w.state === "mastered").length +
+      filteredKnows.filter((k) => k.state === "mastered").length,
   };
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch("/api/job-hunter/interview/vocab");
-      const j = await r.json().catch(() => null);
-      if (j?.success) {
-        setWords(j.words as VocabItem[]);
-        setCounts(j.counts as VocabCounts);
+      const [rv, rk] = await Promise.all([
+        fetch("/api/job-hunter/interview/vocab"),
+        fetch("/api/job-hunter/interview/knowledge"),
+      ]);
+      const jv = await rv.json().catch(() => null);
+      if (jv?.success) {
+        setWords(jv.words as VocabItem[]);
+        setCounts(jv.counts as VocabCounts);
       }
+      const jk = await rk.json().catch(() => null);
+      if (jk?.success) setKnows(jk.items as KnowledgeItem[]);
     } catch {
       /* ignore */
     } finally {
@@ -2742,12 +3027,14 @@ function VocabManager() {
   }
 
   function startReview() {
-    const due = filteredWords.filter((w) => w.isDue);
-    if (!due.length) {
-      setMsg("今日没有到期的单词 🎉");
+    const dueV: ReviewCard[] = filteredWords.filter((w) => w.isDue).map((v) => ({ kind: "vocab", v }));
+    const dueK: ReviewCard[] = filteredKnows.filter((k) => k.isDue).map((k) => ({ kind: "know", k }));
+    const q = [...dueV, ...dueK];
+    if (!q.length) {
+      setMsg("今日没有到期的内容 🎉");
       return;
     }
-    setQueue(due);
+    setQueue(q);
     setIdx(0);
     setRevealed(false);
     setLastLabel(null);
@@ -2759,13 +3046,20 @@ function VocabManager() {
     if (!cur) return;
     setGrading(true);
     try {
-      const r = await fetch("/api/job-hunter/interview/vocab/review", {
+      const url =
+        cur.kind === "vocab"
+          ? "/api/job-hunter/interview/vocab/review"
+          : "/api/job-hunter/interview/knowledge/review";
+      const id = cur.kind === "vocab" ? cur.v.id : cur.k.id;
+      const label =
+        cur.kind === "vocab" ? cur.v.term : cur.k.front || cur.k.content.slice(0, 18) || "知识块";
+      const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: cur.id, grade: g }),
+        body: JSON.stringify({ id, grade: g }),
       });
       const j = await r.json().catch(() => null);
-      setLastLabel(j?.success ? `${cur.term} → ${j.nextReviewLabel}复习` : null);
+      setLastLabel(j?.success ? `${label} → ${j.nextReviewLabel}复习` : null);
     } catch {
       /* ignore */
     } finally {
@@ -2805,13 +3099,20 @@ function VocabManager() {
               }
             : w;
         setWords((ws) => ws.map(patch));
-        setQueue((q) => q.map(patch));
+        setQueue((q) =>
+          q.map((c) => (c.kind === "vocab" && c.v.id === id ? { kind: "vocab", v: patch(c.v) } : c)),
+        );
       }
     } catch {
       /* ignore */
     } finally {
       setRegenId(null);
     }
+  }
+
+  async function removeKnowledge(id: number) {
+    await fetch(`/api/job-hunter/interview/knowledge?id=${id}`, { method: "DELETE" });
+    load();
   }
 
   async function remove(id: number) {
@@ -2831,8 +3132,9 @@ function VocabManager() {
   }
 
   const cur = queue.length > 0 ? queue[idx] : null;
-  // 英文读法 ≠ 原词(即选中的是中文/符号):音标应挂在「读作」行,而不是原词后面。
-  const enDiffers = !!cur?.en && cur.en.toLowerCase() !== cur.term.trim().toLowerCase();
+  // 知识块中「问答型」(有 front)先看正面再揭示;svg/纯文本块无正面,直接看正文自评。
+  const needsReveal = cur ? (cur.kind === "vocab" ? true : !!cur.k.front) : false;
+  const showBack = revealed || !needsReveal;
 
   // 单词本内划词加词,归到单词本当前选中的公司(而不是外层页面的活动公司)。
   return (
@@ -2852,7 +3154,9 @@ function VocabManager() {
         <div className="mt-2 flex flex-wrap gap-1.5">
           {["", ...companyOptions].map((c) => {
             const active = vocabCompany === c;
-            const n = (c ? words.filter((w) => w.company === c) : words).filter((w) => w.isDue).length;
+            const n =
+              (c ? words.filter((w) => w.company === c) : words).filter((w) => w.isDue).length +
+              (c ? knows.filter((k) => k.company === c) : knows).filter((k) => k.isDue).length;
             return (
               <button
                 key={c || "__all__"}
@@ -2884,84 +3188,57 @@ function VocabManager() {
 
       {cur ? (
         <div className="mt-4 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-4">
-          <div className="text-xs text-slate-400">
-            第 {idx + 1} / {queue.length} 张
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <span>
+              第 {idx + 1} / {queue.length} 张
+            </span>
+            {cur.kind === "know" && (
+              <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700">
+                🧠 知识块
+              </span>
+            )}
           </div>
-          <div className="mt-1 flex items-center gap-2">
-            <span className="text-lg font-bold text-slate-800">{cur.term}</span>
-            {/* 普通词:音标直接跟在词后;符号/短语(读法≠原词)则把音标放到「读作」行 */}
-            {cur.ipa && !enDiffers && <span className="text-sm text-slate-500">{cur.ipa}</span>}
-            <button
-              onClick={() => speak(cur.en || cur.term)}
-              className="rounded-md border border-slate-200 px-1.5 py-0.5 text-xs text-slate-500 transition hover:border-cyan-300 hover:text-cyan-700"
-            >
-              🔊
-            </button>
-          </div>
-          {enDiffers && (
-            <div className="mt-0.5 text-xs text-slate-500">
-              读作 <span className="font-medium text-slate-700">{cur.en}</span>
-              {cur.ipa && <span className="ml-1 text-slate-500">{cur.ipa}</span>}
-            </div>
+          {cur.kind === "vocab" ? (
+            <VocabFlashcard
+              v={cur.v}
+              showBack={showBack}
+              speak={speak}
+              regenExample={regenExample}
+              regenId={regenId}
+            />
+          ) : (
+            <KnowledgeFlashcard k={cur.k} showBack={showBack} />
           )}
-          {!revealed ? (
+          {!showBack ? (
             <button
               onClick={() => setRevealed(true)}
               className="mt-3 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-700"
             >
-              显示释义
+              {cur.kind === "vocab" ? "显示释义" : "显示内容"}
             </button>
           ) : (
-            <div className="mt-3 space-y-2">
-              <div className="text-sm text-slate-700">{cur.zh}</div>
-              {cur.note && <div className="text-xs text-slate-400">{cur.note}</div>}
-              {cur.example && (
-                <div className="rounded-lg bg-white p-2 text-sm">
-                  <div className="flex items-start justify-between gap-2">
-                    <TranslatableText text={cur.example} className="min-w-0 text-slate-700" />
-                    <div className="flex shrink-0 items-center gap-1">
-                      <button
-                        onClick={() => speak(cur.example)}
-                        className="rounded border border-slate-200 px-1 text-xs text-slate-400 transition hover:text-cyan-700"
-                      >
-                        🔊
-                      </button>
-                      <button
-                        onClick={() => regenExample(cur.id)}
-                        disabled={regenId === cur.id}
-                        title="换个例句(纯英文)"
-                        className="rounded border border-slate-200 px-1 text-xs text-slate-400 transition hover:text-cyan-700 disabled:opacity-50"
-                      >
-                        {regenId === cur.id ? "…" : "🔄"}
-                      </button>
-                    </div>
-                  </div>
-                  {cur.exampleZh && <div className="mt-1 text-xs text-slate-400">{cur.exampleZh}</div>}
-                </div>
-              )}
-              <div className="flex gap-2 pt-1">
-                <button
-                  onClick={() => grade("forgot")}
-                  disabled={grading}
-                  className="flex-1 rounded-xl bg-rose-100 px-3 py-2 text-sm font-medium text-rose-700 transition hover:bg-rose-200 disabled:opacity-60"
-                >
-                  不记得
-                </button>
-                <button
-                  onClick={() => grade("vague")}
-                  disabled={grading}
-                  className="flex-1 rounded-xl bg-amber-100 px-3 py-2 text-sm font-medium text-amber-700 transition hover:bg-amber-200 disabled:opacity-60"
-                >
-                  似乎记得
-                </button>
-                <button
-                  onClick={() => grade("clear")}
-                  disabled={grading}
-                  className="flex-1 rounded-xl bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-200 disabled:opacity-60"
-                >
-                  清楚
-                </button>
-              </div>
+            <div className="mt-3 flex gap-2 pt-1">
+              <button
+                onClick={() => grade("forgot")}
+                disabled={grading}
+                className="flex-1 rounded-xl bg-rose-100 px-3 py-2 text-sm font-medium text-rose-700 transition hover:bg-rose-200 disabled:opacity-60"
+              >
+                不记得
+              </button>
+              <button
+                onClick={() => grade("vague")}
+                disabled={grading}
+                className="flex-1 rounded-xl bg-amber-100 px-3 py-2 text-sm font-medium text-amber-700 transition hover:bg-amber-200 disabled:opacity-60"
+              >
+                似乎记得
+              </button>
+              <button
+                onClick={() => grade("clear")}
+                disabled={grading}
+                className="flex-1 rounded-xl bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-200 disabled:opacity-60"
+              >
+                清楚
+              </button>
             </div>
           )}
           {lastLabel && <p className="mt-2 text-xs text-indigo-600">上一张：{lastLabel}</p>}
@@ -2975,7 +3252,7 @@ function VocabManager() {
           >
             {scopedCounts.due > 0
               ? `开始复习（${scopedCounts.due} 待复习${vocabCompany ? " · " + vocabCompany : ""}）`
-              : "暂无到期单词"}
+              : "暂无到期内容"}
           </button>
         </div>
       )}
@@ -2997,6 +3274,34 @@ function VocabManager() {
                   </span>
                 </span>
                 <button onClick={() => remove(w.id)} className="shrink-0 text-xs text-rose-400 hover:text-rose-600">
+                  删除
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {filteredKnows.length > 0 && (
+        <div className="mt-4 border-t border-slate-100 pt-3">
+          <p className="text-xs font-semibold text-slate-500">
+            🧠 {vocabCompany ? `${vocabCompany} 的知识块` : "全部知识块"}（{filteredKnows.length}）
+          </p>
+          <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto">
+            {filteredKnows.map((k) => (
+              <li key={k.id} className="flex items-center justify-between gap-2 text-sm">
+                <span className="min-w-0 truncate">
+                  {k.svg && <span className="mr-1">📊</span>}
+                  <span className="font-medium text-slate-700">{k.front || k.content || "（图示）"}</span>
+                  {k.company && <span className="ml-1.5 text-[10px] text-indigo-500">🏢{k.company}</span>}
+                  <span className={`ml-2 rounded px-1 py-0.5 text-[10px] font-medium ${SR_STATE_CLASS[k.state]}`}>
+                    {SR_STATE_LABEL[k.state]}
+                  </span>
+                </span>
+                <button
+                  onClick={() => removeKnowledge(k.id)}
+                  className="shrink-0 text-xs text-rose-400 hover:text-rose-600"
+                >
                   删除
                 </button>
               </li>

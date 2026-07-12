@@ -5,6 +5,7 @@ import {
   COACH_SYSTEM,
   CUSTOM_ANSWER_SYSTEM,
   DIAGRAM_ASK_SYSTEM,
+  VOCAB_ASK_SYSTEM,
   EXPLAIN_EXTRAS_SYSTEM,
   EXPLAIN_SYSTEM,
   ENGLISH_ANSWER_SYSTEM,
@@ -324,6 +325,32 @@ export function generateExplainExtras(args: {
     normalizeExplainExtras,
     { timeoutMs: EXTRAS_TIMEOUT_MS, maxRetries: 0 }, // 本地 200s / Vercel 55s(压在 60s 内)
   );
+}
+
+/** 「问一下这个词」:据某个单词/短语(释义/例句),回答候选人的问题(中文、简洁)。返回纯文本。 */
+export async function answerAboutVocab(args: {
+  term: string;
+  zh: string;
+  example: string;
+  question: string;
+}): Promise<string> {
+  const client = getClient(TIMEOUT_MS);
+  const content = dataBlock([
+    { label: "TERM", body: args.term },
+    { label: "MEANING (Chinese)", body: args.zh },
+    { label: "EXAMPLE SENTENCE", body: args.example },
+    { label: "QUESTION (the candidate's question about this term)", body: args.question },
+  ]);
+  const response = await client.responses.create({
+    model: getModel(),
+    input: [
+      { role: "system", content: VOCAB_ASK_SYSTEM },
+      { role: "user", content },
+    ],
+  });
+  const text = (response.output_text ?? "").trim();
+  if (!text) throw new SchemaValidationError("回答为空");
+  return text;
 }
 
 /** 「追问这张图」:据某张示意图(文字/说明)+讲解,回答候选人的追问(中文、简洁)。返回纯文本。 */
