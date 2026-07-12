@@ -553,3 +553,72 @@ export function normalizeExplainExtras(raw: unknown): ExplainExtras {
     .slice(0, MAX_DIAGRAMS);
   return { keywords, diagrams };
 }
+
+/* ---------------- 自定义题:用户给一道面试题,AI 生成参考答案 + 分类 ---------------- */
+
+export const CUSTOM_ANSWER_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    type: { type: "string", enum: ["concept", "scenario", "system-design", "behavioral"], description: "题型分类" },
+    skill: { type: "string", description: "这道题考的核心技能/技术/主题(短,如 Kafka / System Design / Ownership)" },
+    category: { type: "string", description: "所属领域(Backend / Database / Frontend / DevOps / Behavioral / System Design 等)" },
+    importance: { type: "integer", description: "该主题对面试的重要度 1~5" },
+    referenceAnswer: { type: "string", description: "标准、正确、够全面的参考答案:精炼提纲/要点,不写长篇;行为题给 STAR 范例。面试语言(默认英文)" },
+    rubric: {
+      type: "array",
+      description: "3~5 个采分点(优秀答案必须命中)",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          criterion: { type: "string" },
+          weight: { type: "number" },
+        },
+        required: ["criterion", "weight"],
+      },
+    },
+  },
+  required: ["type", "skill", "category", "importance", "referenceAnswer", "rubric"],
+} as const;
+
+export type CustomAnswer = {
+  type: QuestionType;
+  skill: string;
+  category: string;
+  importance: number;
+  referenceAnswer: string;
+  rubric: Array<{ criterion: string; weight: number }>;
+};
+
+export function normalizeCustomAnswer(raw: unknown): CustomAnswer {
+  const o = (raw ?? {}) as {
+    type?: unknown;
+    skill?: unknown;
+    category?: unknown;
+    importance?: unknown;
+    referenceAnswer?: unknown;
+    rubric?: unknown;
+  };
+  const type = (QUESTION_TYPES as readonly string[]).includes(o.type as string)
+    ? (o.type as QuestionType)
+    : "concept";
+  const referenceAnswer = typeof o.referenceAnswer === "string" ? o.referenceAnswer.trim().slice(0, 6000) : "";
+  if (!referenceAnswer) throw new SchemaValidationError("参考答案为空");
+  const rubric = (Array.isArray(o.rubric) ? o.rubric : [])
+    .map((r) => r as { criterion?: unknown; weight?: unknown })
+    .filter((r) => typeof r.criterion === "string" && r.criterion.trim())
+    .map((r) => ({
+      criterion: t(String(r.criterion), 300),
+      weight: Number.isFinite(Number(r.weight)) ? Math.max(0, Math.min(100, Number(r.weight))) : 1,
+    }))
+    .slice(0, 8);
+  return {
+    type,
+    skill: t(typeof o.skill === "string" ? o.skill : "", 120) || "General",
+    category: t(typeof o.category === "string" ? o.category : "", 100) || "General",
+    importance: clampImportance(Number(o.importance)),
+    referenceAnswer,
+    rubric: rubric.length ? rubric : [{ criterion: "覆盖题目核心要点", weight: 1 }],
+  };
+}

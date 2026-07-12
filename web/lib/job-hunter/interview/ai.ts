@@ -3,6 +3,7 @@ import { getClient, getModel } from "@/lib/openai";
 import {
   BANK_SYSTEM,
   COACH_SYSTEM,
+  CUSTOM_ANSWER_SYSTEM,
   DIAGRAM_ASK_SYSTEM,
   EXPLAIN_EXTRAS_SYSTEM,
   EXPLAIN_SYSTEM,
@@ -20,6 +21,7 @@ import {
 import {
   BANK_JSON_SCHEMA,
   COACH_JSON_SCHEMA,
+  CUSTOM_ANSWER_JSON_SCHEMA,
   EXPLAIN_EXTRAS_JSON_SCHEMA,
   GRADE_JSON_SCHEMA,
   QUESTION_JSON_SCHEMA,
@@ -30,12 +32,14 @@ import {
   SchemaValidationError,
   normalizeBank,
   normalizeCoach,
+  normalizeCustomAnswer,
   normalizeExplainExtras,
   normalizeGrade,
   normalizeQuestion,
   normalizeSkills,
   type BankResult,
   type Coach,
+  type CustomAnswer,
   type ExplainExtras,
   type Grade,
   type QuestionGen,
@@ -189,6 +193,27 @@ export function buildFundamentals(args: {
     "fundamentals",
     normalizeBank,
     { timeoutMs: 120_000, maxRetries: 0 },
+  );
+}
+
+/** 用户给一道面试题 → 生成参考答案 + 分类(加入题库用)。 */
+export function answerCustomQuestion(args: {
+  question: string;
+  resumeText: string;
+  jdText: string;
+}): Promise<CustomAnswer> {
+  const content = dataBlock([
+    { label: "QUESTION (the interview question to answer + classify)", body: args.question },
+    { label: "CANDIDATE RESUME (depth calibration, optional)", body: args.resumeText },
+    { label: "TARGET JOB DESCRIPTION (optional)", body: args.jdText },
+  ]);
+  return callJson(
+    CUSTOM_ANSWER_SYSTEM,
+    content,
+    CUSTOM_ANSWER_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "custom_answer",
+    normalizeCustomAnswer,
+    { timeoutMs: 60_000, maxRetries: 0 },
   );
 }
 

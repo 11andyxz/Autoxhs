@@ -637,7 +637,7 @@ export type BankInsertItem = {
 export async function insertBankQuestions(
   sessionId: number,
   items: BankInsertItem[],
-  source: "bank" | "fundamentals" = "bank",
+  source: "bank" | "fundamentals" | "custom" = "bank",
   company = "",
 ): Promise<number> {
   if (!items.length) return 0;

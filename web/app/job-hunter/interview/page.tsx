@@ -500,6 +500,14 @@ export default function InterviewPage() {
             )}
 
             {isBank && sessionId && (
+              <CustomQuestionPanel
+                sessionId={sessionId}
+                defaultCompany={companyFilter}
+                onDone={() => loadProgress(sessionId)}
+              />
+            )}
+
+            {isBank && sessionId && (
               <CoachReviewPanel
                 key={coachCardsKey}
                 sessionId={sessionId}
@@ -1999,6 +2007,106 @@ function HistoryPanel({ answers }: { answers: AnswerSummary[] }) {
 }
 
 /** 技术八股文:输入技术名(或留空按简历)生成 concept 概念题,追加进同一题库(存 Aiven)。可清空。 */
+/** 加一道自己的题:用户给面试题 → AI 出参考答案 + 加入题库,并当场展示答案。 */
+function CustomQuestionPanel({
+  sessionId,
+  defaultCompany,
+  onDone,
+}: {
+  sessionId: number;
+  defaultCompany: string;
+  onDone: () => void;
+}) {
+  const [question, setQuestion] = useState("");
+  const [company, setCompany] = useState(defaultCompany);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ referenceAnswer: string; skill: string } | null>(null);
+
+  useEffect(() => setCompany(defaultCompany), [defaultCompany]);
+
+  async function run() {
+    if (!question.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await fetch("/api/job-hunter/interview/custom-question", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, question: question.trim(), company: company.trim() }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) {
+        setError(j?.error || "生成失败,请重试。");
+      } else {
+        setResult({ referenceAnswer: j.referenceAnswer, skill: j.skill });
+        onDone();
+      }
+    } catch {
+      setError("网络异常,请重试。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-2xl border border-sky-200 bg-sky-50/50 p-5 shadow-sm">
+      <p className="text-sm font-semibold text-sky-900">🙋 加一道自己的题（我来解答）</p>
+      <p className="mt-1 text-xs leading-relaxed text-sky-700">
+        贴上你遇到的面试题,我给出参考答案并加入题库(按遗忘曲线复习、可看讲解)。填「公司」就归到那家。
+      </p>
+      <input
+        value={company}
+        onChange={(e) => setCompany(e.target.value)}
+        placeholder="公司(可选,如 RouterTech)"
+        disabled={busy}
+        className="mt-3 w-full rounded-xl border border-sky-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-sky-400 disabled:bg-slate-50"
+      />
+      <textarea
+        value={question}
+        onChange={(e) => setQuestion(e.target.value)}
+        placeholder="粘贴一道面试题,例如:What happens when you type a URL and press enter?"
+        rows={3}
+        disabled={busy}
+        className="mt-2 w-full resize-y rounded-xl border border-sky-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-sky-400 disabled:bg-slate-50"
+      />
+      <button
+        onClick={run}
+        disabled={busy || !question.trim()}
+        className="mt-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {busy ? "解答中…" : "解答并加入题库 →"}
+      </button>
+      {error && <p className="mt-2 text-sm text-rose-600">{error}</p>}
+      {result && (
+        <div className="mt-3 rounded-xl border border-sky-100 bg-white p-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-emerald-600">✓ 已加入题库</span>
+            <span className="rounded bg-cyan-50 px-1.5 py-0.5 text-[11px] font-medium text-cyan-700">
+              {result.skill}
+            </span>
+          </div>
+          <p className="mt-2 text-xs font-semibold text-slate-500">参考答案（可划词翻译）</p>
+          <TranslatableText
+            text={result.referenceAnswer}
+            className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-700"
+          />
+          <button
+            onClick={() => {
+              setQuestion("");
+              setResult(null);
+            }}
+            className="mt-2 text-xs text-sky-600 underline"
+          >
+            再加一道
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FundamentalsPanel({
   sessionId,
   count,
@@ -2385,6 +2493,11 @@ function BankPanel({
                 {it.source === "fundamentals" && (
                   <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">
                     八股
+                  </span>
+                )}
+                {it.source === "custom" && (
+                  <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[11px] font-medium text-sky-700">
+                    自定义
                   </span>
                 )}
                 <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${SR_STATE_CLASS[it.state]}`}>
