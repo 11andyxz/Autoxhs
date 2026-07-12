@@ -334,7 +334,8 @@ export async function answerAboutVocab(args: {
   example: string;
   question: string;
 }): Promise<string> {
-  const client = getClient(TIMEOUT_MS);
+  // 压在路由 maxDuration=60 内,让慢调用被客户端中止、走优雅报错,而不是被 Vercel 硬杀成 504。
+  const client = getClient(52_000);
   const content = dataBlock([
     { label: "TERM", body: args.term },
     { label: "MEANING (Chinese)", body: args.zh },

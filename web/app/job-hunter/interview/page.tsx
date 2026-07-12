@@ -2989,23 +2989,23 @@ function VocabManager() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    try {
-      const [rv, rk] = await Promise.all([
-        fetch("/api/job-hunter/interview/vocab"),
-        fetch("/api/job-hunter/interview/knowledge"),
-      ]);
-      const jv = await rv.json().catch(() => null);
+    // 两个请求各自独立应用:其中一个(网络层)失败不应让另一个的数据被丢弃、列表变空。
+    const [rv, rk] = await Promise.allSettled([
+      fetch("/api/job-hunter/interview/vocab"),
+      fetch("/api/job-hunter/interview/knowledge"),
+    ]);
+    if (rv.status === "fulfilled") {
+      const jv = await rv.value.json().catch(() => null);
       if (jv?.success) {
         setWords(jv.words as VocabItem[]);
         setCounts(jv.counts as VocabCounts);
       }
-      const jk = await rk.json().catch(() => null);
-      if (jk?.success) setKnows(jk.items as KnowledgeItem[]);
-    } catch {
-      /* ignore */
-    } finally {
-      setLoading(false);
     }
+    if (rk.status === "fulfilled") {
+      const jk = await rk.value.json().catch(() => null);
+      if (jk?.success) setKnows(jk.items as KnowledgeItem[]);
+    }
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -3121,12 +3121,14 @@ function VocabManager() {
   }
 
   if (!open) {
+    // 折叠态的「N 待复习」要把知识块也算进去(合并复习的整体待办数,不只是单词)。
+    const closedDue = (counts?.due ?? 0) + knows.filter((k) => k.isDue).length;
     return (
       <button
         onClick={() => setOpen(true)}
         className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700"
       >
-        📓 单词本{counts && counts.due > 0 ? `（${counts.due} 待复习）` : ""}
+        📓 单词本{closedDue > 0 ? `（${closedDue} 待复习）` : ""}
       </button>
     );
   }
