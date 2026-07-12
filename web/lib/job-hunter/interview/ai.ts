@@ -69,8 +69,12 @@ async function callJson<T>(
   normalize: (raw: unknown) => T,
   opts: { timeoutMs?: number; maxRetries?: number } = {},
 ): Promise<T> {
-  const client = getClient(opts.timeoutMs ?? TIMEOUT_MS, opts.maxRetries ?? 1);
-  const run = async (repair: boolean): Promise<T> => {
+  // timeoutMs 视为两次尝试(初次 + 一次修复重试)的「总」预算:修复只用剩余时间,
+  // 避免两次各占满 timeout 把 wall-clock 翻倍、冲破路由 maxDuration。
+  const budgetMs = opts.timeoutMs ?? TIMEOUT_MS;
+  const startedAt = Date.now();
+  const run = async (repair: boolean, clientTimeoutMs: number): Promise<T> => {
+    const client = getClient(clientTimeoutMs, opts.maxRetries ?? 1);
     const input: Array<{ role: "system" | "user"; content: string }> = [
       { role: "system", content: system },
     ];
@@ -96,9 +100,12 @@ async function callJson<T>(
   };
 
   try {
-    return await run(false);
+    return await run(false, budgetMs);
   } catch (err) {
-    if (err instanceof SchemaValidationError || isZodError(err)) return await run(true);
+    if (err instanceof SchemaValidationError || isZodError(err)) {
+      const remaining = Math.max(8000, budgetMs - (Date.now() - startedAt));
+      return await run(true, remaining);
+    }
     throw err;
   }
 }
@@ -213,7 +220,7 @@ export function answerCustomQuestion(args: {
     CUSTOM_ANSWER_JSON_SCHEMA as unknown as Record<string, unknown>,
     "custom_answer",
     normalizeCustomAnswer,
-    { timeoutMs: 60_000, maxRetries: 0 },
+    { timeoutMs: 52_000, maxRetries: 0 }, // 初次+修复共用此预算,给路由后续 DB 调用留头(maxDuration 60)
   );
 }
 

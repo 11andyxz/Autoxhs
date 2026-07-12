@@ -528,6 +528,20 @@ export async function getSkillIdMap(sessionId: number): Promise<Map<string, numb
   return map;
 }
 
+/**
+ * 按名字取 skill id,用 DB 的排序规则匹配(与 uniq_skill 唯一键去重口径一致)。
+ * 避免 JS toLowerCase 与 MySQL 不区分重音/大小写的折叠规则不一致导致查不到(如 Naïve vs Naive)。
+ */
+export async function getSkillId(sessionId: number, name: string): Promise<number | null> {
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT id FROM ip_skill WHERE session_id = ? AND name = ? LIMIT 1",
+    [sessionId, name],
+  );
+  const r = rows[0] as { id: number } | undefined;
+  return r ? Number(r.id) : null;
+}
+
 export async function getSkill(skillId: number): Promise<SkillRow | null> {
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(

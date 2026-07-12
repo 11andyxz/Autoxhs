@@ -2026,7 +2026,7 @@ function CustomQuestionPanel({
   useEffect(() => setCompany(defaultCompany), [defaultCompany]);
 
   async function run() {
-    if (!question.trim() || busy) return;
+    if (!question.trim() || busy || result) return; // 已出结果就别重复提交(防重复入库)
     setBusy(true);
     setError(null);
     setResult(null);
@@ -2065,7 +2065,10 @@ function CustomQuestionPanel({
       />
       <textarea
         value={question}
-        onChange={(e) => setQuestion(e.target.value)}
+        onChange={(e) => {
+          setQuestion(e.target.value);
+          if (result) setResult(null); // 改题目就重新可提交
+        }}
         placeholder="粘贴一道面试题,例如:What happens when you type a URL and press enter?"
         rows={3}
         disabled={busy}
@@ -2073,10 +2076,10 @@ function CustomQuestionPanel({
       />
       <button
         onClick={run}
-        disabled={busy || !question.trim()}
+        disabled={busy || !question.trim() || !!result}
         className="mt-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
       >
-        {busy ? "解答中…" : "解答并加入题库 →"}
+        {busy ? "解答中…" : result ? "已加入 ✓" : "解答并加入题库 →"}
       </button>
       {error && <p className="mt-2 text-sm text-rose-600">{error}</p>}
       {result && (

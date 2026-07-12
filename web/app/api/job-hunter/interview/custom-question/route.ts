@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 
 import { answerCustomQuestion } from "@/lib/job-hunter/interview/ai";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
-import { getSession, getSkillIdMap, insertBankQuestions, insertSkills } from "@/lib/job-hunter/interview/repo";
+import { getSession, getSkillId, insertBankQuestions, insertSkills } from "@/lib/job-hunter/interview/repo";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,8 +41,8 @@ export async function POST(req: NextRequest) {
     });
 
     await insertSkills(sessionId, [{ name: ans.skill, category: ans.category, importance: ans.importance }]);
-    const skillIdByName = await getSkillIdMap(sessionId);
-    const skillId = skillIdByName.get(ans.skill.toLowerCase());
+    // 用 DB 排序规则按名字取 id(与唯一键去重一致),避免 JS/MySQL 折叠差异导致 miss。
+    const skillId = await getSkillId(sessionId, ans.skill);
     if (!skillId) return fail(new Error("skill map miss"), "custom-question");
 
     await insertBankQuestions(
