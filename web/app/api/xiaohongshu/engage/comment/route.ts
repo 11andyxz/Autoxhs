@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { MissingApiKeyError, generateComment } from "@/lib/openai";
+import { MissingApiKeyError, extractTextFromImages, generateComment } from "@/lib/openai";
 import { rateLimit } from "@/lib/rateLimit";
 import { CommentValidationError, MAX_COMMENT_CHARS } from "@/lib/xiaohongshu/comment";
 
@@ -10,6 +10,16 @@ export const dynamic = "force-dynamic";
 
 const BASE = process.env.REDNOTE_API_BASE || "http://127.0.0.1:3456";
 const DETAIL_TIMEOUT_MS = 40_000;
+
+/**
+ * 「正文太短才 OCR」的阈值：标题+正文合计不足这么多字，就认为内容主要在图片里，
+ * 触发对图片的 OCR 作为相关性补充。够长的笔记直接用文本，省时省钱。
+ */
+const MIN_TEXT_CHARS_FOR_OCR = 40;
+/** 逐篇预览时对单篇最多 OCR 的图片数（控制延迟/成本；封面等前几张通常已含主旨）。 */
+const OCR_MAX_IMAGES = 4;
+/** 预览逐篇跑，OCR 需低延迟：收紧超时并禁用自动重试，失败即退回文本。 */
+const OCR_TIMEOUT_MS = 30_000;
 
 const GENERIC_ERROR = "评论生成失败，请稍后重试。";
 const RATE_LIMIT_ERROR = "当前请求较多，请稍后再试。";
@@ -23,9 +33,10 @@ function clientKey(req: NextRequest): string {
   return req.headers.get("x-real-ip") || "unknown";
 }
 
-type NoteDetail = { title?: string; desc?: string };
+type RawNoteDetail = { title?: string; desc?: string; images?: Array<{ url?: string }> };
+type NoteDetail = { title: string; desc: string; images: string[] };
 
-/** 读取笔记详情(标题+正文)，供模型生成「相关」评论。失败返回 null（可退回列表标题）。 */
+/** 读取笔记详情(标题+正文+图片URL)，供模型生成「相关」评论。失败返回 null（可退回列表标题）。 */
 async function fetchNoteDetail(noteId: string, xsecToken: string): Promise<NoteDetail | null> {
   const target =
     `${BASE}/rednote/note?` +
@@ -36,12 +47,34 @@ async function fetchNoteDetail(noteId: string, xsecToken: string): Promise<NoteD
     const res = await fetch(target, { signal: controller.signal });
     clearTimeout(timer);
     const json = (await res.json().catch(() => null)) as
-      | { ok?: boolean; detail?: NoteDetail }
+      | { ok?: boolean; detail?: RawNoteDetail }
       | null;
     if (!json?.ok || !json.detail) return null;
-    return { title: json.detail.title ?? "", desc: json.detail.desc ?? "" };
+    const d = json.detail;
+    const images = (d.images ?? [])
+      .map((image) => image?.url)
+      .filter((url): url is string => typeof url === "string" && /^https?:\/\//.test(url));
+    return { title: d.title ?? "", desc: d.desc ?? "", images };
   } catch {
     return null;
+  }
+}
+
+/**
+ * 对笔记图片做 OCR，取回图里的文字（best-effort）。
+ * 只在正文太短时调用；任何失败（下载失败/超时/无 Key）都吞掉并返回空串，
+ * 让评论生成退回到纯文本，绝不因 OCR 而让整篇预览报错。
+ */
+async function ocrNoteImages(images: string[]): Promise<string> {
+  if (!images.length) return "";
+  try {
+    return await extractTextFromImages(images, {
+      maxImages: OCR_MAX_IMAGES,
+      timeoutMs: OCR_TIMEOUT_MS,
+      maxRetries: 0,
+    });
+  } catch {
+    return "";
   }
 }
 
@@ -72,7 +105,16 @@ export async function POST(req: NextRequest) {
   const detail = await fetchNoteDetail(noteId, xsecToken);
   const title = (detail?.title || fallbackTitle).trim();
   const desc = (detail?.desc || "").trim();
-  if (!title && !desc) {
+  const images = detail?.images ?? [];
+
+  // 正文太短(内容多半在图片里) → 对图片 OCR，把图里的文字也作为相关性依据。
+  // 文本已足够时不 OCR，省时省钱。OCR 失败会退回纯文本(imageText 为空)。
+  let imageText = "";
+  if ((title + desc).length < MIN_TEXT_CHARS_FOR_OCR && images.length) {
+    imageText = await ocrNoteImages(images);
+  }
+
+  if (!title && !desc && !imageText) {
     return NextResponse.json(
       {
         success: false,
@@ -83,7 +125,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const comment = await generateComment({ title, desc }, styleHint);
+    const comment = await generateComment({ title, desc }, styleHint, imageText);
     return NextResponse.json({ success: true, comment, title }, { status: 200 });
   } catch (err) {
     return NextResponse.json(

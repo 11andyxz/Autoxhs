@@ -15,6 +15,9 @@ export { MAX_COMMENT_CHARS };
 /** 笔记正文喂给模型前的截断长度（够判断主题即可，省 token）。 */
 export const NOTE_DESC_LIMIT = 1500;
 
+/** 图片 OCR 文字喂给模型前的截断长度（图片文字可能很长，够判断主题即可）。 */
+export const IMAGE_TEXT_LIMIT = 1200;
+
 export const COMMENT_SYSTEM_PROMPT = `你是一个正在刷小红书的真实用户。看完下面这篇笔记后，你要在评论区留下**一条**真诚、自然的评论。
 
 铁律（必须全部满足）：
@@ -116,12 +119,21 @@ export function normalizeComment(input: unknown): string {
   return clampCommentLength(text);
 }
 
-/** 把笔记标题+正文拼成喂给模型的「数据」消息（正文截断）。 */
-export function buildNoteContext(note: { title?: string; desc?: string }): string {
+/**
+ * 把笔记标题+正文（+可选的图片 OCR 文字）拼成喂给模型的「数据」消息（各自截断）。
+ * imageText 用于正文很短、内容主要在图片里的笔记：把图里的文字也作为「相关性」依据。
+ */
+export function buildNoteContext(note: {
+  title?: string;
+  desc?: string;
+  imageText?: string;
+}): string {
   const title = (note.title ?? "").trim();
   const desc = (note.desc ?? "").trim().slice(0, NOTE_DESC_LIMIT);
+  const imageText = (note.imageText ?? "").trim().slice(0, IMAGE_TEXT_LIMIT);
   const parts: string[] = [];
   if (title) parts.push(`【笔记标题】\n${title}`);
   if (desc) parts.push(`【笔记正文】\n${desc}`);
+  if (imageText) parts.push(`【笔记图片中的文字】\n${imageText}`);
   return parts.join("\n\n");
 }

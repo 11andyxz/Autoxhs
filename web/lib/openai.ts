@@ -109,14 +109,21 @@ async function fetchImageAsDataUrl(url: string): Promise<string | null> {
   }
 }
 
-/** OCR:把若干图片里的文字用多模态模型提取出来(返回纯文本) */
-export async function extractTextFromImages(imageUrls: string[]): Promise<string> {
-  const client = getClient();
-  const dataUrls: string[] = [];
-  for (const url of imageUrls.slice(0, MAX_OCR_IMAGES)) {
-    const d = await fetchImageAsDataUrl(url);
-    if (d) dataUrls.push(d);
-  }
+/**
+ * OCR:把若干图片里的文字用多模态模型提取出来(返回纯文本)。
+ * opts 可收紧图片数量与超时/重试(供「评论互动」这类需要低延迟的调用),默认与既有行为一致。
+ * 图片并行下载,保留原始顺序(下载失败的跳过),避免逐张串行放大延迟。
+ */
+export async function extractTextFromImages(
+  imageUrls: string[],
+  opts: { maxImages?: number; timeoutMs?: number; maxRetries?: number } = {},
+): Promise<string> {
+  const { maxImages = MAX_OCR_IMAGES, timeoutMs, maxRetries } = opts;
+  const client = getClient(timeoutMs, maxRetries);
+  const settled = await Promise.all(
+    imageUrls.slice(0, maxImages).map((url) => fetchImageAsDataUrl(url)),
+  );
+  const dataUrls = settled.filter((d): d is string => !!d);
   if (!dataUrls.length) throw new Error("没有可用的图片(下载失败或已过期)");
 
   const content = [
@@ -284,15 +291,17 @@ async function callCommentModel(
 }
 
 /**
- * 根据笔记(标题+正文)生成一条「正向且相关」的小红书评论。
+ * 根据笔记(标题+正文，可选图片 OCR 文字)生成一条「正向且相关」的小红书评论。
+ * imageText 用于正文很短、内容主要在图里的笔记，让评论也能结合图片内容。
  * 仅在输出格式不符合要求时自动重试一次；鉴权/限流等错误直接抛出，交路由映射为提示。
  */
 export async function generateComment(
   note: { title?: string; desc?: string },
   styleHint = "",
+  imageText = "",
 ): Promise<string> {
   const client = getClient();
-  const noteContext = buildNoteContext(note);
+  const noteContext = buildNoteContext({ ...note, imageText });
   if (!noteContext) {
     // 没有任何标题/正文可参考——无法保证「相关」，直接判失败而不是硬编一句万能评论。
     throw new CommentValidationError("笔记内容为空，无法生成相关评论");
