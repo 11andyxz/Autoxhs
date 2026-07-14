@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: "Autoxhs 内部小工具集合。",
 };
 
-type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky" | "amber" | "fuchsia";
+type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky" | "amber" | "fuchsia" | "indigo" | "teal";
 
 const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string }> = {
   rose: {
@@ -43,6 +43,16 @@ const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string
     tile: "bg-fuchsia-50 text-fuchsia-600",
     hoverBorder: "hover:border-fuchsia-300",
     arrow: "text-fuchsia-600",
+  },
+  indigo: {
+    tile: "bg-indigo-50 text-indigo-600",
+    hoverBorder: "hover:border-indigo-300",
+    arrow: "text-indigo-600",
+  },
+  teal: {
+    tile: "bg-teal-50 text-teal-600",
+    hoverBorder: "hover:border-teal-300",
+    arrow: "text-teal-600",
   },
 };
 
@@ -101,6 +111,22 @@ const TOOLS: Array<{
     desc: "多 business 分账的收支记账本:记录收入/支出、归档发票凭证,自动汇总收支净额与按月/类别分布,可导出 Excel。",
     icon: "💰",
     accent: "sky",
+  },
+  {
+    href: "/image-compress",
+    name: "图片压缩",
+    en: "Image Compressor",
+    desc: "上传 JPG/PNG/WebP,设一个目标大小(MB),浏览器本地自动压到该大小或更小(先降画质、再按需缩尺寸),可看前后对比再下载。文件不上传。",
+    icon: "🗜️",
+    accent: "teal",
+  },
+  {
+    href: "/pdf-tools",
+    name: "PDF 工具箱",
+    en: "PDF Toolbox",
+    desc: "PDF 签名编辑:手绘/打字/上传做自己的签名,拖到合同任意位置(每页 Initials 也行),全程浏览器本地合成导出;另有 PDF ⇄ Word 互转(PDF 转可编辑 Word,Word 经本机 Chrome 打印成 PDF)。",
+    icon: "🖋️",
+    accent: "indigo",
   },
   {
     href: "/work-email",

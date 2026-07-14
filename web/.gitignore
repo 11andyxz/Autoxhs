@@ -8,6 +8,10 @@
 /.next-verify/
 /out/
 
+# pdfjs 静态资源由 scripts/copy-pdf-worker.mjs 从 node_modules 复制而来(predev/prebuild 自动)
+/public/pdfjs/
+/public/pdf.worker.min.mjs
+
 # production
 /build
 

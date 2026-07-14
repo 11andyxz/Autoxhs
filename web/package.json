@@ -3,8 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/copy-pdf-worker.mjs",
     "dev": "next dev -p 3100",
+    "predev:verify": "node scripts/copy-pdf-worker.mjs",
     "dev:verify": "NEXT_DIST_DIR=.next-verify next dev -p 3111",
+    "prebuild": "node scripts/copy-pdf-worker.mjs",
     "build": "next build",
     "start": "next start -p 3100",
     "lint": "next lint",
@@ -22,6 +25,8 @@
     "openai": "^4.77.0",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^6.1.200",
+    "puppeteer-core": "^25.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zod": "^3.23.8"
