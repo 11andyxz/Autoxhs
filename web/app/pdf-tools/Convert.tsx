@@ -156,7 +156,7 @@ export default function Convert() {
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <h2 className="text-sm font-semibold text-slate-800">📝 Word → PDF</h2>
         <p className="mt-1 text-xs leading-relaxed text-slate-500">
-          .docx 转成 HTML 后用本机 Chrome 无头打印为 PDF,排版接近 Word 打印效果。旧版 .doc 请先另存为 .docx。
+          高保真保留原文档的字体、字号、对齐与页边距(用本机 Chrome 无头打印),排版接近 Word/WPS 打印效果。旧版 .doc 请先另存为 .docx。
         </p>
         <input
           ref={docxInputRef}

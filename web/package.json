@@ -16,8 +16,11 @@
   },
   "dependencies": {
     "@react-pdf/renderer": "^4.5.1",
+    "@xmldom/xmldom": "^0.8.13",
     "docx": "^9.7.1",
+    "docx-preview": "^0.4.0",
     "exceljs": "^4.4.0",
+    "jszip": "^3.10.1",
     "mammoth": "^1.8.0",
     "mysql2": "^3.11.0",
     "next": "^15.1.0",

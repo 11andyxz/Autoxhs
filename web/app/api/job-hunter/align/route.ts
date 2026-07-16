@@ -2,14 +2,15 @@ import OpenAI from "openai";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { MissingApiKeyError } from "@/lib/openai";
-import { AlignError, alignResume } from "@/lib/job-hunter/align";
+import { AlignError, alignResumeHtml } from "@/lib/job-hunter/align";
 import { rateLimit } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5MB
+// 简历已在客户端转成 HTML(docx-preview 高保真渲染,含内联样式,体积偏大),给足上限。
+const MAX_RESUME_HTML_CHARS = 3 * 1024 * 1024; // 3MB
 const MAX_URLS = 8;
 const MAX_PASTED_CHARS = 20_000;
 
@@ -29,18 +30,9 @@ function bad(error: string, status = 400) {
   return NextResponse.json({ success: false, error }, { status });
 }
 
-/** 解析规则链接:优先 JSON 数组字段 ruleUrls,兼容按行分隔;去重、去空、限量。 */
-function parseRuleUrls(form: FormData): string[] {
-  const raw = form.get("ruleUrls");
-  let list: string[] = [];
-  if (typeof raw === "string" && raw.trim()) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) list = parsed.map((x) => String(x));
-    } catch {
-      list = raw.split(/[\n,]/);
-    }
-  }
+/** 规范化规则链接:去重、去空、限量。 */
+function normalizeRuleUrls(raw: unknown): string[] {
+  const list = Array.isArray(raw) ? raw.map((x) => String(x)) : [];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const u of list) {
@@ -58,39 +50,43 @@ export async function POST(req: NextRequest) {
     return bad(RATE_LIMIT_ERROR, 429);
   }
 
-  let form: FormData;
+  let body: unknown;
   try {
-    form = await req.formData();
+    body = await req.json();
   } catch {
     return bad("请求格式有误。");
   }
+  const b = (body ?? {}) as Record<string, unknown>;
 
-  const file = form.get("resumeFile");
-  if (!(file instanceof File) || file.size === 0) {
-    return bad("请上传你的简历(.docx 文件)。");
+  const resumeHtml = typeof b.resumeHtml === "string" ? b.resumeHtml : "";
+  if (!resumeHtml.trim()) {
+    return bad("请先上传简历并等待转换完成(.docx 或 .html)。");
   }
-  if (file.size > MAX_FILE_BYTES) {
-    return bad("简历文件过大,请控制在 5MB 以内。");
+  if (resumeHtml.length > MAX_RESUME_HTML_CHARS) {
+    return bad("简历内容过大,请精简后重试。");
   }
 
-  const ruleUrls = parseRuleUrls(form);
-  const pastedRaw = form.get("ruleText");
+  // 可选:模板 HTML(传了就用模板的格式,否则保留简历自身格式)
+  const templateHtml = typeof b.templateHtml === "string" ? b.templateHtml : "";
+  if (templateHtml.length > MAX_RESUME_HTML_CHARS) {
+    return bad("模板内容过大,请精简后重试。");
+  }
+
+  const ruleUrls = normalizeRuleUrls(b.ruleUrls);
   const pastedRules =
-    typeof pastedRaw === "string" ? pastedRaw.slice(0, MAX_PASTED_CHARS) : "";
+    typeof b.ruleText === "string" ? b.ruleText.slice(0, MAX_PASTED_CHARS) : "";
 
   if (!ruleUrls.length && !pastedRules.trim()) {
     return bad("请提供至少一个规则来源(Google Docs 链接或粘贴规则文本)。");
   }
 
-  let docxBuf: Buffer;
   try {
-    docxBuf = Buffer.from(await file.arrayBuffer());
-  } catch {
-    return bad("读取简历文件失败,请重试。");
-  }
-
-  try {
-    const { html, sources } = await alignResume(docxBuf, ruleUrls, pastedRules);
+    const { html, sources } = await alignResumeHtml(
+      resumeHtml,
+      ruleUrls,
+      pastedRules,
+      templateHtml || undefined,
+    );
     return NextResponse.json({ success: true, html, sources }, { status: 200 });
   } catch (err) {
     if (err instanceof AlignError) {

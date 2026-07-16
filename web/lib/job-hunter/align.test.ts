@@ -3,9 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   buildAlignedDoc,
   extractGoogleDocId,
+  htmlToText,
   restoreImages,
+  restoreStyles,
   sanitizeModelHtml,
+  splitHtmlDoc,
   stashImages,
+  stashStyles,
 } from "./align";
 
 describe("extractGoogleDocId", () => {
@@ -62,6 +66,34 @@ describe("stashImages / restoreImages", () => {
   });
 });
 
+describe("stashStyles / restoreStyles", () => {
+  it("相同 style 复用同一编号,还原后完全一致", () => {
+    const html =
+      '<p style="font-size:11pt">a</p><span style="color:red">b</span><p style="font-size:11pt">c</p>';
+    const { html: stashed, styles } = stashStyles(html);
+    expect(styles).toEqual(["font-size:11pt", "color:red"]);
+    // 两个相同 style 复用 data-s="0"
+    expect(stashed).toBe('<p data-s="0">a</p><span data-s="1">b</span><p data-s="0">c</p>');
+    expect(restoreStyles(stashed, styles)).toBe(html);
+  });
+
+  it("模型克隆出的额外 data-s 也能还原;越界编号丢弃", () => {
+    const { styles } = stashStyles('<p style="color:red">x</p>');
+    // 模型复制了一个同样的 bullet(复用 data-s="0"),又幻觉了一个 data-s="9"
+    const modelOut = '<p data-s="0">x</p><p data-s="0">new</p><p data-s="9">bad</p>';
+    expect(restoreStyles(modelOut, styles)).toBe(
+      '<p style="color:red">x</p><p style="color:red">new</p><p >bad</p>',
+    );
+  });
+
+  it("保留 style 里的 HTML 实体(如 &quot;),还原进 style 属性正确", () => {
+    const html = '<span style="font-family: &quot;Times New Roman&quot;">t</span>';
+    const { html: stashed, styles } = stashStyles(html);
+    expect(stashed).toBe('<span data-s="0">t</span>');
+    expect(restoreStyles(stashed, styles)).toBe(html);
+  });
+});
+
 describe("sanitizeModelHtml", () => {
   it("去掉 ```html 代码围栏", () => {
     expect(sanitizeModelHtml("```html\n<p>hi</p>\n```")).toBe("<p>hi</p>");
@@ -115,11 +147,45 @@ describe("sanitizeModelHtml", () => {
   });
 });
 
+describe("splitHtmlDoc", () => {
+  it("拆出 <style> 与 <body> 内部", () => {
+    const html =
+      '<!doctype html><html><head><style>.docx{color:red}</style></head><body><div class="docx-wrapper"><p>hi</p></div></body></html>';
+    const { styleHtml, body } = splitHtmlDoc(html);
+    expect(styleHtml).toBe("<style>.docx{color:red}</style>");
+    expect(body).toBe('<div class="docx-wrapper"><p>hi</p></div>');
+  });
+
+  it("没有 <body> 时,剥掉 head/style 后当正文", () => {
+    const { styleHtml, body } = splitHtmlDoc("<style>x{}</style><p>only body</p>");
+    expect(styleHtml).toBe("<style>x{}</style>");
+    expect(body).toBe("<p>only body</p>");
+  });
+});
+
+describe("htmlToText", () => {
+  it("提取可读文本:分段、项目符号、实体解码,去标签", () => {
+    const html =
+      '<h1>Andy</h1><p>Email: <a href="x">a@b.com</a></p><ul><li>Java</li><li>Spring &amp; Kafka</li></ul>';
+    const t = htmlToText(html);
+    expect(t).toContain("Andy");
+    expect(t).toContain("a@b.com");
+    expect(t).toContain("• Java");
+    expect(t).toContain("Spring & Kafka"); // &amp; 解码
+    expect(t).not.toMatch(/<[a-z]/i); // 不含标签
+  });
+
+  it("去掉 <script>/<style>,不把其内容当正文", () => {
+    expect(htmlToText('<p>ok</p><script>steal()</script><style>p{}</style>')).toBe("ok");
+  });
+});
+
 describe("buildAlignedDoc", () => {
-  it("把 body 片段包成可打印文档,含打印样式", () => {
-    const doc = buildAlignedDoc("<p>hello</p>");
+  it("拼回原样式 + 打印样式,body 原样嵌入(不再套 .page)", () => {
+    const doc = buildAlignedDoc("<p>hello</p>", "<style>.docx{color:red}</style>");
     expect(doc).toContain("<!doctype html>");
-    expect(doc).toContain('<main class="page"><p>hello</p></main>');
-    expect(doc).toContain("@page { size: Letter; margin: 0; }");
+    expect(doc).toContain("<style>.docx{color:red}</style>"); // 原样式保留
+    expect(doc).toContain("<body><p>hello</p></body>"); // body 原样,无 .page 包裹
+    expect(doc).toContain("@page { margin: 0; }"); // 打印样式
   });
 });
