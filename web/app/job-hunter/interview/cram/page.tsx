@@ -398,6 +398,10 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
   const [genError, setGenError] = useState<string | null>(null);
 
   const [adding, setAdding] = useState(false); // 「＋ 添加复习资料」面板开关
+  const [editing, setEditing] = useState(false); // 阅读区「编辑文本」模式
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const editRef = useRef<HTMLDivElement | null>(null);
   const [ask, setAsk] = useState<{ passage: string; context: string } | null>(null);
   const [askSeq, setAskSeq] = useState(0); // 每次「追问」自增 → 作 key 让 AskPanel 重挂载(清掉上一段的问答)
   const askRef = useRef<HTMLDivElement | null>(null);
@@ -472,6 +476,33 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
     setTimeout(() => askRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
   }
 
+  function startEdit() {
+    setAdding(false);
+    setEditError(null);
+    setEditing(true);
+  }
+
+  async function saveEdit() {
+    const div = editRef.current;
+    if (!div) {
+      setEditing(false);
+      return;
+    }
+    // 读回用户改后的 body、清洗脚本/事件、用原样式重新组装整份 HTML 存回。
+    const newBody = sanitizeBodyHtml(div.innerHTML);
+    const merged = `<!doctype html><html><head><meta charset="utf-8"><style>${docParts.css}</style></head><body>${newBody}</body></html>`;
+    setSavingEdit(true);
+    setEditError(null);
+    const r = await postJson("/api/job-hunter/interview/cram/session", { id: sessionId, resumeHtml: merged }, "PUT");
+    if (r.ok) {
+      setSession((s) => (s ? { ...s, resumeHtml: merged } : s));
+      setEditing(false);
+    } else {
+      setEditError(r.error || "保存失败");
+    }
+    setSavingEdit(false);
+  }
+
   async function addCandidate(cid: number) {
     const cand = candidates.find((c) => c.cid === cid);
     if (!cand) return;
@@ -525,20 +556,52 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
         speaking={speaking}
       />
 
-      {/* 阅读 + 划词 */}
+      {/* 阅读 + 划词 / 编辑 */}
       <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="mb-2 flex items-start justify-between gap-3">
           <p className="text-xs font-semibold text-slate-500">
-            📖 阅读区（选中词 = 翻译并可加入单词卡；选中一整段 = 加入知识块 / 生成记忆图卡 / 追问）
+            {editing
+              ? "✏️ 编辑模式：直接在下面改文本，改完点「保存」"
+              : "📖 阅读区（选中词 = 翻译并可加入单词卡；选中一整段 = 加入知识块 / 生成记忆图卡 / 追问）"}
           </p>
-          <button
-            onClick={() => setAdding((v) => !v)}
-            className="shrink-0 rounded-lg border border-emerald-200 px-2.5 py-1 text-xs font-medium text-emerald-600 transition hover:bg-emerald-50"
-          >
-            {adding ? "收起" : "＋ 添加复习资料"}
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {editing ? (
+              <>
+                <button
+                  onClick={saveEdit}
+                  disabled={savingEdit}
+                  className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-60"
+                >
+                  {savingEdit ? "保存中…" : "保存"}
+                </button>
+                <button
+                  onClick={() => setEditing(false)}
+                  disabled={savingEdit}
+                  className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-500 transition hover:bg-slate-50 disabled:opacity-60"
+                >
+                  取消
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={startEdit}
+                  className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
+                >
+                  ✏️ 编辑文本
+                </button>
+                <button
+                  onClick={() => setAdding((v) => !v)}
+                  className="rounded-lg border border-emerald-200 px-2.5 py-1 text-xs font-medium text-emerald-600 transition hover:bg-emerald-50"
+                >
+                  {adding ? "收起" : "＋ 添加复习资料"}
+                </button>
+              </>
+            )}
+          </div>
         </div>
-        {adding && (
+        {editError && <p className="mb-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{editError}</p>}
+        {adding && !editing && (
           <AddMaterial
             sessionId={sessionId}
             currentHtml={session.resumeHtml}
@@ -549,16 +612,29 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
           />
         )}
         <div className="max-h-[70vh] overflow-auto rounded-xl border border-slate-100 bg-slate-50/40 p-2">
-          <CramSelectable
-            sessionId={sessionId}
-            className="cram-reader"
-            onChanged={loadCards}
-            onGenerate={handleGenerate}
-            onAsk={handleAsk}
-          >
-            <style dangerouslySetInnerHTML={{ __html: docParts.css }} />
-            <div dangerouslySetInnerHTML={{ __html: docParts.body }} />
-          </CramSelectable>
+          {editing ? (
+            <>
+              <style dangerouslySetInnerHTML={{ __html: docParts.css }} />
+              <div
+                ref={editRef}
+                contentEditable
+                suppressContentEditableWarning
+                className="cram-reader min-h-[240px] rounded-lg outline-none ring-2 ring-emerald-200 focus:ring-emerald-400"
+                dangerouslySetInnerHTML={{ __html: docParts.body }}
+              />
+            </>
+          ) : (
+            <CramSelectable
+              sessionId={sessionId}
+              className="cram-reader"
+              onChanged={loadCards}
+              onGenerate={handleGenerate}
+              onAsk={handleAsk}
+            >
+              <style dangerouslySetInnerHTML={{ __html: docParts.css }} />
+              <div dangerouslySetInnerHTML={{ __html: docParts.body }} />
+            </CramSelectable>
+          )}
         </div>
       </div>
 
@@ -802,7 +878,7 @@ function CramFlashcard({
   // block
   return (
     <>
-      {card.front && <div className="text-base font-semibold text-slate-800">{card.front}</div>}
+      {card.front && <div className="whitespace-pre-wrap text-base font-semibold text-slate-800">{card.front}</div>}
       {showBack && card.content && (
         <CramSelectable
           sessionId={sessionId}
@@ -858,10 +934,13 @@ const AskPanel = ({
   async function saveAsBlock() {
     if (!answer) return;
     setSaved("saving");
+    // front 同时记下「选中的原文」+「问题」,复习时先看原文和自己的疑问,再揭示答案。
+    const passage = ask.passage.trim();
+    const front = passage ? `${passage}\n\n❓ ${askedQ}` : askedQ;
     const r = await postJson<{ id: number }>("/api/job-hunter/interview/cram/card", {
       sessionId,
       kind: "block",
-      front: askedQ,
+      front,
       content: answer,
     });
     if (r.ok) {
