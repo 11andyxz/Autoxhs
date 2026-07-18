@@ -81,6 +81,24 @@ async function fileToHtml(file: File): Promise<string> {
   throw new Error("unsupported");
 }
 
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** 把粘贴的一大段纯文本转成简单 HTML(按空行分段、保留换行),供阅读器渲染 + 划词。 */
+function textToHtml(text: string): string {
+  const paras = text
+    .replace(/\r\n/g, "\n")
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => `<p>${escapeHtml(p).replace(/\n/g, "<br>")}</p>`)
+    .join("");
+  const css =
+    '.cram-paste{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.75;color:#1e293b;max-width:820px;margin:0 auto;padding:24px 28px;background:#fff}.cram-paste p{margin:0 0 12px}';
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body><div class="cram-paste">${paras || "<p></p>"}</div></body></html>`;
+}
+
 /** 客户端剥掉脚本 / 事件处理器 / javascript: 链接(同文档渲染的卫生处理)。 */
 function sanitizeBodyHtml(s: string): string {
   return s
@@ -193,6 +211,7 @@ function CramUpload() {
   const [html, setHtml] = useState<string | null>(null);
   const [converting, setConverting] = useState(false);
   const [convertError, setConvertError] = useState<string | null>(null);
+  const [pasted, setPasted] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<CramSummary[] | null>(null);
@@ -213,6 +232,7 @@ function CramUpload() {
       setFileName("");
       return;
     }
+    setPasted(""); // 选了文件就清空粘贴框(二者取其一)
     setFileName(file.name);
     if (!isDocx(file) && !isHtml(file)) {
       setConvertError("请上传 .docx 或 .html 文件（旧版 .doc 不支持）。");
@@ -228,13 +248,28 @@ function CramUpload() {
     }
   }
 
+  function onPaste(v: string) {
+    setPasted(v);
+    setSubmitError(null);
+    if (v.trim()) {
+      // 开始粘贴就清掉已选文件(二者取其一)
+      setHtml(null);
+      setFileName("");
+      setConvertError(null);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
+  const canSubmit = !!html || pasted.trim().length > 0;
+
   async function submit() {
-    if (!html) return;
+    const resumeHtml = html ?? (pasted.trim() ? textToHtml(pasted) : null);
+    if (!resumeHtml) return;
     setSubmitting(true);
     setSubmitError(null);
     const r = await postJson<{ sessionId: number }>("/api/job-hunter/interview/cram/session", {
-      resumeHtml: html,
-      name: fileName,
+      resumeHtml,
+      name: fileName, // 粘贴时为空,后端会用正文首行当标题
     });
     if (r.ok && r.data) {
       // 整页跳转:本页挂载时才读一次 ?session=,软跳转不会重挂载。
@@ -248,8 +283,28 @@ function CramUpload() {
   return (
     <div className="space-y-6">
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <p className="text-sm font-semibold text-slate-800">上传要猛攻的简历 / 面试稿</p>
-        <label className="mt-3 flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-200 px-4 py-8 text-center transition hover:border-emerald-300 hover:bg-emerald-50/30">
+        <p className="text-sm font-semibold text-slate-800">粘贴或上传要猛攻的简历 / 面试稿 / 复习资料</p>
+
+        {/* 方式一:直接粘贴一大段文本 */}
+        <div className="mt-3">
+          <label className="mb-1 block text-xs font-medium text-slate-500">✍️ 直接粘贴文本（复习资料、面试稿……）</label>
+          <textarea
+            value={pasted}
+            onChange={(e) => onPaste(e.target.value)}
+            rows={7}
+            placeholder="把你的复习资料整段粘贴到这里，然后就能在下面阅读区里划词翻译、加入知识块、选一大段生成记忆卡片、随时追问。"
+            className="w-full resize-y rounded-xl border border-slate-200 px-3 py-2 text-sm leading-relaxed outline-none focus:border-emerald-400"
+          />
+        </div>
+
+        <div className="my-3 flex items-center gap-3 text-xs text-slate-400">
+          <span className="h-px flex-1 bg-slate-100" />
+          或
+          <span className="h-px flex-1 bg-slate-100" />
+        </div>
+
+        {/* 方式二:上传文件 */}
+        <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-200 px-4 py-6 text-center transition hover:border-emerald-300 hover:bg-emerald-50/30">
           <input
             ref={inputRef}
             type="file"
@@ -263,10 +318,11 @@ function CramUpload() {
           </span>
           <span className="mt-1 text-xs text-slate-400">保留原格式渲染，供你逐句阅读、划词</span>
         </label>
+
         {converting && <p className="mt-3 text-sm text-slate-400">正在读取文档……</p>}
         {convertError && <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">{convertError}</p>}
         {submitError && <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">{submitError}</p>}
-        {html && (
+        {canSubmit && (
           <button
             onClick={submit}
             disabled={submitting}

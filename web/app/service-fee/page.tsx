@@ -52,6 +52,7 @@ type ClientInfo = {
   exists: boolean;
   clientId?: number;
   displayName?: string;
+  actualTaxPaid: number; // 客户累计「实际 tax」;税务余额 = 累计 Tax Withheld − 实际 tax
   suggestedNextStartDate: string | null;
   history: HistoryRecord[];
 };
@@ -92,6 +93,8 @@ export default function ServiceFeePage() {
   const [exporting, setExporting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [openDetail, setOpenDetail] = useState<number | null>(null);
+  const [actualTaxInput, setActualTaxInput] = useState(""); // 客户「实际 tax」输入(税务余额减数)
+  const [savingActualTax, setSavingActualTax] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -102,6 +105,15 @@ export default function ServiceFeePage() {
     loadClients();
   }, []);
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
+
+  // 选中/加载客户后,把输入框同步为库里已存的「实际 tax」;非持久化客户则清空
+  useEffect(() => {
+    if (clientInfo && clientInfo.clientId != null) {
+      setActualTaxInput(clientInfo.actualTaxPaid ? String(clientInfo.actualTaxPaid) : "");
+    } else {
+      setActualTaxInput("");
+    }
+  }, [clientInfo?.clientId, clientInfo?.actualTaxPaid]);
 
   function showToast(msg: string) {
     setToast(msg);
@@ -157,6 +169,7 @@ export default function ServiceFeePage() {
     exists: boolean;
     clientId?: number;
     displayName?: string;
+    actualTaxPaid?: number;
     priorCharges: PriorCharges;
     suggestedNextStartDate: string | null;
     history: HistoryRecord[];
@@ -185,14 +198,41 @@ export default function ServiceFeePage() {
       exists: data.exists,
       clientId: data.clientId,
       displayName: data.displayName,
+      actualTaxPaid: data.actualTaxPaid ?? 0,
       suggestedNextStartDate: data.suggestedNextStartDate,
       history: data.history ?? [],
     });
   }
 
+  // 选中客户时,用其上一条记录里的「固定项」(工时/时薪/各项费用/起算日)预填,免得每次重输;
+  // 无历史(新客户/雇员)则回到默认值。日期这类每期都变的不预填。
+  function prefillFeeFields(history: HistoryRecord[]) {
+    const inp = history[0]?.result?.inputs;
+    if (inp) {
+      setWeeklyWorkHours(String(inp.weeklyWorkHours ?? DEFAULTS.weeklyWorkHours));
+      setHourlyWage(Number.isFinite(inp.hourlyWage) ? String(inp.hourlyWage) : DEFAULTS.hourlyWage);
+      setTaxWithheld(String(inp.taxWithheldPerPayroll ?? DEFAULTS.taxWithheld));
+      setPayrollFee(String(inp.monthlyPayrollFee ?? DEFAULTS.payrollFee));
+      setServiceCharge(String(inp.monthlyServiceCharge ?? DEFAULTS.serviceCharge));
+      // 起算日是客户级固定值,常只在首条设过;最近一条若没设,回退到最近「有设」的那条
+      const anchor = history.find((r) => r.result?.inputs?.serviceChargeAnchorDate)?.result?.inputs
+        ?.serviceChargeAnchorDate;
+      setServiceChargeAnchor(anchor ?? "");
+    } else {
+      setWeeklyWorkHours(DEFAULTS.weeklyWorkHours);
+      setHourlyWage(DEFAULTS.hourlyWage);
+      setTaxWithheld(DEFAULTS.taxWithheld);
+      setPayrollFee(DEFAULTS.payrollFee);
+      setServiceCharge(DEFAULTS.serviceCharge);
+      setServiceChargeAnchor("");
+    }
+  }
+
   async function loadClientInfo(clientId: number) {
     try {
-      applyClientInfo(await lookupClient({ clientId }));
+      const data = await lookupClient({ clientId });
+      applyClientInfo(data);
+      prefillFeeFields(data.history ?? []);
     } catch {
       setClientInfo(null);
     }
@@ -203,12 +243,15 @@ export default function ServiceFeePage() {
     setComboOpen(false);
     // 雇员项(无 client id):按新客户处理,保存时再按名建客户
     if (c.id != null) loadClientInfo(c.id);
-    else setClientInfo({ exists: false, suggestedNextStartDate: null, history: [] });
+    else {
+      setClientInfo({ exists: false, actualTaxPaid: 0, suggestedNextStartDate: null, history: [] });
+      prefillFeeFields([]); // 无历史 → 默认值
+    }
   }
 
   function chooseNewClient() {
     setComboOpen(false);
-    setClientInfo({ exists: false, suggestedNextStartDate: null, history: [] });
+    setClientInfo({ exists: false, actualTaxPaid: 0, suggestedNextStartDate: null, history: [] });
   }
 
   async function onCalculate() {
@@ -409,6 +452,49 @@ export default function ServiceFeePage() {
     : clients;
   const exactClientMatch = clients.some((c) => c.displayName.trim().toLowerCase() === clientQuery);
 
+  // 客户税务余额:累计 Tax Withheld(只统计「已付」记录的 total_tax 合计) − 实际 tax
+  const showTaxBalance = !!clientInfo && clientInfo.clientId != null;
+  const paidTaxRecords = useMemo(
+    () => (clientInfo?.history ?? []).filter((r) => r.paid),
+    [clientInfo],
+  );
+  const cumulativeTaxWithheld = useMemo(
+    () => round2(paidTaxRecords.reduce((s, r) => s + (r.totalTax || 0), 0)),
+    [paidTaxRecords],
+  );
+  const taxBalance = round2(cumulativeTaxWithheld - num(actualTaxInput, 0));
+  const actualTaxDirty =
+    !!clientInfo && round2(num(actualTaxInput, 0)) !== round2(clientInfo.actualTaxPaid ?? 0);
+
+  async function onSaveActualTax() {
+    const cid = clientInfo?.clientId;
+    if (cid == null) return;
+    const amount = round2(num(actualTaxInput, 0));
+    if (!Number.isFinite(amount) || amount < 0) {
+      showToast("实际 tax 必须是不小于 0 的数字");
+      return;
+    }
+    setSavingActualTax(true);
+    try {
+      const res = await fetch("/api/service-fee/actual-tax", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId: cid, actualTax: amount }),
+      });
+      const json = (await res.json()) as { success: boolean; actualTaxPaid?: number; error?: string };
+      if (!json.success) {
+        showToast(json.error ?? "保存失败,请稍后重试");
+        return;
+      }
+      setClientInfo((prev) => (prev ? { ...prev, actualTaxPaid: json.actualTaxPaid ?? amount } : prev));
+      showToast("已保存实际 tax");
+    } catch {
+      showToast("保存失败,请稍后重试");
+    } finally {
+      setSavingActualTax(false);
+    }
+  }
+
   return (
     <main className="min-h-screen bg-slate-50">
       <div className="mx-auto max-w-5xl px-4 py-10">
@@ -493,6 +579,52 @@ export default function ServiceFeePage() {
             )}
           </div>
         </section>
+
+        {/* 客户税务余额 */}
+        {showTaxBalance && (
+          <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h2 className="text-sm font-semibold text-slate-800">客户税务余额 <span className="text-slate-400">Tax Balance</span></h2>
+            <p className="mt-1 text-xs text-slate-400">
+              余额 = 累计 Tax Withheld − 实际 tax。累计 Tax Withheld 只统计该客户「已付」的记录;实际 tax 保存后长期跟踪,刷新后仍在。
+            </p>
+            <div className="mt-4 grid gap-4 sm:grid-cols-3">
+              <div className="rounded-xl bg-slate-50 px-4 py-3">
+                <div className="text-[11px] text-slate-500">累计 Tax Withheld</div>
+                <div className="mt-1 text-lg font-bold text-slate-900">{usd(cumulativeTaxWithheld)}</div>
+                <div className="mt-0.5 text-[11px] text-slate-400">{paidTaxRecords.length} 条已付记录合计(共 {clientInfo!.history.length} 条)</div>
+              </div>
+              <div>
+                <span className="mb-1 block text-xs font-medium text-slate-600">实际 tax(Real Tax,$)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={actualTaxInput}
+                  onChange={(e) => setActualTaxInput(e.target.value)}
+                  placeholder="0.00"
+                  className={inputCls}
+                />
+                <div className="mt-2 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onSaveActualTax}
+                    disabled={savingActualTax || !actualTaxDirty}
+                    title={!actualTaxDirty ? "与已保存值一致" : "保存实际 tax 到数据库"}
+                    className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+                  >
+                    {savingActualTax ? "保存中…" : "保存实际 tax"}
+                  </button>
+                  {actualTaxDirty && <span className="text-[11px] text-amber-600">未保存</span>}
+                </div>
+              </div>
+              <div className={`rounded-xl px-4 py-3 ${taxBalance >= 0 ? "bg-emerald-50" : "bg-red-50"}`}>
+                <div className="text-[11px] text-slate-500">客户目前的余额</div>
+                <div className={`mt-1 text-xl font-extrabold ${taxBalance >= 0 ? "text-emerald-700" : "text-red-600"}`}>{usd(taxBalance)}</div>
+                <div className="mt-0.5 text-[11px] text-slate-400">Tax Withheld − 实际 tax</div>
+              </div>
+            </div>
+          </section>
+        )}
 
         {/* 日期范围 */}
         <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">

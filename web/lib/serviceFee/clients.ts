@@ -7,11 +7,15 @@ import type { PriorCharges } from "./types";
 export async function getClientById(id: number): Promise<ClientRow | null> {
   const p = getPool();
   const [rows] = await p.query<RowDataPacket[]>(
-    "SELECT id, display_name FROM clients WHERE id = ? LIMIT 1",
+    "SELECT id, display_name, actual_tax_paid FROM clients WHERE id = ? LIMIT 1",
     [id],
   );
   if (!rows.length) return null;
-  return { id: rows[0].id as number, displayName: rows[0].display_name as string };
+  return {
+    id: rows[0].id as number,
+    displayName: rows[0].display_name as string,
+    actualTaxPaid: Number(rows[0].actual_tax_paid ?? 0),
+  };
 }
 
 export interface ClientListItem {
@@ -48,16 +52,27 @@ export async function listClients(): Promise<ClientListItem[]> {
 export interface ClientRow {
   id: number;
   displayName: string;
+  actualTaxPaid: number; // 客户累计「实际 tax」;税务余额 = 累计 Tax Withheld − 实际 tax
 }
 
 export async function getClientByName(name: string): Promise<ClientRow | null> {
   const p = getPool();
   const [rows] = await p.query<RowDataPacket[]>(
-    "SELECT id, display_name FROM clients WHERE normalized_name = ? LIMIT 1",
+    "SELECT id, display_name, actual_tax_paid FROM clients WHERE normalized_name = ? LIMIT 1",
     [normalizeName(name)],
   );
   if (!rows.length) return null;
-  return { id: rows[0].id as number, displayName: rows[0].display_name as string };
+  return {
+    id: rows[0].id as number,
+    displayName: rows[0].display_name as string,
+    actualTaxPaid: Number(rows[0].actual_tax_paid ?? 0),
+  };
+}
+
+/** 更新客户累计「实际 tax」(税务余额的减数)。 */
+export async function setActualTaxPaid(clientId: number, amount: number): Promise<void> {
+  const p = getPool();
+  await p.query("UPDATE clients SET actual_tax_paid = ? WHERE id = ?", [amount, clientId]);
 }
 
 /** 事务内:按归一化名查或建客户,返回 id + 展示名 */
@@ -68,15 +83,21 @@ export async function getOrCreateClient(
   const normalized = normalizeName(name);
   const display = name.trim();
   const [rows] = await conn.query<RowDataPacket[]>(
-    "SELECT id, display_name FROM clients WHERE normalized_name = ? LIMIT 1",
+    "SELECT id, display_name, actual_tax_paid FROM clients WHERE normalized_name = ? LIMIT 1",
     [normalized],
   );
-  if (rows.length) return { id: rows[0].id as number, displayName: rows[0].display_name as string };
+  if (rows.length) {
+    return {
+      id: rows[0].id as number,
+      displayName: rows[0].display_name as string,
+      actualTaxPaid: Number(rows[0].actual_tax_paid ?? 0),
+    };
+  }
   const [res] = await conn.query(
     "INSERT INTO clients (normalized_name, display_name) VALUES (?, ?)",
     [normalized, display],
   );
-  return { id: (res as { insertId: number }).insertId, displayName: display };
+  return { id: (res as { insertId: number }).insertId, displayName: display, actualTaxPaid: 0 };
 }
 
 /**

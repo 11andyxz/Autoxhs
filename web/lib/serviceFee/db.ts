@@ -65,6 +65,7 @@ export function ensureSchema(): Promise<void> {
         id INT AUTO_INCREMENT PRIMARY KEY,
         normalized_name VARCHAR(255) NOT NULL UNIQUE,
         display_name VARCHAR(255) NOT NULL,
+        actual_tax_paid DECIMAL(12,2) NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -129,6 +130,8 @@ export function ensureSchema(): Promise<void> {
     // fee_records 加 paid 状态(旧库幂等补列;逐列独立,防中断/并发)
     await addColumnIfMissing(p, "fee_records", "paid", "ALTER TABLE fee_records ADD COLUMN paid TINYINT(1) NOT NULL DEFAULT 0");
     await addColumnIfMissing(p, "fee_records", "paid_at", "ALTER TABLE fee_records ADD COLUMN paid_at DATETIME NULL");
+    // clients 加「实际 tax」累计额(旧库幂等补列):客户税务余额 = 累计 Tax Withheld − 实际 tax
+    await addColumnIfMissing(p, "clients", "actual_tax_paid", "ALTER TABLE clients ADD COLUMN actual_tax_paid DECIMAL(12,2) NOT NULL DEFAULT 0");
     // 收费记录的付款凭证(标记已付时上传;随记录级联删)
     await p.query(`
       CREATE TABLE IF NOT EXISTS fee_payment_file (

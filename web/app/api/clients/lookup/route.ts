@@ -51,6 +51,7 @@ export async function POST(req: NextRequest) {
       exists: true,
       clientId: client.id,
       displayName: client.displayName,
+      actualTaxPaid: client.actualTaxPaid,
       priorCharges,
       suggestedNextStartDate,
       history,
