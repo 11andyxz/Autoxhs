@@ -3,6 +3,8 @@ import { getClient, getModel } from "@/lib/openai";
 import {
   BANK_SYSTEM,
   COACH_SYSTEM,
+  CRAM_ASK_SYSTEM,
+  CRAM_CARDS_SYSTEM,
   CUSTOM_ANSWER_SYSTEM,
   DIAGRAM_ASK_SYSTEM,
   VOCAB_ASK_SYSTEM,
@@ -22,6 +24,7 @@ import {
 import {
   BANK_JSON_SCHEMA,
   COACH_JSON_SCHEMA,
+  CRAM_CARDS_JSON_SCHEMA,
   CUSTOM_ANSWER_JSON_SCHEMA,
   EXPLAIN_EXTRAS_JSON_SCHEMA,
   GRADE_JSON_SCHEMA,
@@ -33,6 +36,7 @@ import {
   SchemaValidationError,
   normalizeBank,
   normalizeCoach,
+  normalizeCramCards,
   normalizeCustomAnswer,
   normalizeExplainExtras,
   normalizeGrade,
@@ -40,6 +44,7 @@ import {
   normalizeSkills,
   type BankResult,
   type Coach,
+  type CramCards,
   type CustomAnswer,
   type ExplainExtras,
   type Grade,
@@ -325,6 +330,54 @@ export function generateExplainExtras(args: {
     normalizeExplainExtras,
     { timeoutMs: EXTRAS_TIMEOUT_MS, maxRetries: 0 }, // 本地 200s / Vercel 55s(压在 60s 内)
   );
+}
+
+// 简历猛攻的「生成记忆卡片」:一次文本调用,把选中的一大段简历/面试稿变成若干 SVG 记忆卡。
+// 与讲解附加料同口径:本地多张/长超时,Vercel 压 60s 内(共用同一 Aiven 库,本地生成存库线上直接读)。
+const CRAM_MAX_CARDS = ON_VERCEL ? 4 : 6;
+const CRAM_TIMEOUT_MS = ON_VERCEL ? 55_000 : 180_000;
+
+/** 把选中的一段简历/面试稿 → 若干 SVG 记忆卡片(结构/数字/关键词),帮助脱稿背诵。 */
+export function generateResumeCards(args: { passage: string; context: string }): Promise<CramCards> {
+  const content = dataBlock([
+    { label: "SELECTED PASSAGE (turn THIS into memory cards)", body: args.passage },
+    { label: "DOCUMENT CONTEXT (surrounding text, for grounding only)", body: args.context },
+  ]);
+  // 「张数预算」是开发者指令,放系统提示(可信),不放 DATA 块。
+  const system = `${CRAM_CARDS_SYSTEM}\n\nCARD BUDGET: produce up to ${CRAM_MAX_CARDS} cards — as many as it takes to cover the passage so it can be reconstructed from memory (fewer is fine for a short passage). Keep each SVG concise.`;
+  return callJson(
+    system,
+    content,
+    CRAM_CARDS_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "cram_cards",
+    normalizeCramCards,
+    { timeoutMs: CRAM_TIMEOUT_MS, maxRetries: 0 },
+  );
+}
+
+/** 简历猛攻的「追问这段」:据选中段落 + 文档上下文,回答候选人的问题(中文、简洁)。返回纯文本。 */
+export async function answerAboutResume(args: {
+  passage: string;
+  context: string;
+  question: string;
+}): Promise<string> {
+  // 压在路由 maxDuration=60 内。
+  const client = getClient(52_000);
+  const content = dataBlock([
+    { label: "SELECTED PASSAGE", body: args.passage },
+    { label: "DOCUMENT CONTEXT", body: args.context },
+    { label: "QUESTION (the candidate's question about this passage)", body: args.question },
+  ]);
+  const response = await client.responses.create({
+    model: getModel(),
+    input: [
+      { role: "system", content: CRAM_ASK_SYSTEM },
+      { role: "user", content },
+    ],
+  });
+  const text = (response.output_text ?? "").trim();
+  if (!text) throw new SchemaValidationError("回答为空");
+  return text;
 }
 
 /** 「问一下这个词」:据某个单词/短语(释义/例句),回答候选人的问题(中文、简洁)。返回纯文本。 */

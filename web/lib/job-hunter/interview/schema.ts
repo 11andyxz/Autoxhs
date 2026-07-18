@@ -554,6 +554,45 @@ export function normalizeExplainExtras(raw: unknown): ExplainExtras {
   return { keywords, diagrams };
 }
 
+/* ---------------- 简历猛攻:把选中的一大段简历/面试稿 → SVG 记忆卡片(只出图,不出关键词) ---------------- */
+
+export const CRAM_CARDS_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    diagrams: {
+      type: "array",
+      description: "自包含 SVG 记忆卡片(结构/数字/关键词等,视这段内容而定);覆盖完整、精简;张数上限见 CARD BUDGET",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          svg: { type: "string", description: "自包含 <svg viewBox=…>…</svg>,内联、无脚本/外链、文字拼写正确、简洁易读" },
+          caption: { type: "string", description: "中文说明:这张卡帮你记住什么" },
+        },
+        required: ["svg", "caption"],
+      },
+    },
+  },
+  required: ["diagrams"],
+} as const;
+
+export type CramCards = { diagrams: ExplainDiagram[] };
+
+export function normalizeCramCards(raw: unknown): CramCards {
+  const o = (raw ?? {}) as { diagrams?: unknown };
+  const diagrams = (Array.isArray(o.diagrams) ? o.diagrams : [])
+    .map((d) => d as { svg?: unknown; caption?: unknown })
+    .map((d) => ({
+      svg: sanitizeSvg(typeof d.svg === "string" ? d.svg : ""),
+      caption: t(typeof d.caption === "string" ? d.caption : "", 200),
+    }))
+    .filter((d) => d.svg)
+    .slice(0, MAX_DIAGRAMS);
+  if (!diagrams.length) throw new SchemaValidationError("没有生成有效的记忆卡片");
+  return { diagrams };
+}
+
 /* ---------------- 自定义题:用户给一道面试题,AI 生成参考答案 + 分类 ---------------- */
 
 export const CUSTOM_ANSWER_JSON_SCHEMA = {

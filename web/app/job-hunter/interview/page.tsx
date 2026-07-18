@@ -453,6 +453,7 @@ export default function InterviewPage() {
         {!sessionId && (
           <div className="space-y-6">
             <BankPicker banks={banks} />
+            <CramPicker />
             <VocabManager />
           </div>
         )}
@@ -2337,6 +2338,67 @@ function BankPicker({ banks }: { banks: BankSummary[] | null }) {
         </Link>{" "}
         生成。
       </p>
+    </div>
+  );
+}
+
+type CramSummary = { id: number; title: string; language: string; created_at: string; total: number; due: number };
+
+/** 复习中心的「对应简历猛攻版」卡片:列出已上传的简历 + 上传新简历入口。 */
+function CramPicker() {
+  const [sessions, setSessions] = useState<CramSummary[] | null>(null);
+  useEffect(() => {
+    fetch("/api/job-hunter/interview/cram/sessions")
+      .then((r) => r.json())
+      .then((j) => setSessions(j?.success ? (j.sessions as CramSummary[]) : []))
+      .catch(() => setSessions([]));
+  }, []);
+  return (
+    <div className="rounded-2xl border border-emerald-200 bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-800">📄 对应简历猛攻版</p>
+          <p className="mt-0.5 text-xs text-slate-400">
+            上传简历/面试稿：按简历情景划词翻译、加入知识块、选一大段生成 SVG 记忆卡片，按遗忘曲线背到脱稿。
+          </p>
+        </div>
+        <a
+          href="/job-hunter/interview/cram"
+          className="shrink-0 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700"
+        >
+          ＋ 上传新简历
+        </a>
+      </div>
+      {sessions === null ? (
+        <p className="mt-3 text-sm text-slate-400">正在加载……</p>
+      ) : sessions.length === 0 ? (
+        <p className="mt-3 text-xs text-slate-400">还没有猛攻的简历。点右上「上传新简历」开始。</p>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {sessions.map((s) => (
+            <a
+              key={s.id}
+              href={`/job-hunter/interview/cram?session=${s.id}`}
+              className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 px-4 py-3 transition hover:border-emerald-300 hover:bg-emerald-50/40"
+            >
+              <div className="min-w-0">
+                <div className="truncate font-medium text-slate-800">{s.title}</div>
+                <div className="mt-0.5 text-xs text-slate-400">
+                  {s.total} 张卡 · 上传于 {String(s.created_at).slice(0, 10)}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {s.due > 0 ? (
+                  <span className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-600">{s.due} 待复习</span>
+                ) : (
+                  <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-600">已清空</span>
+                )}
+                <span className="text-sm text-emerald-500">猛攻 →</span>
+              </div>
+            </a>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
