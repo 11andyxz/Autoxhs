@@ -4,6 +4,7 @@ import {
   createCramSession,
   findCramSessionByHash,
   getCramSession,
+  updateCramSessionHtml,
 } from "@/lib/job-hunter/interview/cram";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
 import { resumeHash } from "@/lib/job-hunter/interview/sr";
@@ -75,6 +76,30 @@ export async function POST(req: NextRequest) {
     }
   } catch (err) {
     return fail(err, "cram-session-create");
+  }
+}
+
+/** 追加复习资料:把并好的整份 HTML 写回同一 session(客户端已合并 head 样式 + body)。 */
+export async function PUT(req: NextRequest) {
+  if (tooMany(req)) return rateLimited();
+  let body: { id?: unknown; resumeHtml?: unknown };
+  try {
+    body = await req.json();
+  } catch {
+    return bad("请求格式有误。");
+  }
+  const id = Number(body.id);
+  if (!Number.isInteger(id) || id <= 0) return bad("缺少简历 id。");
+  const resumeHtml = typeof body.resumeHtml === "string" ? body.resumeHtml : "";
+  if (!resumeHtml.trim()) return bad("没有可用的内容。");
+  if (resumeHtml.length > MAX_HTML) return bad("内容太多了,请精简后再追加。");
+  try {
+    const s = await getCramSession(id);
+    if (!s) return bad("这份简历不存在。", 404);
+    await updateCramSessionHtml(id, resumeHtml);
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    return fail(err, "cram-session-update");
   }
 }
 

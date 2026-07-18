@@ -135,6 +135,13 @@ export async function listCramSessions(): Promise<CramSessionSummary[]> {
   }));
 }
 
+/** 更新一份简历的正文 HTML(用于「追加复习资料」把新内容并进同一 session)。不动 hash/title。 */
+export async function updateCramSessionHtml(id: number, resumeHtml: string): Promise<void> {
+  await ensureCramSchema();
+  const p = getPool();
+  await p.execute("UPDATE ip_cram_session SET resume_html = ? WHERE id = ?", [resumeHtml.slice(0, MAX_HTML), id]);
+}
+
 export async function deleteCramSession(id: number): Promise<void> {
   await ensureCramSchema();
   const p = getPool();

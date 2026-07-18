@@ -124,6 +124,16 @@ function extractDocParts(html: string): { css: string; body: string } {
   }
 }
 
+/** 把新材料并进已有的整份 HTML:合并 <style>(去重)、body 之间插一条带标签的分隔线。 */
+function appendDoc(existingHtml: string, newHtml: string, label: string): string {
+  const a = extractDocParts(existingHtml);
+  const b = extractDocParts(newHtml);
+  const css = Array.from(new Set([a.css, b.css].filter(Boolean))).join("\n");
+  const sep = `<div style="margin:28px 0 14px;padding-top:14px;border-top:2px dashed #cbd5e1;color:#64748b;font-size:12px;font-weight:600">＋ 追加：${escapeHtml(label || "复习资料")}</div>`;
+  const body = `${a.body}${sep}${b.body}`;
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body>${body}</body></html>`;
+}
+
 function svgDataUri(svg: string): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
@@ -152,9 +162,13 @@ function playTts(blob: Blob, ref: { current: HTMLAudioElement | null }) {
   a.load();
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<{ ok: boolean; data: (T & { success: boolean }) | null; error?: string }> {
+async function postJson<T>(
+  url: string,
+  body: unknown,
+  method: "POST" | "PUT" = "POST",
+): Promise<{ ok: boolean; data: (T & { success: boolean }) | null; error?: string }> {
   try {
-    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const json = await res.json().catch(() => null);
     if (!res.ok || !json?.success) return { ok: false, data: null, error: json?.error || "请求失败" };
     return { ok: true, data: json };
@@ -383,6 +397,7 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
 
+  const [adding, setAdding] = useState(false); // 「＋ 添加复习资料」面板开关
   const [ask, setAsk] = useState<{ passage: string; context: string } | null>(null);
   const [askSeq, setAskSeq] = useState(0); // 每次「追问」自增 → 作 key 让 AskPanel 重挂载(清掉上一段的问答)
   const askRef = useRef<HTMLDivElement | null>(null);
@@ -512,9 +527,27 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
 
       {/* 阅读 + 划词 */}
       <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p className="mb-2 text-xs font-semibold text-slate-500">
-          📖 阅读区（选中词 = 翻译并可加入单词卡；选中一整段 = 加入知识块 / 生成记忆图卡 / 追问）
-        </p>
+        <div className="mb-2 flex items-start justify-between gap-3">
+          <p className="text-xs font-semibold text-slate-500">
+            📖 阅读区（选中词 = 翻译并可加入单词卡；选中一整段 = 加入知识块 / 生成记忆图卡 / 追问）
+          </p>
+          <button
+            onClick={() => setAdding((v) => !v)}
+            className="shrink-0 rounded-lg border border-emerald-200 px-2.5 py-1 text-xs font-medium text-emerald-600 transition hover:bg-emerald-50"
+          >
+            {adding ? "收起" : "＋ 添加复习资料"}
+          </button>
+        </div>
+        {adding && (
+          <AddMaterial
+            sessionId={sessionId}
+            currentHtml={session.resumeHtml}
+            onUpdated={(mergedHtml) => {
+              setSession((s) => (s ? { ...s, resumeHtml: mergedHtml } : s));
+              setAdding(false);
+            }}
+          />
+        )}
         <div className="max-h-[70vh] overflow-auto rounded-xl border border-slate-100 bg-slate-50/40 p-2">
           <CramSelectable
             sessionId={sessionId}
@@ -928,6 +961,111 @@ function CramCardList({ cards, onReload }: { cards: CramCard[]; onReload: () => 
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/* ============================ 追加复习资料(并进同一份阅读区) ============================ */
+
+function AddMaterial({
+  sessionId,
+  currentHtml,
+  onUpdated,
+}: {
+  sessionId: number;
+  currentHtml: string;
+  onUpdated: (mergedHtml: string) => void;
+}) {
+  const [pasted, setPasted] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [fileHtml, setFileHtml] = useState<string | null>(null);
+  const [converting, setConverting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  async function handleFile(file: File | null) {
+    setError(null);
+    setFileHtml(null);
+    if (!file) {
+      setFileName("");
+      return;
+    }
+    setPasted("");
+    setFileName(file.name);
+    if (!isDocx(file) && !isHtml(file)) {
+      setError("请上传 .docx 或 .html 文件。");
+      return;
+    }
+    setConverting(true);
+    try {
+      setFileHtml(await fileToHtml(file));
+    } catch {
+      setError("转换失败，请换一份文件再试。");
+    } finally {
+      setConverting(false);
+    }
+  }
+
+  function onPaste(v: string) {
+    setPasted(v);
+    setError(null);
+    if (v.trim()) {
+      setFileHtml(null);
+      setFileName("");
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
+  const canSave = !!fileHtml || pasted.trim().length > 0;
+
+  async function save() {
+    const newHtml = fileHtml ?? (pasted.trim() ? textToHtml(pasted) : null);
+    if (!newHtml) return;
+    setSaving(true);
+    setError(null);
+    const label = fileName || "粘贴的复习资料";
+    const merged = appendDoc(currentHtml, newHtml, label);
+    const r = await postJson("/api/job-hunter/interview/cram/session", { id: sessionId, resumeHtml: merged }, "PUT");
+    if (r.ok) {
+      onUpdated(merged);
+    } else {
+      setError(r.error || "追加失败");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50/40 p-3">
+      <p className="mb-2 text-xs font-medium text-emerald-700">把新的复习资料并进这份阅读区（粘贴或上传，二选一）</p>
+      <textarea
+        value={pasted}
+        onChange={(e) => onPaste(e.target.value)}
+        rows={4}
+        placeholder="粘贴要追加的文本……"
+        className="w-full resize-y rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed outline-none focus:border-emerald-400"
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <label className="cursor-pointer rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-600 transition hover:border-emerald-300">
+          <input
+            ref={inputRef}
+            type="file"
+            accept={ACCEPT}
+            className="hidden"
+            onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
+          />
+          📄 {fileName ? fileName : "选文件"}
+        </label>
+        {converting && <span className="text-xs text-slate-400">读取中…</span>}
+        <button
+          onClick={save}
+          disabled={!canSave || saving}
+          className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-60"
+        >
+          {saving ? "追加中…" : "追加进阅读区"}
+        </button>
+      </div>
+      {error && <p className="mt-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{error}</p>}
     </div>
   );
 }
