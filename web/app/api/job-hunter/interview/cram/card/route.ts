@@ -1,8 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { addCramCard, deleteCramCard, listCramCards, type CramCardKind } from "@/lib/job-hunter/interview/cram";
+import { addCramCard, deleteCramCard, listCramCards, updateCramCard, type CramCardKind } from "@/lib/job-hunter/interview/cram";
+import { srStateFromStability } from "@/lib/job-hunter/interview/fsrs";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
-import { srState } from "@/lib/job-hunter/interview/sr";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,7 +36,7 @@ export async function GET(req: NextRequest) {
       content: c.content,
       svg: c.svg ?? "",
       extra: parseExtra(c.extra_json),
-      state: srState({ reviewed: c.last_reviewed_at != null, interval_days: c.interval_days }),
+      state: srStateFromStability(c.last_reviewed_at != null, c.fsrs_stability ?? 0),
       isDue: c.is_due === 1,
       dueAt: c.due_at,
     }));
@@ -80,6 +80,29 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, id });
   } catch (err) {
     return fail(err, "cram-card-add");
+  }
+}
+
+/** 手动修改一张卡的正面/背面文字:{id, front?, content?}。 */
+export async function PUT(req: NextRequest) {
+  if (tooMany(req)) return rateLimited();
+  let body: { id?: unknown; front?: unknown; content?: unknown };
+  try {
+    body = await req.json();
+  } catch {
+    return bad("请求格式有误。");
+  }
+  const id = Number(body.id);
+  if (!Number.isInteger(id) || id <= 0) return bad("缺少卡片 id。");
+  const patch: { front?: string; content?: string } = {};
+  if (typeof body.front === "string") patch.front = body.front.trim().slice(0, MAX_FRONT);
+  if (typeof body.content === "string") patch.content = body.content.trim().slice(0, MAX_CONTENT);
+  if (patch.front === undefined && patch.content === undefined) return bad("没有要修改的内容。");
+  try {
+    await updateCramCard(id, patch);
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    return fail(err, "cram-card-update");
   }
 }
 

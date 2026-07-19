@@ -1,8 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { getCramCard, updateCramCardSr } from "@/lib/job-hunter/interview/cram";
+import { getCramCard, updateCramCardFsrs } from "@/lib/job-hunter/interview/cram";
+import { nextReviewLabel, reviewFsrs, srStateFromStability, type RecallGrade } from "@/lib/job-hunter/interview/fsrs";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
-import { gradeToQuality, nextReviewLabel, scheduleNext, srState, type RecallGrade } from "@/lib/job-hunter/interview/sr";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,7 +10,7 @@ export const maxDuration = 60;
 
 const GRADES: RecallGrade[] = ["forgot", "vague", "clear"];
 
-/** 记忆卡自评复习:不记得/似乎记得/清楚 → SM-2 折算 quality → 排下次到期。 */
+/** 记忆卡自评复习:不记得/似乎记得/清楚 → FSRS 算下次到期。 */
 export async function POST(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
 
@@ -28,16 +28,23 @@ export async function POST(req: NextRequest) {
   try {
     const c = await getCramCard(id);
     if (!c) return bad("卡片不存在。", 404);
-    const sr = scheduleNext(
-      { ease_factor: c.ease_factor, interval_days: c.interval_days, repetitions: c.repetitions, lapses: c.lapses },
-      gradeToQuality(grade),
+    const upd = reviewFsrs(
+      {
+        difficulty: c.fsrs_difficulty ?? 0,
+        stability: c.fsrs_stability ?? 0,
+        state: c.fsrs_state,
+        reps: c.repetitions,
+        lapses: c.lapses,
+        elapsedSec: c.elapsed_sec ?? null,
+      },
+      grade,
     );
-    await updateCramCardSr(id, sr, grade);
+    await updateCramCardFsrs(id, upd, grade);
     return NextResponse.json({
       success: true,
-      intervalDays: sr.interval_days,
-      nextReviewLabel: nextReviewLabel(sr.interval_days),
-      state: srState({ reviewed: true, interval_days: sr.interval_days }),
+      intervalDays: upd.intervalDays,
+      nextReviewLabel: nextReviewLabel(upd.intervalDays),
+      state: srStateFromStability(true, upd.stability),
     });
   } catch (err) {
     return fail(err, "cram-card-review");

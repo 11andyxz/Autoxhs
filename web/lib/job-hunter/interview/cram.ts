@@ -12,6 +12,17 @@ import { getPool } from "@/lib/serviceFee/db";
 
 let cramSchemaReady: Promise<void> | null = null;
 
+/** 执行 DDL,忽略「列/键已存在」等可安全重跑的错误码。 */
+async function execIgnoring(sql: string, ignoreCodes: string[]): Promise<void> {
+  const p = getPool();
+  try {
+    await p.query(sql);
+  } catch (err) {
+    const code = (err as { code?: string } | null)?.code;
+    if (!code || !ignoreCodes.includes(code)) throw err;
+  }
+}
+
 export function ensureCramSchema(): Promise<void> {
   if (cramSchemaReady) return cramSchemaReady;
   cramSchemaReady = (async () => {
@@ -49,6 +60,17 @@ export function ensureCramSchema(): Promise<void> {
           REFERENCES ip_cram_session(id) ON DELETE CASCADE
       )
     `);
+    // FSRS(ts-fsrs)状态列。新卡留默认(NULL/0=New),复习时由 FSRS 填。
+    await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN fsrs_difficulty DOUBLE NULL", ["ER_DUP_FIELDNAME"]);
+    await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN fsrs_stability DOUBLE NULL", ["ER_DUP_FIELDNAME"]);
+    await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN fsrs_state TINYINT NOT NULL DEFAULT 0", ["ER_DUP_FIELDNAME"]);
+    // 老卡(SM-2 时代已复习过)一次性播种 FSRS 状态,保住已有进度:稳定性≈原间隔、难度取中值、状态=Review。
+    // WHERE 天然幂等(播种后 fsrs_stability 非空就不再命中);新卡/未复习卡不动(仍算 New)。
+    await execIgnoring(
+      `UPDATE ip_cram_card SET fsrs_stability = GREATEST(interval_days, 1), fsrs_difficulty = 5, fsrs_state = 2
+        WHERE fsrs_stability IS NULL AND last_reviewed_at IS NOT NULL`,
+      [],
+    );
   })().catch((err) => {
     cramSchemaReady = null; // 失败不缓存,下次重试
     throw err;
@@ -164,10 +186,14 @@ export type CramCardRow = {
   interval_days: number;
   repetitions: number;
   lapses: number;
+  fsrs_difficulty: number | null;
+  fsrs_stability: number | null;
+  fsrs_state: number;
   due_at: string | null;
   last_reviewed_at: string | null;
   last_grade: string | null;
   is_due: number;
+  elapsed_sec?: number | null; // 距上次复习的秒数(仅 getCramCard 复习时返回)
 };
 
 const numify = (r: CramCardRow): CramCardRow => ({
@@ -176,7 +202,11 @@ const numify = (r: CramCardRow): CramCardRow => ({
   interval_days: Number(r.interval_days),
   repetitions: Number(r.repetitions),
   lapses: Number(r.lapses),
+  fsrs_difficulty: r.fsrs_difficulty == null ? null : Number(r.fsrs_difficulty),
+  fsrs_stability: r.fsrs_stability == null ? null : Number(r.fsrs_stability),
+  fsrs_state: Number(r.fsrs_state),
   is_due: Number(r.is_due),
+  elapsed_sec: r.elapsed_sec == null ? null : Number(r.elapsed_sec),
 });
 
 export async function addCramCard(v: {
@@ -238,7 +268,7 @@ export async function addCramCardsBulk(
 
 const CARD_COLS =
   `id, session_id, kind, front, content, svg, extra_json, ease_factor, interval_days, repetitions, lapses,
-   due_at, last_reviewed_at, last_grade`;
+   fsrs_difficulty, fsrs_stability, fsrs_state, due_at, last_reviewed_at, last_grade`;
 
 export async function listCramCards(sessionId: number): Promise<CramCardRow[]> {
   await ensureCramSchema();
@@ -258,29 +288,62 @@ export async function listCramCards(sessionId: number): Promise<CramCardRow[]> {
 export async function getCramCard(id: number): Promise<CramCardRow | null> {
   await ensureCramSchema();
   const p = getPool();
+  // elapsed_sec:距上次复习的秒数(库内算差,避开时区),供 FSRS 计算 elapsed_days。
   const [rows] = await p.execute<RowDataPacket[]>(
-    `SELECT ${CARD_COLS}, 1 AS is_due FROM ip_cram_card WHERE id = ?`,
+    `SELECT ${CARD_COLS}, 1 AS is_due,
+            TIMESTAMPDIFF(SECOND, last_reviewed_at, NOW()) AS elapsed_sec
+       FROM ip_cram_card WHERE id = ?`,
     [id],
   );
   const r = rows[0] as CramCardRow | undefined;
   return r ? numify(r) : null;
 }
 
-/** 复习后按 SM-2 更新记忆卡调度(与 updateKnowledgeSr 同口径)。 */
-export async function updateCramCardSr(
+/** 手动修改卡片正面/背面文字(题库答案不准时改)。只更新传了的字段,不动 SM-2 进度。 */
+export async function updateCramCard(id: number, patch: { front?: string; content?: string }): Promise<void> {
+  await ensureCramSchema();
+  const p = getPool();
+  const sets: string[] = [];
+  const params: Array<string | number | null> = [];
+  if (patch.front !== undefined) {
+    sets.push("front = ?");
+    params.push(patch.front.slice(0, 2000) || null);
+  }
+  if (patch.content !== undefined) {
+    sets.push("content = ?");
+    params.push(patch.content.slice(0, 8000));
+  }
+  if (!sets.length) return;
+  params.push(id);
+  await p.execute(`UPDATE ip_cram_card SET ${sets.join(", ")} WHERE id = ?`, params);
+}
+
+/** 复习后按 FSRS 更新记忆卡调度。写入难度/稳定性/状态/reps/lapses,due_at 用整天间隔落库(避开时区)。 */
+export async function updateCramCardFsrs(
   id: number,
-  update: { ease_factor: number; interval_days: number; repetitions: number; lapses: number },
+  update: { difficulty: number; stability: number; state: number; reps: number; lapses: number; intervalDays: number },
   grade: string,
 ): Promise<void> {
   await ensureCramSchema();
   const p = getPool();
   await p.execute(
     `UPDATE ip_cram_card
-        SET ease_factor = ?, interval_days = ?, repetitions = ?, lapses = ?,
+        SET fsrs_difficulty = ?, fsrs_stability = ?, fsrs_state = ?,
+            repetitions = ?, lapses = ?, interval_days = ?,
             last_grade = ?, last_reviewed_at = NOW(),
             due_at = DATE_ADD(NOW(), INTERVAL ? DAY)
       WHERE id = ?`,
-    [update.ease_factor, update.interval_days, update.repetitions, update.lapses, grade, update.interval_days, id],
+    [
+      update.difficulty,
+      update.stability,
+      update.state,
+      update.reps,
+      update.lapses,
+      update.intervalDays,
+      grade,
+      update.intervalDays,
+      id,
+    ],
   );
 }
 

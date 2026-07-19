@@ -797,7 +797,7 @@ function CramReview({
               {KIND_LABEL[cur.kind]} · {SR_STATE_LABEL[cur.state]}
             </span>
           </div>
-          <CramFlashcard card={cur} showBack={showBack} sessionId={sessionId} speak={speak} speaking={speaking} onChanged={onReload} />
+          <CramFlashcard key={cur.id} card={cur} showBack={showBack} sessionId={sessionId} speak={speak} speaking={speaking} onChanged={onReload} />
           {!showBack ? (
             <button
               onClick={() => setRevealed(true)}
@@ -845,6 +845,7 @@ function CramReview({
   );
 }
 
+/** 一张复习卡的展示 + 内联编辑(题库答案不准时改)。用 key={card.id} 挂载,换卡自动重置。 */
 function CramFlashcard({
   card,
   showBack,
@@ -860,15 +861,97 @@ function CramFlashcard({
   speaking: boolean;
   onChanged: () => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [ef, setEf] = useState(card.front); // 正面(问题/词)
+  const [ec, setEc] = useState(card.content); // 背面(答案/释义/说明)
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    const r = await postJson("/api/job-hunter/interview/cram/card", { id: card.id, front: ef, content: ec }, "PUT");
+    setSaving(false);
+    if (r.ok) {
+      onChanged?.();
+      setEditing(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="space-y-2">
+        {card.kind === "svg" && (
+          <div className="overflow-x-auto rounded-lg border border-slate-100 bg-white p-2">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={svgDataUri(card.svg)} alt="记忆卡片" className="mx-auto max-w-full" />
+          </div>
+        )}
+        {card.kind !== "svg" && (
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-500">{card.kind === "word" ? "词" : "正面 / 问题"}</label>
+            <textarea
+              value={ef}
+              onChange={(e) => setEf(e.target.value)}
+              rows={card.kind === "word" ? 1 : 2}
+              className="w-full resize-y rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-400"
+            />
+          </div>
+        )}
+        <div>
+          <label className="mb-0.5 block text-xs font-medium text-slate-500">
+            {card.kind === "svg" ? "图片说明" : card.kind === "word" ? "释义" : "背面 / 答案"}
+          </label>
+          <textarea
+            value={ec}
+            onChange={(e) => setEc(e.target.value)}
+            rows={7}
+            className="w-full resize-y rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed outline-none focus:border-emerald-400"
+          />
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={save}
+            disabled={saving}
+            className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-60"
+          >
+            {saving ? "保存中…" : "保存"}
+          </button>
+          <button
+            onClick={() => {
+              setEf(card.front);
+              setEc(card.content);
+              setEditing(false);
+            }}
+            className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-500 transition hover:bg-slate-50"
+          >
+            取消
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const editBtn = (
+    <div className="mb-1 flex justify-end">
+      <button
+        onClick={() => setEditing(true)}
+        title="修改这张卡"
+        className="text-xs text-slate-300 transition hover:text-slate-500"
+      >
+        ✏️ 改
+      </button>
+    </div>
+  );
+
   if (card.kind === "word") {
-    const en = card.extra?.en || card.front;
+    const en = card.extra?.en || ef;
     const ipa = card.extra?.ipa || "";
-    const zh = card.extra?.zh || card.content;
+    const zh = card.extra?.zh || ec;
     const note = card.extra?.note || "";
     return (
       <>
+        {editBtn}
         <div className="flex items-center gap-2">
-          <span className="text-base font-semibold text-slate-800">{card.front}</span>
+          <span className="text-base font-semibold text-slate-800">{ef}</span>
           {ipa && <span className="text-xs text-slate-500">{ipa}</span>}
           <button
             onClick={() => speak(en)}
@@ -892,13 +975,12 @@ function CramFlashcard({
   if (card.kind === "svg") {
     return (
       <>
+        {editBtn}
         <div className="overflow-x-auto rounded-lg border border-slate-100 bg-white p-2">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={svgDataUri(card.svg)} alt={card.content || "记忆卡片"} className="mx-auto max-w-full" />
+          <img src={svgDataUri(card.svg)} alt={ec || "记忆卡片"} className="mx-auto max-w-full" />
         </div>
-        {card.content && (
-          <CramSelectable sessionId={sessionId} text={card.content} className="mt-1 text-xs text-slate-500" onChanged={onChanged} />
-        )}
+        {ec && <CramSelectable sessionId={sessionId} text={ec} className="mt-1 text-xs text-slate-500" onChanged={onChanged} />}
       </>
     );
   }
@@ -906,11 +988,12 @@ function CramFlashcard({
   // block
   return (
     <>
-      {card.front && <div className="whitespace-pre-wrap text-base font-semibold text-slate-800">{card.front}</div>}
-      {showBack && card.content && (
+      {editBtn}
+      {ef && <div className="whitespace-pre-wrap text-base font-semibold text-slate-800">{ef}</div>}
+      {showBack && ec && (
         <CramSelectable
           sessionId={sessionId}
-          text={card.content}
+          text={ec}
           className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700"
           onChanged={onChanged}
         />
@@ -1115,7 +1198,7 @@ function CramCardRow({
       </div>
       {expanded && (
         <div className="border-t border-slate-100 px-3 py-3">
-          <CramFlashcard card={card} showBack sessionId={sessionId} speak={speak} speaking={speaking} onChanged={onReload} />
+          <CramFlashcard key={card.id} card={card} showBack sessionId={sessionId} speak={speak} speaking={speaking} onChanged={onReload} />
         </div>
       )}
     </div>
