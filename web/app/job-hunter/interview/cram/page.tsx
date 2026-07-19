@@ -1,8 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+
+/**
+ * 划词组件的「动作总线」:追问 / 生成记忆图卡 交给工作台的共享面板处理。
+ * 工作台在最外层 Provider 一次,里面任何 CramSelectable(阅读区 / 复习卡背面 / 展开的卡片 / 追问答案)
+ * 都自动带上全部动作,无需逐处接线。
+ */
+const CramActions = createContext<{
+  onAsk?: (passage: string, context: string) => void;
+  onGenerate?: (passage: string, context: string) => void;
+}>({});
 
 /* ============================ 类型 ============================ */
 
@@ -398,6 +408,7 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
   const [genError, setGenError] = useState<string | null>(null);
 
   const [adding, setAdding] = useState(false); // 「＋ 添加复习资料」面板开关
+  const [importOpen, setImportOpen] = useState(false); // 「📊 导入题库(Excel)」面板开关
   const [editing, setEditing] = useState(false); // 阅读区「编辑文本」模式
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
@@ -536,6 +547,7 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
   if (!session) return <p className="text-sm text-slate-400">正在加载简历……</p>;
 
   return (
+    <CramActions.Provider value={{ onAsk: handleAsk, onGenerate: handleGenerate }}>
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
@@ -591,7 +603,19 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
                   ✏️ 编辑文本
                 </button>
                 <button
-                  onClick={() => setAdding((v) => !v)}
+                  onClick={() => {
+                    setAdding(false);
+                    setImportOpen((v) => !v);
+                  }}
+                  className="rounded-lg border border-sky-200 px-2.5 py-1 text-xs font-medium text-sky-600 transition hover:bg-sky-50"
+                >
+                  {importOpen ? "收起" : "📊 导入题库(Excel)"}
+                </button>
+                <button
+                  onClick={() => {
+                    setImportOpen(false);
+                    setAdding((v) => !v);
+                  }}
                   className="rounded-lg border border-emerald-200 px-2.5 py-1 text-xs font-medium text-emerald-600 transition hover:bg-emerald-50"
                 >
                   {adding ? "收起" : "＋ 添加复习资料"}
@@ -601,6 +625,15 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
           </div>
         </div>
         {editError && <p className="mb-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{editError}</p>}
+        {importOpen && !editing && (
+          <ImportExcel
+            sessionId={sessionId}
+            onImported={() => {
+              loadCards();
+              setImportOpen(false);
+            }}
+          />
+        )}
         {adding && !editing && (
           <AddMaterial
             sessionId={sessionId}
@@ -624,13 +657,7 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
               />
             </>
           ) : (
-            <CramSelectable
-              sessionId={sessionId}
-              className="cram-reader"
-              onChanged={loadCards}
-              onGenerate={handleGenerate}
-              onAsk={handleAsk}
-            >
+            <CramSelectable sessionId={sessionId} className="cram-reader" onChanged={loadCards}>
               <style dangerouslySetInnerHTML={{ __html: docParts.css }} />
               <div dangerouslySetInnerHTML={{ __html: docParts.body }} />
             </CramSelectable>
@@ -671,8 +698,9 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
       </div>
 
       {/* 卡片清单 */}
-      <CramCardList cards={cards} onReload={loadCards} />
+      <CramCardList cards={cards} sessionId={sessionId} onReload={loadCards} speak={speak} speaking={speaking} />
     </div>
+    </CramActions.Provider>
   );
 }
 
@@ -983,7 +1011,13 @@ const AskPanel = ({
       {err && <p className="mt-2 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">{err}</p>}
       {answer && (
         <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
-          <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{answer}</p>
+          {/* 回答也支持划词:选词翻译 + 加单词卡/知识块 */}
+          <CramSelectable
+            sessionId={sessionId}
+            text={answer}
+            className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700"
+            onChanged={onSaved}
+          />
           <div className="mt-2">
             {saved === "saved" ? (
               <span className="text-xs font-medium text-violet-600">✓ 已存成知识块</span>
@@ -1005,11 +1039,19 @@ const AskPanel = ({
 
 /* ============================ 卡片清单 ============================ */
 
-function CramCardList({ cards, onReload }: { cards: CramCard[]; onReload: () => void }) {
-  async function remove(id: number) {
-    await fetch(`/api/job-hunter/interview/cram/card?id=${id}`, { method: "DELETE" });
-    onReload();
-  }
+function CramCardList({
+  cards,
+  sessionId,
+  onReload,
+  speak,
+  speaking,
+}: {
+  cards: CramCard[];
+  sessionId: number;
+  onReload: () => void;
+  speak: (t: string) => void;
+  speaking: boolean;
+}) {
   if (!cards.length) {
     return (
       <div className="rounded-2xl border border-slate-200 bg-white p-5 text-sm text-slate-500 shadow-sm">
@@ -1020,26 +1062,62 @@ function CramCardList({ cards, onReload }: { cards: CramCard[]; onReload: () => 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <p className="text-sm font-semibold text-slate-800">全部卡片（{cards.length}）</p>
+      <p className="mt-0.5 text-xs text-slate-400">点任意一张展开看全文（可划词翻译 / 加词 / 加知识块）。</p>
       <div className="mt-3 space-y-1.5">
         {cards.map((c) => (
-          <div key={c.id} className="flex items-center justify-between gap-3 rounded-lg border border-slate-100 px-3 py-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="shrink-0 text-xs text-slate-400">{c.kind === "svg" ? "📊" : c.kind === "word" ? "🔤" : "🧠"}</span>
-              <span className="truncate text-sm text-slate-700">
-                {c.front || c.content || (c.kind === "svg" ? "（图示）" : "")}
-              </span>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SR_STATE_CLASS[c.state]}`}>
-                {SR_STATE_LABEL[c.state]}
-              </span>
-              <button onClick={() => remove(c.id)} className="text-xs text-slate-400 hover:text-rose-500">
-                删除
-              </button>
-            </div>
-          </div>
+          <CramCardRow key={c.id} card={c} sessionId={sessionId} onReload={onReload} speak={speak} speaking={speaking} />
         ))}
       </div>
+    </div>
+  );
+}
+
+function CramCardRow({
+  card,
+  sessionId,
+  onReload,
+  speak,
+  speaking,
+}: {
+  card: CramCard;
+  sessionId: number;
+  onReload: () => void;
+  speak: (t: string) => void;
+  speaking: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  async function remove() {
+    await fetch(`/api/job-hunter/interview/cram/card?id=${card.id}`, { method: "DELETE" });
+    onReload();
+  }
+  const icon = card.kind === "svg" ? "📊" : card.kind === "word" ? "🔤" : "🧠";
+  const label = card.front || card.content || (card.kind === "svg" ? "（图示）" : "");
+  return (
+    <div className="rounded-lg border border-slate-100">
+      <div className="flex items-center justify-between gap-3 px-3 py-2">
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          title={expanded ? "收起" : "展开看全文"}
+        >
+          <span className="shrink-0 text-xs text-slate-400">{icon}</span>
+          <span className="truncate text-sm text-slate-700">{label}</span>
+          <span className="shrink-0 text-[10px] text-slate-300">{expanded ? "▲" : "▼"}</span>
+        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SR_STATE_CLASS[card.state]}`}>
+            {SR_STATE_LABEL[card.state]}
+          </span>
+          <button onClick={remove} className="text-xs text-slate-400 hover:text-rose-500">
+            删除
+          </button>
+        </div>
+      </div>
+      {expanded && (
+        <div className="border-t border-slate-100 px-3 py-3">
+          <CramFlashcard card={card} showBack sessionId={sessionId} speak={speak} speaking={speaking} onChanged={onReload} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1149,6 +1227,155 @@ function AddMaterial({
   );
 }
 
+/* ============================ 导入面试题库 Excel(问题→问答闪卡) ============================ */
+
+type ImportRow = { question: string; answer: string; major: string; category: string; stars: number };
+
+function ImportExcel({ sessionId, onImported }: { sessionId: number; onImported: () => void }) {
+  const [rows, setRows] = useState<ImportRow[] | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [parsing, setParsing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selMajors, setSelMajors] = useState<Set<string>>(new Set());
+  const [starMin, setStarMin] = useState(0);
+  const [importing, setImporting] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  async function handleFile(file: File | null) {
+    setError(null);
+    setRows(null);
+    if (!file) {
+      setFileName("");
+      return;
+    }
+    setFileName(file.name);
+    if (!file.name.toLowerCase().endsWith(".xlsx")) {
+      setError("请上传 .xlsx 文件（题库表格）。");
+      return;
+    }
+    setParsing(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/job-hunter/interview/cram/xlsx", { method: "POST", body: fd });
+      const j = await res.json().catch(() => null);
+      if (j?.success) {
+        const rs = j.rows as ImportRow[];
+        setRows(rs);
+        setSelMajors(new Set(rs.map((r) => r.major || "未分类")));
+        setStarMin(0);
+      } else {
+        setError(j?.error || "解析失败");
+      }
+    } catch {
+      setError("上传/解析失败");
+    } finally {
+      setParsing(false);
+    }
+  }
+
+  const majors = useMemo(() => {
+    const m = new Map<string, number>();
+    (rows || []).forEach((r) => {
+      const k = r.major || "未分类";
+      m.set(k, (m.get(k) || 0) + 1);
+    });
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  }, [rows]);
+
+  const filtered = (rows || []).filter(
+    (r) => selMajors.has(r.major || "未分类") && r.stars >= starMin && (r.question || r.answer),
+  );
+
+  async function doImport() {
+    if (!filtered.length) return;
+    setImporting(true);
+    setError(null);
+    const items = filtered.map((r) => ({ front: r.question, content: r.answer }));
+    const r = await postJson<{ count: number }>("/api/job-hunter/interview/cram/import", { sessionId, items });
+    setImporting(false);
+    if (r.ok && r.data) {
+      onImported();
+    } else {
+      setError(r.error || "导入失败");
+    }
+  }
+
+  function toggleMajor(m: string) {
+    setSelMajors((prev) => {
+      const next = new Set(prev);
+      if (next.has(m)) next.delete(m);
+      else next.add(m);
+      return next;
+    });
+  }
+
+  return (
+    <div className="mb-3 rounded-xl border border-sky-200 bg-sky-50/40 p-3">
+      <p className="mb-2 text-xs font-medium text-sky-700">
+        导入面试题库 Excel（.xlsx）→ 每道题变成一张「问题 / 答案」闪卡，进遗忘曲线，答案可划词翻译 / 追问 / 加词。
+      </p>
+      <label className="inline-flex cursor-pointer items-center rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-600 transition hover:border-sky-300">
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          className="hidden"
+          onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
+        />
+        📊 {fileName ? fileName : "选择题库 Excel"}
+      </label>
+      {parsing && <p className="mt-2 text-xs text-slate-400">正在解析题库……</p>}
+      {error && <p className="mt-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{error}</p>}
+
+      {rows && (
+        <div className="mt-3 space-y-3">
+          <p className="text-xs text-slate-500">
+            共解析到 <span className="font-semibold text-slate-700">{rows.length}</span> 道题。选要导入的大类 / 最低星级：
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {majors.map(([m, n]) => {
+              const active = selMajors.has(m);
+              return (
+                <button
+                  key={m}
+                  onClick={() => toggleMajor(m)}
+                  className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
+                    active ? "bg-sky-600 text-white" : "border border-slate-200 text-slate-500 hover:border-sky-300"
+                  }`}
+                >
+                  {m} · {n}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-500">最低星级：</span>
+            {[0, 1, 2, 3, 4, 5].map((s) => (
+              <button
+                key={s}
+                onClick={() => setStarMin(s)}
+                className={`rounded-md px-2 py-0.5 text-xs font-medium transition ${
+                  starMin === s ? "bg-amber-500 text-white" : "border border-slate-200 text-slate-500 hover:border-amber-300"
+                }`}
+              >
+                {s === 0 ? "全部" : `${s}★+`}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={doImport}
+            disabled={importing || !filtered.length}
+            className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-700 disabled:opacity-60"
+          >
+            {importing ? "导入中…" : `导入选中的 ${filtered.length} 道题`}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ============================ 划词组件(阅读器 + 复习卡背面共用) ============================ */
 
 function CramSelectable({
@@ -1157,17 +1384,14 @@ function CramSelectable({
   children,
   className,
   onChanged,
-  onGenerate,
-  onAsk,
 }: {
   sessionId: number;
   text?: string;
   children?: ReactNode;
   className?: string;
   onChanged?: () => void;
-  onGenerate?: (passage: string, context: string) => void;
-  onAsk?: (passage: string, context: string) => void;
 }) {
+  const { onAsk, onGenerate } = useContext(CramActions);
   const ref = useRef<HTMLDivElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
   const termAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -1389,7 +1613,7 @@ function CramSelectable({
                   {block === "adding" ? "加入中…" : block === "error" ? "重试" : "🧠 加入知识块"}
                 </button>
               )}
-              {pop.isBlock && onGenerate && (
+              {onGenerate && pop.term.trim().length >= 12 && (
                 <button
                   onClick={() => {
                     onGenerate(pop.term, pop.context);

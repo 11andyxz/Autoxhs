@@ -204,6 +204,38 @@ export async function addCramCard(v: {
   return res.insertId;
 }
 
+/** 批量加入复习卡(题库导入用)。分批(每批 100)一条 INSERT ... VALUES 多行,due_at=NOW()。 */
+export async function addCramCardsBulk(
+  sessionId: number,
+  items: Array<{ kind: CramCardKind; front: string; content: string; svg?: string; extra?: unknown }>,
+): Promise<number> {
+  await ensureCramSchema();
+  const p = getPool();
+  const CHUNK = 100;
+  let total = 0;
+  for (let i = 0; i < items.length; i += CHUNK) {
+    const chunk = items.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, NOW())").join(", ");
+    const params: unknown[] = [];
+    for (const it of chunk) {
+      params.push(
+        sessionId,
+        it.kind,
+        (it.front ?? "").slice(0, 2000) || null,
+        (it.content ?? "").slice(0, 8000),
+        (it.svg ?? "").slice(0, 20000) || null,
+        it.extra != null ? JSON.stringify(it.extra).slice(0, 4000) : null,
+      );
+    }
+    const [res] = await p.query<ResultSetHeader>(
+      `INSERT INTO ip_cram_card (session_id, kind, front, content, svg, extra_json, due_at) VALUES ${placeholders}`,
+      params,
+    );
+    total += res.affectedRows || 0;
+  }
+  return total;
+}
+
 const CARD_COLS =
   `id, session_id, kind, front, content, svg, extra_json, ease_factor, interval_days, repetitions, lapses,
    due_at, last_reviewed_at, last_grade`;
