@@ -593,6 +593,35 @@ export function normalizeCramCards(raw: unknown): CramCards {
   return { diagrams };
 }
 
+/* ---------------- AI 校对润色:改语法 + 事实核查纠错,返回改后文本 + 纠正清单 ---------------- */
+
+export const REFINE_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    refined: { type: "string", description: "改好的答案:修语法 + 纠正明显的事实/技术错误,不扩写、保留原语言与结构" },
+    notes: {
+      type: "array",
+      description: "事实/技术层面的纠正或存疑点(中文短句);纯语法改动不列;没有则空数组",
+      items: { type: "string" },
+    },
+  },
+  required: ["refined", "notes"],
+} as const;
+
+export type RefineResult = { refined: string; notes: string[] };
+
+export function normalizeRefine(raw: unknown): RefineResult {
+  const o = (raw ?? {}) as { refined?: unknown; notes?: unknown };
+  const refined = typeof o.refined === "string" ? o.refined.trim().slice(0, 8000) : "";
+  if (!refined) throw new SchemaValidationError("润色结果为空");
+  const notes = (Array.isArray(o.notes) ? o.notes : [])
+    .filter((n): n is string => typeof n === "string" && n.trim().length > 0)
+    .map((n) => t(n, 300))
+    .slice(0, 12);
+  return { refined, notes };
+}
+
 /* ---------------- 自定义题:用户给一道面试题,AI 生成参考答案 + 分类 ---------------- */
 
 export const CUSTOM_ANSWER_JSON_SCHEMA = {

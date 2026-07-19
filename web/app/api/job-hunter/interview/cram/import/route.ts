@@ -23,7 +23,8 @@ export async function POST(req: NextRequest) {
   if (!Array.isArray(body.items) || !body.items.length) return bad("没有要导入的题目。");
   if (body.items.length > MAX_ITEMS) return bad("一次导入的题目太多了，请分批。");
 
-  const items = (body.items as Array<{ front?: unknown; content?: unknown }>)
+  const items = (body.items as unknown[])
+    .filter((it): it is { front?: unknown; content?: unknown } => !!it && typeof it === "object")
     .map((it) => ({
       kind: "block" as const,
       front: typeof it.front === "string" ? it.front.trim() : "",

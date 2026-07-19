@@ -865,6 +865,10 @@ function CramFlashcard({
   const [ef, setEf] = useState(card.front); // 正面(问题/词)
   const [ec, setEc] = useState(card.content); // 背面(答案/释义/说明)
   const [saving, setSaving] = useState(false);
+  const [refining, setRefining] = useState(false);
+  const [refineErr, setRefineErr] = useState<string | null>(null);
+  const [justRefined, setJustRefined] = useState(false);
+  const [refineNotes, setRefineNotes] = useState<string[]>([]);
 
   async function save() {
     setSaving(true);
@@ -873,12 +877,52 @@ function CramFlashcard({
     if (r.ok) {
       onChanged?.();
       setEditing(false);
+      setJustRefined(false);
+      setRefineNotes([]);
     }
   }
+
+  // AI 校对+润色:改语法 + 事实核查纠错(不加内容),把结果填进编辑框、附「纠正/存疑」清单让用户确认后保存。
+  async function aiRefine() {
+    setRefining(true);
+    setRefineErr(null);
+    const r = await postJson<{ refined: string; notes?: string[] }>("/api/job-hunter/interview/cram/refine", {
+      question: ef,
+      answer: ec,
+    });
+    setRefining(false);
+    if (r.ok && r.data) {
+      setEc(r.data.refined);
+      setRefineNotes(Array.isArray(r.data.notes) ? r.data.notes : []);
+      setJustRefined(true);
+      setEditing(true);
+    } else {
+      setRefineErr(r.error || "润色失败");
+    }
+  }
+
+  const canRefine = card.kind !== "svg" && !!ec.trim();
 
   if (editing) {
     return (
       <div className="space-y-2">
+        {justRefined && (
+          <div className="rounded-lg bg-violet-50 px-3 py-2 text-xs text-violet-700">
+            <p className="font-medium">✨ 已 AI 校对 + 润色（改语法 + 纠正明显的事实/技术错误，未加内容）。检查后点「保存」，不满意点「取消」还原。</p>
+            {refineNotes.length > 0 ? (
+              <div className="mt-1.5">
+                <p className="font-medium">🔍 纠正 / 存疑（请自行核对）：</p>
+                <ul className="mt-0.5 list-disc space-y-0.5 pl-4 text-violet-800">
+                  {refineNotes.map((n, i) => (
+                    <li key={i}>{n}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <p className="mt-1 text-violet-500">✓ 没发现明显的事实/技术错误</p>
+            )}
+          </div>
+        )}
         {card.kind === "svg" && (
           <div className="overflow-x-auto rounded-lg border border-slate-100 bg-white p-2">
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -907,7 +951,8 @@ function CramFlashcard({
             className="w-full resize-y rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed outline-none focus:border-emerald-400"
           />
         </div>
-        <div className="flex gap-2">
+        {refineErr && <p className="rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{refineErr}</p>}
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={save}
             disabled={saving}
@@ -920,18 +965,42 @@ function CramFlashcard({
               setEf(card.front);
               setEc(card.content);
               setEditing(false);
+              setJustRefined(false);
+              setRefineNotes([]);
+              setRefineErr(null);
             }}
             className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-500 transition hover:bg-slate-50"
           >
             取消
           </button>
+          {canRefine && (
+            <button
+              onClick={aiRefine}
+              disabled={refining}
+              title="AI 校对润色：改语法 + 核查并纠正明显的事实/技术错误（不加内容）"
+              className="ml-auto rounded-lg border border-violet-200 px-3 py-1.5 text-xs font-medium text-violet-600 transition hover:bg-violet-50 disabled:opacity-60"
+            >
+              {refining ? "润色中…" : "✨ AI 润色"}
+            </button>
+          )}
         </div>
       </div>
     );
   }
 
   const editBtn = (
-    <div className="mb-1 flex justify-end">
+    <div className="mb-1 flex items-center justify-end gap-3">
+      {refineErr && <span className="text-xs text-rose-500">{refineErr}</span>}
+      {canRefine && (
+        <button
+          onClick={aiRefine}
+          disabled={refining}
+          title="AI 校对润色：改语法 + 核查并纠正明显的事实/技术错误（不加内容）"
+          className="text-xs font-medium text-violet-400 transition hover:text-violet-600 disabled:opacity-60"
+        >
+          {refining ? "润色中…" : "✨ AI 润色"}
+        </button>
+      )}
       <button
         onClick={() => setEditing(true)}
         title="修改这张卡"
@@ -945,7 +1014,8 @@ function CramFlashcard({
   if (card.kind === "word") {
     const en = card.extra?.en || ef;
     const ipa = card.extra?.ipa || "";
-    const zh = card.extra?.zh || ec;
+    // 释义以可编辑的 content(ec)为准,这样「改」/「AI 润色」后能立刻反映;退回 extra.zh。
+    const zh = ec || card.extra?.zh || "";
     const note = card.extra?.note || "";
     return (
       <>

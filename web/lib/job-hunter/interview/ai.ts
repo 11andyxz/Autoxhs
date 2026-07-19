@@ -7,6 +7,7 @@ import {
   CRAM_CARDS_SYSTEM,
   CUSTOM_ANSWER_SYSTEM,
   DIAGRAM_ASK_SYSTEM,
+  REFINE_SYSTEM,
   VOCAB_ASK_SYSTEM,
   EXPLAIN_EXTRAS_SYSTEM,
   EXPLAIN_SYSTEM,
@@ -29,6 +30,7 @@ import {
   EXPLAIN_EXTRAS_JSON_SCHEMA,
   GRADE_JSON_SCHEMA,
   QUESTION_JSON_SCHEMA,
+  REFINE_JSON_SCHEMA,
   SKILLS_JSON_SCHEMA,
   TRANSLATE_JSON_SCHEMA,
   VOCAB_DEMO_JSON_SCHEMA,
@@ -41,6 +43,7 @@ import {
   normalizeExplainExtras,
   normalizeGrade,
   normalizeQuestion,
+  normalizeRefine,
   normalizeSkills,
   type BankResult,
   type Coach,
@@ -50,6 +53,7 @@ import {
   type Grade,
   type QuestionGen,
   type QuestionType,
+  type RefineResult,
   type SkillsResult,
 } from "./schema";
 
@@ -352,6 +356,25 @@ export function generateResumeCards(args: { passage: string; context: string }):
     "cram_cards",
     normalizeCramCards,
     { timeoutMs: CRAM_TIMEOUT_MS, maxRetries: 0 },
+  );
+}
+
+/** 「AI 校对 + 润色」:改语法 + 事实核查纠正明显错误(不扩写),并返回一份「纠正/存疑」清单。 */
+export function refineAnswer(args: { question: string; answer: string }): Promise<RefineResult> {
+  const content = dataBlock([
+    { label: "QUESTION (for context)", body: args.question },
+    { label: "ANSWER (proofread + fact-check this)", body: args.answer },
+  ]);
+  return callJson(
+    REFINE_SYSTEM,
+    content,
+    REFINE_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "refine",
+    (raw) => {
+      const r = normalizeRefine(raw);
+      return { refined: stripFences(r.refined), notes: r.notes };
+    },
+    { timeoutMs: 52_000 },
   );
 }
 

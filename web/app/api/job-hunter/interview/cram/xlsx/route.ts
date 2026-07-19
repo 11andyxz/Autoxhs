@@ -51,23 +51,39 @@ export async function POST(req: NextRequest) {
       wb.worksheets[0];
     if (!ws) return bad("这个表里没有数据。");
 
-    // 表头行:按列名定位。
-    const header = ws.getRow(1);
-    const col: Record<string, number> = {};
-    header.eachCell((cell, c) => {
-      const name = cellText(cell.value).trim();
-      if (name) col[name] = c;
-    });
-    const qCol = col["问题"] ?? col["题目"] ?? col["question"] ?? col["Question"];
-    const aCol = col["答案"] ?? col["answer"] ?? col["Answer"];
-    const majorCol = col["大类"] ?? col["类别"];
-    const catCol = col["分类"] ?? col["小类"];
-    const starTextCol = col["星星"];
-    const starNumCol = col["星数"] ?? col["星级"];
+    // 表头行:在前 8 行里找「含 问题/题目/question 列」的那一行(容忍首行是标题/说明横幅)。
+    const Q_RE = /问题|题目|question/i;
+    let headerRowNum = 0;
+    let colNames: Record<number, string> = {};
+    for (let rn = 1; rn <= Math.min(8, ws.rowCount); rn++) {
+      const map: Record<number, string> = {};
+      ws.getRow(rn).eachCell((cell, c) => {
+        const name = cellText(cell.value).trim();
+        if (name) map[c] = name;
+      });
+      if (Object.values(map).some((n) => Q_RE.test(n))) {
+        headerRowNum = rn;
+        colNames = map;
+        break;
+      }
+    }
+    if (!headerRowNum) return bad("没找到「问题」列，请确认这是面试题库的 Excel（需要含「问题」这一列）。");
+
+    // 列名用「包含」匹配,兼容 参考答案 / 答案解析 / 领域 等常见变体。
+    const findCol = (re: RegExp): number | undefined => {
+      for (const [c, name] of Object.entries(colNames)) if (re.test(name)) return Number(c);
+      return undefined;
+    };
+    const qCol = findCol(Q_RE);
+    const aCol = findCol(/答案|解答|参考答案|answer/i);
+    const majorCol = findCol(/大类|类别|领域|方向/i);
+    const catCol = findCol(/分类|小类|子类|知识点|category/i);
+    const starTextCol = findCol(/星星|星级/i);
+    const starNumCol = findCol(/星数/i);
     if (!qCol) return bad("没找到「问题」列，请确认这是面试题库的 Excel。");
 
     const rows: Array<{ question: string; answer: string; major: string; category: string; stars: number }> = [];
-    for (let rn = 2; rn <= ws.rowCount && rows.length < MAX_ROWS; rn++) {
+    for (let rn = headerRowNum + 1; rn <= ws.rowCount && rows.length < MAX_ROWS; rn++) {
       const row = ws.getRow(rn);
       const question = cellText(row.getCell(qCol).value).trim();
       if (!question) continue;
