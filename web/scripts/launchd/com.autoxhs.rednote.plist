@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  本地 rednote 签名服务(127.0.0.1:3456) 的开机自启 + 崩溃自愈（KeepAlive）。
+  这是「每天自动评论」的依赖：它经 CDP 连 AdsPower 里已登录的小红书页取签名。
+  安装：拷到 ~/Library/LaunchAgents/ 再 launchctl load（见 README）。先 pkill 旧的手动实例以免端口占用。
+  前提：AdsPower 已打开并登录目标 profile（XHS_ADS_USER_ID）。AdsPower 没开时服务仍在跑，
+        只是请求会报“未登录”，AdsPower 一登录即恢复，无需重启本服务。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.autoxhs.rednote</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/andyxiongzheng/AndyXiongZheng LLC/Js-Reverse/venv/bin/python</string>
+    <string>/Users/andyxiongzheng/AndyXiongZheng LLC/Js-Reverse/sites/rednote/src/server.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/andyxiongzheng/AndyXiongZheng LLC/Js-Reverse</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>XHS_ADS_USER_ID</key>
+    <string>k1ds45df</string>
+    <key>XHS_PORT</key>
+    <string>3456</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/andyxiongzheng/Library/Logs/autoxhs-rednote.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/andyxiongzheng/Library/Logs/autoxhs-rednote.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

@@ -37,6 +37,67 @@ export function ensureCommentedSchema(): Promise<void> {
   return schemaReady;
 }
 
+// —— 「每天自动评论」的 24 小时滚动闸门 ——
+// 只需记住「上次成功评论的时间点」。用一张固定单行表（主键 job），每次成功 UPSERT 覆盖，
+// 天然只保留最新一条、不累积存储；读回时和 24h 比较决定这次要不要真的发。
+
+/** 自动任务的固定主键：保证该表永远只有这一行。 */
+export const AUTO_RUN_JOB = "homefeed-auto";
+
+let autoSchemaReady: Promise<void> | null = null;
+
+/** 首次使用时建「自动运行记录」表(幂等)。 */
+export function ensureAutoRunSchema(): Promise<void> {
+  if (autoSchemaReady) return autoSchemaReady;
+  autoSchemaReady = (async () => {
+    const p = getPool();
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS xhs_engage_auto_run (
+        job VARCHAR(64) NOT NULL PRIMARY KEY,
+        last_success_at DATETIME NOT NULL,
+        posted_count INT NOT NULL DEFAULT 0,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+  })().catch((err) => {
+    autoSchemaReady = null;
+    throw err;
+  });
+  return autoSchemaReady;
+}
+
+/**
+ * 读上次成功运行的时间，返回 Unix 毫秒时间戳；从未成功跑过返回 null。
+ * 用 UNIX_TIMESTAMP() 让 DB 直接给出 UTC 纪元秒，避免 DATETIME 字符串 + 时区解析的坑。
+ */
+export async function getLastAutoRunAt(job = AUTO_RUN_JOB): Promise<number | null> {
+  await ensureAutoRunSchema();
+  const p = getPool();
+  const [rows] = await p.query<RowDataPacket[]>(
+    `SELECT UNIX_TIMESTAMP(last_success_at) AS ts FROM xhs_engage_auto_run WHERE job = ?`,
+    [job],
+  );
+  const ts = (rows[0] as { ts?: number | string } | undefined)?.ts;
+  if (ts == null) return null;
+  const n = Number(ts);
+  return Number.isFinite(n) ? n * 1000 : null;
+}
+
+/**
+ * 记录一次成功运行（UPSERT 覆盖同一行：把上次的时间点直接改成现在，等于「删掉旧的、只留最新」）。
+ * postedCount 仅作参考，不影响闸门逻辑。
+ */
+export async function recordAutoRun(postedCount = 0, job = AUTO_RUN_JOB): Promise<void> {
+  await ensureAutoRunSchema();
+  const p = getPool();
+  await p.query(
+    `INSERT INTO xhs_engage_auto_run (job, last_success_at, posted_count)
+     VALUES (?, NOW(), ?)
+     ON DUPLICATE KEY UPDATE last_success_at = NOW(), posted_count = VALUES(posted_count)`,
+    [job, Math.max(0, Math.floor(postedCount))],
+  );
+}
+
 /** 查询给定 note_id 中哪些已评论过，返回已评论的集合。 */
 export async function getCommentedNoteIds(noteIds: string[]): Promise<Set<string>> {
   const ids = [...new Set(noteIds.filter((x): x is string => !!x))];

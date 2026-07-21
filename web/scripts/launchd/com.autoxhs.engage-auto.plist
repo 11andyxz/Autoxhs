@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  「每天自动评论」的 launchd 定时代理（模板）。
+  安装：把本文件拷到 ~/Library/LaunchAgents/ 再 launchctl load（见文件末尾 DEPLOY 说明 / scripts/launchd/README）。
+  行为：登录时(RunAtLoad) + 之后每 3600 秒(1h) 唤醒一次；每次只是“检查”，真正发不发由脚本的
+        24h 滚动闸门 + 总开关 ENGAGE_AUTO_ENABLED 决定。总开关默认关 → 装上也不会乱发。
+  说明：机器睡眠/关机期间错过的触发，launchd 会在下次唤醒后补跑一次。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.autoxhs.engage-auto</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/andyxiongzheng/AndyXiongZheng LLC/Autoxhs/web/scripts/engage-auto.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/andyxiongzheng/Library/Logs/autoxhs-engage-auto.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/andyxiongzheng/Library/Logs/autoxhs-engage-auto.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+</dict>
+</plist>
