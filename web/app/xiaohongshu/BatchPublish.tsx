@@ -3,13 +3,32 @@
 import { useRef, useState } from "react";
 
 import { collapseBlankLines, pickCharsPerCard } from "@/lib/xiaohongshu/cards";
+import { PALETTES, STYLES } from "@/lib/xiaohongshu/cards/tokens";
+import type { CardOutline, PaletteId, StyleId } from "@/lib/xiaohongshu/cards/types";
 import { parseNoteId } from "@/lib/xiaohongshu/url";
 import type { RewriteData } from "@/lib/schema";
 
 const MAX_LINKS = 10;
-// 准备阶段（导入→OCR→优化）的并发度。导入会在本地 rednote 服务串行排队，但都很快；
-// OCR/优化走 OpenAI 可并行（rewrite 每 IP 限流 10/分钟，单批 ≤10 条不会触顶）。
+/** 设计卡片右下角水印，与单条页保持一致 */
+const CARD_WATERMARK = "@北美熊哥聊求职";
+// 准备阶段（导入→OCR→优化→拆卡）的并发度。导入会在本地 rednote 服务串行排队，但都很快；
+// OCR/优化/拆卡走 OpenAI 可并行（rewrite 每 IP 限流 10/分钟，单批 ≤10 条不会触顶）。
 const PREP_CONCURRENCY = 4;
+
+const STYLE_OPTIONS: Array<[StyleId | "auto", string]> = [
+  ["auto", "自动选"],
+  ...(Object.entries(STYLES) as Array<[StyleId, { name: string }]>).map(
+    ([id, s]) => [id, s.name] as [StyleId, string],
+  ),
+];
+
+const PALETTE_OPTIONS: Array<[PaletteId | "auto", string]> = [
+  ["auto", "自动选"],
+  ["default", "风格自带"],
+  ...(Object.entries(PALETTES) as Array<[Exclude<PaletteId, "default">, { name: string }]>).map(
+    ([id, p]) => [id, p.name] as [PaletteId, string],
+  ),
+];
 
 type Status =
   | "queued"
@@ -17,7 +36,10 @@ type Status =
   | "ocr"
   | "rewriting"
   | "covering"
+  | "outlining"
   | "prepared"
+  | "rendering"
+  | "uploading"
   | "publishing"
   | "done"
   | "failed"
@@ -36,6 +58,11 @@ type Item = {
   coverCandidates?: string[];
   // 取配图被上游拦截(如账号风控 906)时的原因；有值说明该条会回落默认封面，需提示用户。
   coverReason?: string;
+  // ---- 设计卡片模式专用 ----
+  deckId?: string;
+  outline?: CardOutline;
+  /** 渲染时降到最小字号仍装不下的卡片序号（1 起） */
+  overflow?: number[];
   shareLink?: string | null;
   error?: string;
   // 发布超时/未确认：rednote 可能其实已发布成功 → 重试前需二次确认，避免重复公开。
@@ -48,7 +75,10 @@ const STATUS_META: Record<Status, { label: string; cls: string }> = {
   ocr: { label: "识别图片中…", cls: "bg-sky-50 text-sky-600" },
   rewriting: { label: "AI 优化中…", cls: "bg-sky-50 text-sky-600" },
   covering: { label: "选配图中…", cls: "bg-sky-50 text-sky-600" },
+  outlining: { label: "拆卡中…", cls: "bg-sky-50 text-sky-600" },
   prepared: { label: "待发布", cls: "bg-amber-50 text-amber-700" },
+  rendering: { label: "渲染卡片中…", cls: "bg-amber-50 text-amber-700" },
+  uploading: { label: "上传卡片中…", cls: "bg-amber-50 text-amber-700" },
   publishing: { label: "发布中…", cls: "bg-amber-50 text-amber-700" },
   done: { label: "✅ 已发布", cls: "bg-emerald-50 text-emerald-700" },
   failed: { label: "❌ 失败", cls: "bg-red-50 text-red-600" },
@@ -81,6 +111,10 @@ function parseInput(text: string): { items: Array<{ url: string; noteId: string 
 
 export default function BatchPublish() {
   const [linksText, setLinksText] = useState("");
+  // 总开关：打开后整批走「设计卡片」（本地渲染的图文卡），关闭则是原来的长文文字卡。
+  const [useCards, setUseCards] = useState(false);
+  const [cardStyle, setCardStyle] = useState<StyleId | "auto">("auto");
+  const [cardPalette, setCardPalette] = useState<PaletteId | "auto">("auto");
   const [items, setItems] = useState<Item[]>([]);
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -160,6 +194,40 @@ export default function BatchPublish() {
       throw new Error("AI 未生成有效的标题或正文。");
     }
 
+    // 设计卡片模式：不需要 AI 配图（整叠都是本地渲染的自制卡），改成拆卡。
+    // 顺带完全不碰 /cover_images —— 906 风控那条路径压根不会被触发。
+    if (useCards) {
+      patch(item.id, { status: "outlining" });
+      const ol = await fetch("/api/xiaohongshu/cards/outline", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: chosenTitle,
+          body,
+          tags: data.tags,
+          style: cardStyle,
+          palette: cardPalette,
+          cardCount: "auto",
+          watermark: CARD_WATERMARK,
+        }),
+      });
+      const olJson = (await ol.json().catch(() => null)) as
+        | { success: boolean; deckId?: string; outline?: CardOutline; error?: string }
+        | null;
+      if (!olJson?.success || !olJson.deckId || !olJson.outline) {
+        throw new Error(olJson?.error ?? "拆卡失败，请稍后重试。");
+      }
+      patch(item.id, {
+        status: "prepared",
+        title: chosenTitle,
+        body,
+        tags: data.tags,
+        deckId: olJson.deckId,
+        outline: olJson.outline,
+      });
+      return;
+    }
+
     // 取该条内容的 AI 配图候选（best-effort：失败/超时则该条无候选，发布时按兜底借用其它条的封面）。
     patch(item.id, { status: "covering" });
     let coverCandidates: string[] = [];
@@ -206,22 +274,99 @@ export default function BatchPublish() {
     return chosen;
   }
 
-  // 发布：默认公开（privacy=0）、AI 配图按整批去重分配、带 sourceUrl 记入去重库，
-  // 并带 skipIfPublished 让服务端做发布前幂等检查。自包含处理状态（不抛错给调用方）。
+  /**
+   * 设计卡片模式的出图：渲染整叠 → 串行上传拿 file_id。
+   * 这两步都发生在「真实发布」之前，所以失败可以放心重试，不存在重复公开的风险。
+   * 渲染放在这里（而不是并发的准备阶段）是因为每次渲染都要起一个 Chrome，
+   * 并发 4 个太重；顺序跑一条约 3 秒，10 条也就多半分钟。
+   */
+  async function renderAndUpload(
+    item: Item,
+  ): Promise<{ fileIds: string[]; width: number; height: number }> {
+    if (!item.deckId || !item.outline) throw new Error("这条还没拆卡，无法生成卡片。");
+
+    patch(item.id, { status: "rendering" });
+    const rd = await fetch("/api/xiaohongshu/cards/render", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deckId: item.deckId, outline: item.outline }),
+    });
+    const rdJson = (await rd.json().catch(() => null)) as
+      | {
+          success: boolean;
+          count?: number;
+          overflow?: number[];
+          width?: number;
+          height?: number;
+          error?: string;
+        }
+      | null;
+    if (!rdJson?.success || !rdJson.count) {
+      throw new Error(rdJson?.error ?? "卡片渲染失败。");
+    }
+    // 无条件覆盖（含清空）：重渲后如果不再溢出，旧的提示必须消失
+    patch(item.id, { overflow: rdJson.overflow ?? [] });
+
+    patch(item.id, { status: "uploading" });
+    const ids: string[] = [];
+    for (let i = 1; i <= rdJson.count; i += 1) {
+      const up = await fetch("/api/xiaohongshu/cards/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deckId: item.deckId, index: i }),
+      });
+      const upJson = (await up.json().catch(() => null)) as
+        | { success: boolean; fileId?: string; error?: string }
+        | null;
+      if (!upJson?.success || !upJson.fileId) {
+        throw new Error(upJson?.error ?? `第 ${i} 张卡片上传失败。`);
+      }
+      ids.push(upJson.fileId);
+    }
+    // 尺寸由渲染层回报、原样上报给小红书，避免改了出图尺寸后这里对不上
+    return { fileIds: ids, width: rdJson.width ?? 0, height: rdJson.height ?? 0 };
+  }
+
+  // 发布：默认公开（privacy=0）、带 sourceUrl 记入去重库，并带 skipIfPublished 让服务端做
+  // 发布前幂等检查。自包含处理状态（不抛错给调用方）。
+  // 设计卡片模式走 /publish-images（整叠自制图）；否则走 /publish（长文文字卡 + AI 封面）。
   async function publish(item: Item): Promise<void> {
     if (!item.title || !item.body) {
       patch(item.id, { status: "failed", error: "缺少标题或正文，无法发布。" });
       return;
     }
+
+    let cards: { fileIds: string[]; width: number; height: number } | null = null;
+    if (useCards) {
+      try {
+        cards = await renderAndUpload(item);
+      } catch (e) {
+        // 还没走到发布这一步，重试是安全的（不标 ambiguous）
+        patch(item.id, { status: "failed", error: (e as Error)?.message ?? "卡片生成失败。" });
+        return;
+      }
+    }
+
     patch(item.id, { status: "publishing", error: undefined, ambiguous: false });
 
-    const coverImage = assignCover(item);
-    let res: Response;
-    try {
-      res = await fetch("/api/xiaohongshu/publish", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+    const coverImage = useCards ? undefined : assignCover(item);
+    const endpoint = useCards
+      ? "/api/xiaohongshu/publish-images"
+      : "/api/xiaohongshu/publish";
+    const payload = useCards
+      ? {
+          title: item.title,
+          body: item.body,
+          tags: item.tags ?? [],
+          fileIds: cards?.fileIds ?? [],
+          width: cards?.width,
+          height: cards?.height,
+          confirm: true,
+          privacy: 0,
+          sourceUrl: item.url,
+          skipIfPublished: true,
+        }
+      : {
           title: item.title,
           body: item.body,
           tags: item.tags ?? [],
@@ -231,7 +376,14 @@ export default function BatchPublish() {
           privacy: 0,
           sourceUrl: item.url,
           skipIfPublished: true,
-        }),
+        };
+
+    let res: Response;
+    try {
+      res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       });
     } catch {
       // 网络层中断：rednote 可能已发布、结果未知 → 标记疑似已发布，重试需确认。
@@ -314,9 +466,12 @@ export default function BatchPublish() {
       return;
     }
 
+    const modeText = useCards
+      ? "每条会拆成几张设计卡片（正文放在笔记正文里）"
+      : "每条会把正文渲染成长文文字卡";
     if (
       !window.confirm(
-        `将按「公开」发布 ${parsedItems.length} 条笔记到当前登录的小红书账号，发布后可在小红书端改可见性。确认继续？`,
+        `将按「公开」发布 ${parsedItems.length} 条笔记到当前登录的小红书账号，${modeText}。发布后可在小红书端改可见性。确认继续？`,
       )
     ) {
       return;
@@ -436,7 +591,18 @@ export default function BatchPublish() {
         // 查不到就继续，由服务端 skipIfPublished 做最后兜底
       }
 
-      const fresh: Item = { ...item, status: "queued", error: undefined, shareLink: undefined, ambiguous: false };
+      // 重试要从头来：把上一次的卡片产物（deckId/outline/溢出提示）一并清掉，
+      // 否则 prepare 之前的空档里还挂着旧数据，UI 会显示上一版的张数与风格。
+      const fresh: Item = {
+        ...item,
+        status: "queued",
+        error: undefined,
+        shareLink: undefined,
+        ambiguous: false,
+        deckId: undefined,
+        outline: undefined,
+        overflow: undefined,
+      };
       patch(id, fresh);
       await prepare(fresh);
       // prepare 成功后该条已是 prepared；用最新字段发布
@@ -470,8 +636,79 @@ export default function BatchPublish() {
         <p className="text-sm font-semibold text-gray-800">批量发布</p>
         <p className="mt-1 text-[12px] leading-relaxed text-gray-500">
           一行粘贴一个小红书笔记链接（最多 {MAX_LINKS} 条）。每条自动：导入正文 → 识别图片文字 → AI 优化 →
-          取第一个标题 → <span className="font-medium text-gray-700">公开发布</span>（默认 AI 封面）。
+          取第一个标题 →{" "}
+          {useCards ? (
+            <>
+              拆成设计卡片 → <span className="font-medium text-gray-700">公开发布</span>（整叠自制图）。
+            </>
+          ) : (
+            <>
+              <span className="font-medium text-gray-700">公开发布</span>（长文文字卡 + AI 封面）。
+            </>
+          )}
           之前发布过的相同笔记会自动跳过。
+        </p>
+      </div>
+
+      {/* 总开关：整批改用设计卡片。默认关闭 = 原来的行为。 */}
+      <div className="mt-4 rounded-xl border border-gray-200 p-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={useCards}
+            onClick={() => setUseCards((v) => !v)}
+            disabled={running}
+            className={`relative h-6 w-11 shrink-0 rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 ${
+              useCards ? "bg-xhs" : "bg-gray-300"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
+                useCards ? "left-[22px]" : "left-0.5"
+              }`}
+            />
+          </button>
+          <span className="text-sm font-medium text-gray-800">用设计卡片发（整批）</span>
+          {useCards && (
+            <>
+              <label className="flex items-center gap-1.5 text-sm text-gray-700">
+                风格
+                <select
+                  value={cardStyle}
+                  onChange={(e) => setCardStyle(e.target.value as StyleId | "auto")}
+                  disabled={running}
+                  className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-sm outline-none focus:border-xhs disabled:opacity-50"
+                >
+                  {STYLE_OPTIONS.map(([id, name]) => (
+                    <option key={id} value={id}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-1.5 text-sm text-gray-700">
+                配色
+                <select
+                  value={cardPalette}
+                  onChange={(e) => setCardPalette(e.target.value as PaletteId | "auto")}
+                  disabled={running}
+                  className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-sm outline-none focus:border-xhs disabled:opacity-50"
+                >
+                  {PALETTE_OPTIONS.map(([id, name]) => (
+                    <option key={id} value={id}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
+        </div>
+        <p className="mt-2 text-[11px] leading-relaxed text-gray-400">
+          {useCards
+            ? "开：每条拆成 3~10 张本地渲染的设计卡（1440×1920），完整正文放在笔记正文里。不走小红书 AI 配图，因此不会碰到 906 风控；代价是每条多约 25 秒拆卡 + 3 秒渲染 + 逐张上传。风格选「自动选」时每条会按自己的内容各选各的。"
+            : "关：沿用原来的长文文字卡 + AI 封面。"}
         </p>
       </div>
 
@@ -503,7 +740,9 @@ export default function BatchPublish() {
       </div>
 
       <p className="mt-2 text-[11px] leading-relaxed text-gray-400">
-        准备阶段（导入/识别/优化）并发进行；发布阶段因本地 rednote 服务单线程而逐条顺序提交，请勿关闭页面。
+        准备阶段（导入/识别/优化{useCards ? "/拆卡" : ""}）并发进行；
+        {useCards ? "渲染、上传与发布" : "发布阶段"}
+        因本地 rednote 服务单线程而逐条顺序提交，请勿关闭页面。
       </p>
 
       {error && (
@@ -547,6 +786,19 @@ export default function BatchPublish() {
                     {item.title && (
                       <p className="mt-1 truncate text-sm font-medium text-gray-800">{item.title}</p>
                     )}
+                    {item.outline && (
+                      <p className="mt-1 text-[11px] text-gray-400">
+                        {item.outline.cards.length} 张设计卡 · {STYLES[item.outline.style].name} ·{" "}
+                        {item.outline.palette === "default"
+                          ? "风格自带配色"
+                          : PALETTES[item.outline.palette].name}
+                      </p>
+                    )}
+                    {item.overflow?.length ? (
+                      <p className="mt-1 text-[11px] text-amber-600">
+                        第 {item.overflow.join("、")} 张文字偏长，已自动缩到最小字号
+                      </p>
+                    ) : null}
                     {item.error && <p className="mt-1 text-xs text-red-500">{item.error}</p>}
                     {item.shareLink && (
                       <a

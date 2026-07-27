@@ -8,6 +8,7 @@ import { collapseBlankLines, estimateCardCount } from "@/lib/xiaohongshu/cards";
 import type { RewriteData } from "@/lib/schema";
 
 import BatchPublish from "./BatchPublish";
+import CardStudio from "./CardStudio";
 import Engage from "./Engage";
 
 const MAX_CHARS = 10_000;
@@ -56,6 +57,10 @@ export default function XiaohongshuPage() {
   const [settingPrivacy, setSettingPrivacy] = useState(false);
   // 每张图约多少字：越大单张图字越多、图越少。实测一张图约 380~450 字填满。
   const [charsPerCard, setCharsPerCard] = useState(380);
+  // 配图方式：text=正文渲染成长文文字卡（原有行为）；cards=本地渲染的设计卡片
+  const [imageMode, setImageMode] = useState<"text" | "cards">("text");
+  // 换一篇内容就把卡片工作台整个重置（用 key 强制重挂载，杜绝发出上一篇的图）
+  const [deckKey, setDeckKey] = useState(0);
   // AI 换图：封面配图候选与当前选择
   const [coverCandidates, setCoverCandidates] = useState<string[]>([]);
   const [coverIndex, setCoverIndex] = useState(0);
@@ -219,10 +224,11 @@ export default function XiaohongshuPage() {
       setSelectedTitleIndex(0);
       setEditedBody(json.data.body);
       setIsEditingBody(false);
-      // 新内容 = 新的一篇,清掉上一篇已发布笔记的可见性上下文 + AI 配图候选
+      // 新内容 = 新的一篇,清掉上一篇已发布笔记的可见性上下文 + AI 配图候选 + 已生成的卡片
       setPublishedNoteId(null);
       setPublishedShareLink(null);
       clearCover();
+      setDeckKey((k) => k + 1);
     } catch {
       setError("网络连接失败,请稍后重试。");
     } finally {
@@ -509,6 +515,7 @@ export default function XiaohongshuPage() {
       setPublishedShareLink(null);
       clearCover();
       setCoverPrompt("");
+      setDeckKey((k) => k + 1);
     }
   }
 
@@ -812,6 +819,53 @@ export default function XiaohongshuPage() {
                 )}
               </div>
 
+              {/* 配图方式：文字卡（正文逐字入图，原有行为）/ 设计卡片（本地渲染的信息卡） */}
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <span className="text-sm font-medium text-gray-700">配图方式</span>
+                <div className="inline-flex rounded-lg border border-gray-200 bg-white p-0.5">
+                  {([
+                    ["text", "文字卡"],
+                    ["cards", "设计卡片"],
+                  ] as const).map(([m, label]) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setImageMode(m)}
+                      aria-pressed={imageMode === m}
+                      disabled={publishingAction !== null}
+                      className={`rounded-md px-3 py-1 text-sm font-medium transition disabled:opacity-50 ${
+                        imageMode === m ? "bg-xhs text-white" : "text-gray-600 hover:bg-gray-50"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-[11px] text-gray-400">
+                  {imageMode === "text"
+                    ? "正文自动分页渲染成长文文字卡（第 1 张可换封面）"
+                    : "正文提炼成几张设计卡；完整正文放在笔记正文里"}
+                </span>
+              </div>
+
+              {imageMode === "cards" && (
+                <CardStudio
+                  key={deckKey}
+                  title={selectedTitle}
+                  body={cleanBody}
+                  tags={result?.tags ?? []}
+                  visibility={visibility}
+                  sourceUrl={urlInput.trim() || undefined}
+                  watermark="@北美熊哥聊求职"
+                  onPublished={({ noteId, shareLink }) => {
+                    setPublishedNoteId(noteId);
+                    setPublishedShareLink(shareLink);
+                  }}
+                />
+              )}
+
+              {imageMode === "text" && (
+                <>
               {/* 每张图字数：控制图片数量/密度（越大单张字越多、图越少，更贴近人工长文） */}
               <div className="mt-3 flex flex-wrap items-center gap-3">
                 <span className="text-sm font-medium text-gray-700">每张图字数</span>
@@ -949,6 +1003,8 @@ export default function XiaohongshuPage() {
                 GPT 按主题生成竖版封面，默认带 @北美熊哥聊求职 水印；生成后即作为发布第 1 张图
               </p>
               {coverError && <p className="mt-1 text-xs text-amber-600">{coverError}</p>}
+                </>
+              )}
 
               <div className="mt-4 flex flex-wrap gap-3">
                 <button
@@ -994,6 +1050,9 @@ export default function XiaohongshuPage() {
                 >
                   清空内容
                 </button>
+                {/* 长文发布按钮只属于「文字卡」模式；设计卡片模式有自己的发布闸门 */}
+                {imageMode === "text" && (
+                  <>
                 <button
                   type="button"
                   onClick={() => handlePublish(false)}
@@ -1026,6 +1085,8 @@ export default function XiaohongshuPage() {
                   )}
                   {publishingAction === "post" ? "发布中…" : "Post"}
                 </button>
+                  </>
+                )}
               </div>
 
               {publishedShareLink && (

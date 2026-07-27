@@ -299,6 +299,11 @@ export async function listCramCards(sessionId: number): Promise<CramCardRow[]> {
        FROM ip_cram_card
       WHERE session_id = ?
       ORDER BY (last_reviewed_at IS NOT NULL AND due_at IS NOT NULL AND due_at <= NOW()) DESC,
+               -- 到期的老卡内部:记忆最脆弱的先来(FSRS 稳定性小 = 刚学的 / 刚忘掉打回重学的),
+               -- 这样「今天刚学的」明天排在陈年老卡前面,趁着还没塌下去先加固。
+               -- CASE 只对这一组生效(其他组恒为 NULL → 全相等 → 落到后面的 due_at ASC,顺序不变)。
+               CASE WHEN last_reviewed_at IS NOT NULL AND due_at IS NOT NULL AND due_at <= NOW()
+                    THEN COALESCE(fsrs_stability, interval_days, 0) END ASC,
                due_at ASC, id DESC`,
     [sessionId],
   );
