@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { fileToHtml, isDocx, isHtml } from "@/lib/job-hunter/docxToHtml";
+
 type RuleSource = {
   url: string;
   ok: boolean;
@@ -25,52 +27,6 @@ const LOADING_HINTS = [
   "正在逐条核对规则、重排版式……",
   "整份简历保留格式改写较慢,请耐心等待……",
 ];
-
-function isDocx(file: File): boolean {
-  return (
-    file.name.toLowerCase().endsWith(".docx") ||
-    file.type.includes("wordprocessingml")
-  );
-}
-function isHtml(file: File): boolean {
-  const n = file.name.toLowerCase();
-  return n.endsWith(".html") || n.endsWith(".htm") || file.type === "text/html";
-}
-
-/** 用 docx-preview 把 .docx 高保真渲染成带内联样式的自包含 HTML(保留字体/字号/颜色/版式)。 */
-async function convertDocxToHtml(file: File): Promise<string> {
-  const { renderAsync } = await import("docx-preview");
-  const buf = await file.arrayBuffer();
-  const content = document.createElement("div");
-  const styleEl = document.createElement("div");
-  content.style.cssText = "position:fixed;left:-99999px;top:0;width:816px";
-  document.body.appendChild(content);
-  document.body.appendChild(styleEl);
-  try {
-    await renderAsync(buf, content, styleEl, {
-      className: "docx",
-      inWrapper: true,
-      ignoreLastRenderedPageBreak: true,
-    });
-    const css = styleEl.innerHTML; // <style>…</style> 块
-    const bodyHtml = content.innerHTML;
-    return `<!doctype html><html><head><meta charset="utf-8">${css}</head><body>${bodyHtml}</body></html>`;
-  } finally {
-    content.remove();
-    styleEl.remove();
-  }
-}
-
-/** 把上传的 .docx / .html 统一转成 HTML 字符串(简历与模板共用)。 */
-async function fileToHtml(file: File): Promise<string> {
-  if (isDocx(file)) return convertDocxToHtml(file);
-  if (isHtml(file)) {
-    const text = await file.text();
-    if (!text.trim()) throw new Error("empty");
-    return text;
-  }
-  throw new Error("unsupported");
-}
 
 export default function AlignTab() {
   const [fileName, setFileName] = useState("");

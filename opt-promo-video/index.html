@@ -1,0 +1,1269 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      @font-face {
+        font-family: "PingFang SC";
+        src: local("PingFang SC");
+      }
+
+      @font-face {
+        font-family: "IBM Plex Sans";
+        src: local("IBM Plex Sans");
+      }
+
+      @font-face {
+        font-family: "Newsreader";
+        src: local("Newsreader");
+      }
+
+      @font-face {
+        font-family: "Hiragino Sans GB";
+        src: local("Hiragino Sans GB");
+      }
+
+      @font-face {
+        font-family: "Songti SC";
+        src: local("Songti SC");
+      }
+
+      html,
+      body {
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        background: #101a24;
+      }
+
+      body {
+        font-family: "IBM Plex Sans", "PingFang SC", "Hiragino Sans GB", sans-serif;
+        color: #f6f0e7;
+      }
+
+      #root {
+        position: relative;
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        background: #101a24;
+      }
+
+      .scene {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--fg);
+      }
+
+      .scene:not(:first-child) {
+        opacity: 0;
+      }
+
+      .scene-content {
+        position: relative;
+        z-index: 4;
+        width: 100%;
+        height: 100%;
+        padding: 86px 72px 76px;
+        display: flex;
+        flex-direction: column;
+        gap: 34px;
+        box-sizing: border-box;
+      }
+
+      .ambient {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        pointer-events: none;
+        overflow: hidden;
+      }
+
+      .grain {
+        position: absolute;
+        inset: 0;
+        opacity: 0.12;
+        background-image:
+          linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, rgba(255, 255, 255, 0) 1px),
+          linear-gradient(rgba(255, 255, 255, 0.035) 1px, rgba(255, 255, 255, 0) 1px);
+        background-size: 56px 56px;
+      }
+
+      .orb {
+        position: absolute;
+        width: 560px;
+        height: 560px;
+        border-radius: 50%;
+        background: radial-gradient(circle, color-mix(in srgb, var(--accent) 72%, rgba(255, 255, 255, 0.2)) 0%, rgba(122, 166, 191, 0) 68%);
+        opacity: 0.2;
+        filter: blur(18px);
+      }
+
+      .orb-a {
+        top: -170px;
+        right: -220px;
+      }
+
+      .orb-b {
+        bottom: 210px;
+        left: -260px;
+        background: radial-gradient(circle, rgba(216, 170, 103, 0.52) 0%, rgba(216, 170, 103, 0) 70%);
+        opacity: 0.16;
+      }
+
+      .section-tag {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        min-height: 54px;
+        font-size: 25px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .section-tag span {
+        font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .section-rule {
+        height: 2px;
+        flex: 1;
+        background: linear-gradient(90deg, var(--accent), rgba(255, 255, 255, 0));
+        opacity: 0.85;
+      }
+
+      .media-shell {
+        position: relative;
+        height: 865px;
+        min-height: 865px;
+        border-radius: 34px;
+        overflow: hidden;
+        border: 1px solid color-mix(in srgb, var(--fg) 24%, rgba(255, 255, 255, 0));
+        background:
+          linear-gradient(135deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.03)),
+          var(--panel);
+        box-shadow: 0 34px 90px rgba(0, 0, 0, 0.28);
+      }
+
+      .media-topline {
+        position: absolute;
+        z-index: 8;
+        top: 28px;
+        left: 30px;
+        right: 30px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        color: color-mix(in srgb, var(--fg) 80%, var(--accent));
+        font-size: 19px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        opacity: 0.88;
+      }
+
+      .camera-dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: var(--warm);
+        box-shadow: 0 0 22px color-mix(in srgb, var(--warm) 70%, rgba(255, 255, 255, 0));
+      }
+
+      .shot-grid {
+        position: absolute;
+        inset: 0;
+        padding: 78px 28px 28px;
+        display: grid;
+        grid-template-columns: 1.05fr 0.95fr;
+        grid-template-rows: 1fr 1fr;
+        gap: 18px;
+      }
+
+      .shot {
+        position: relative;
+        overflow: hidden;
+        border-radius: 24px;
+        background:
+          radial-gradient(circle at 80% 16%, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0) 32%),
+          linear-gradient(145deg, color-mix(in srgb, var(--panel) 74%, var(--accent)), var(--panel-deep));
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+      }
+
+      .shot:first-child {
+        grid-row: span 2;
+      }
+
+      .shot::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0), rgba(0, 0, 0, 0.22));
+        pointer-events: none;
+      }
+
+      .art {
+        position: absolute;
+        inset: 0;
+      }
+
+      .floor {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 32%;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(0, 0, 0, 0.18));
+      }
+
+      .window {
+        position: absolute;
+        top: 44px;
+        right: 42px;
+        width: 34%;
+        height: 34%;
+        border-radius: 18px;
+        background:
+          linear-gradient(90deg, rgba(255, 255, 255, 0.24) 1px, rgba(255, 255, 255, 0) 1px),
+          linear-gradient(rgba(255, 255, 255, 0.22) 1px, rgba(255, 255, 255, 0) 1px),
+          linear-gradient(135deg, rgba(255, 255, 255, 0.32), rgba(122, 166, 191, 0.12));
+        background-size: 50% 100%, 100% 50%, 100% 100%;
+        border: 1px solid rgba(255, 255, 255, 0.24);
+      }
+
+      .person {
+        position: absolute;
+        width: 88px;
+        height: 216px;
+        left: 42%;
+        bottom: 23%;
+      }
+
+      .person.small {
+        width: 62px;
+        height: 154px;
+      }
+
+      .head {
+        position: absolute;
+        top: 0;
+        left: 50%;
+        width: 58px;
+        height: 62px;
+        border-radius: 46% 46% 50% 50%;
+        translate: -50% 0;
+        background: #d8b090;
+        box-shadow: inset 0 10px 0 rgba(32, 24, 22, 0.55);
+      }
+
+      .body {
+        position: absolute;
+        top: 64px;
+        left: 50%;
+        width: 86px;
+        height: 116px;
+        translate: -50% 0;
+        border-radius: 24px 24px 10px 10px;
+        background: linear-gradient(180deg, #2f4650, #16242a);
+      }
+
+      .legs {
+        position: absolute;
+        top: 172px;
+        left: 50%;
+        width: 74px;
+        height: 44px;
+        translate: -50% 0;
+        background: linear-gradient(90deg, #192328 0 43%, rgba(255,255,255,0) 43% 57%, #192328 57%);
+      }
+
+      .desk {
+        position: absolute;
+        left: 11%;
+        right: 10%;
+        bottom: 20%;
+        height: 24px;
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--fg) 45%, var(--panel));
+        opacity: 0.75;
+      }
+
+      .laptop {
+        position: absolute;
+        left: 22%;
+        bottom: calc(20% + 24px);
+        width: 34%;
+        height: 24%;
+        border-radius: 14px 14px 4px 4px;
+        background: #101820;
+        border: 5px solid rgba(255, 255, 255, 0.18);
+        box-shadow: 0 16px 30px rgba(0, 0, 0, 0.25);
+      }
+
+      .laptop::before {
+        content: "";
+        position: absolute;
+        inset: 18px;
+        border-radius: 8px;
+        background:
+          linear-gradient(90deg, var(--accent) 0 42%, rgba(255,255,255,0) 42%),
+          linear-gradient(180deg, rgba(255,255,255,0.42) 0 9px, rgba(255,255,255,0) 9px 27px);
+        background-size: 100% 100%, 100% 27px;
+        opacity: 0.72;
+      }
+
+      .paper,
+      .card-shape {
+        position: absolute;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.86);
+        box-shadow: 0 18px 44px rgba(0, 0, 0, 0.16);
+      }
+
+      .paper::before,
+      .card-shape::before {
+        content: "";
+        position: absolute;
+        left: 18px;
+        right: 18px;
+        top: 24px;
+        height: 72%;
+        background: repeating-linear-gradient(180deg, rgba(36, 48, 54, 0.22) 0 7px, rgba(36, 48, 54, 0) 7px 23px);
+        filter: blur(2px);
+      }
+
+      .calendar {
+        position: absolute;
+        left: 18%;
+        top: 17%;
+        width: 64%;
+        height: 56%;
+        border-radius: 24px;
+        background: #f6f0e7;
+        box-shadow: 0 22px 54px rgba(0, 0, 0, 0.26);
+      }
+
+      .calendar::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 0;
+        height: 26%;
+        border-radius: 24px 24px 0 0;
+        background: var(--accent);
+      }
+
+      .calendar::after {
+        content: "90";
+        position: absolute;
+        inset: 28% 0 auto;
+        text-align: center;
+        font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
+        font-size: 112px;
+        font-weight: 800;
+        color: #1f2b30;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .calendar.months::after {
+        content: "36";
+      }
+
+      .cap {
+        position: absolute;
+        left: 18%;
+        top: 19%;
+        width: 148px;
+        height: 74px;
+        rotate: -9deg;
+        background: #17242d;
+        clip-path: polygon(50% 0, 100% 38%, 50% 76%, 0 38%);
+        box-shadow: 0 18px 34px rgba(0, 0, 0, 0.28);
+      }
+
+      .cap::after {
+        content: "";
+        position: absolute;
+        right: 18px;
+        top: 42px;
+        width: 3px;
+        height: 72px;
+        background: var(--warm);
+        transform-origin: top;
+        rotate: 18deg;
+      }
+
+      .path {
+        position: absolute;
+        left: 12%;
+        right: 10%;
+        bottom: 0;
+        height: 45%;
+        background: linear-gradient(110deg, rgba(255,255,255,0) 0 34%, rgba(255,255,255,0.2) 35% 57%, rgba(255,255,255,0) 58%);
+      }
+
+      .building {
+        position: absolute;
+        left: 6%;
+        right: 8%;
+        bottom: 34%;
+        height: 30%;
+        border-radius: 20px 20px 8px 8px;
+        background:
+          repeating-linear-gradient(90deg, rgba(255,255,255,0.18) 0 28px, rgba(255,255,255,0) 28px 54px),
+          rgba(255,255,255,0.12);
+      }
+
+      .mini-cards {
+        position: absolute;
+        inset: 14% 10% 18%;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .mini-card {
+        flex: 1;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.82);
+        position: relative;
+        overflow: hidden;
+      }
+
+      .mini-card::before {
+        content: "";
+        position: absolute;
+        inset: 24px;
+        background:
+          linear-gradient(90deg, rgba(31, 43, 48, 0.28) 0 45%, rgba(31, 43, 48, 0) 45%),
+          repeating-linear-gradient(180deg, rgba(31, 43, 48, 0.22) 0 8px, rgba(31, 43, 48, 0) 8px 24px);
+        filter: blur(1.5px);
+      }
+
+      .question {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        font-family: "Newsreader", "Songti SC", serif;
+        font-size: 230px;
+        color: rgba(255, 255, 255, 0.62);
+      }
+
+      .board-lines {
+        position: absolute;
+        inset: 14%;
+        border-radius: 26px;
+        background:
+          radial-gradient(circle at 30% 32%, var(--accent) 0 13px, rgba(255,255,255,0) 14px),
+          radial-gradient(circle at 72% 44%, var(--warm) 0 13px, rgba(255,255,255,0) 14px),
+          radial-gradient(circle at 50% 72%, rgba(255,255,255,0.72) 0 13px, rgba(255,255,255,0) 14px),
+          linear-gradient(22deg, rgba(255,255,255,0) 0 48%, rgba(255,255,255,0.4) 49% 50%, rgba(255,255,255,0) 51%),
+          linear-gradient(142deg, rgba(255,255,255,0) 0 48%, rgba(255,255,255,0.28) 49% 50%, rgba(255,255,255,0) 51%),
+          rgba(255,255,255,0.1);
+        border: 1px solid rgba(255,255,255,0.2);
+      }
+
+      .inbox {
+        position: absolute;
+        inset: 13%;
+        border-radius: 28px;
+        background: rgba(255, 255, 255, 0.88);
+        overflow: hidden;
+      }
+
+      .inbox::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 72px;
+        background: #dfe8e8;
+      }
+
+      .inbox::after {
+        content: "";
+        position: absolute;
+        top: 100px;
+        left: 38px;
+        right: 38px;
+        height: 250px;
+        background: repeating-linear-gradient(180deg, rgba(31,43,48,0.18) 0 9px, rgba(31,43,48,0) 9px 43px);
+        filter: blur(1.5px);
+      }
+
+      .empty-ring {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 170px;
+        height: 170px;
+        translate: -50% -50%;
+        border: 14px solid rgba(31, 43, 48, 0.16);
+        border-radius: 50%;
+      }
+
+      .timeline {
+        position: absolute;
+        left: 12%;
+        right: 12%;
+        top: 48%;
+        height: 18px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.22);
+        z-index: 1;
+      }
+
+      .timeline .fill {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 62%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--accent), var(--warm));
+      }
+
+      .timeline.long .fill {
+        width: 100%;
+      }
+
+      .month-pill {
+        position: absolute;
+        top: 34%;
+        padding: 18px 24px;
+        border-radius: 18px;
+        font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
+        font-size: 42px;
+        font-weight: 800;
+        color: var(--fg);
+        background: rgba(255, 255, 255, 0.15);
+        font-variant-numeric: tabular-nums;
+        z-index: 3;
+      }
+
+      .pill-a {
+        left: 13%;
+      }
+
+      .pill-b {
+        right: 13%;
+        background: color-mix(in srgb, var(--warm) 56%, rgba(255, 255, 255, 0.14));
+      }
+
+      .concept-map {
+        position: absolute;
+        inset: 14%;
+      }
+
+      .concept-map span {
+        position: absolute;
+        width: 130px;
+        height: 130px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
+        font-size: 34px;
+        font-weight: 800;
+        background: rgba(255,255,255,0.18);
+        border: 1px solid rgba(255,255,255,0.26);
+      }
+
+      .concept-map span:nth-child(1) {
+        left: 0;
+        top: 24%;
+      }
+
+      .concept-map span:nth-child(2) {
+        right: 0;
+        top: 6%;
+      }
+
+      .concept-map span:nth-child(3) {
+        right: 18%;
+        bottom: 0;
+      }
+
+      .concept-map::before {
+        content: "";
+        position: absolute;
+        inset: 10%;
+        background:
+          linear-gradient(32deg, rgba(255,255,255,0) 0 48%, rgba(255,255,255,0.32) 49% 50%, rgba(255,255,255,0) 51%),
+          linear-gradient(142deg, rgba(255,255,255,0) 0 48%, rgba(255,255,255,0.28) 49% 50%, rgba(255,255,255,0) 51%);
+      }
+
+      .people-row {
+        position: absolute;
+        left: 12%;
+        right: 10%;
+        bottom: 24%;
+        height: 200px;
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+      }
+
+      .people-row .person {
+        position: relative;
+        left: auto;
+        bottom: auto;
+      }
+
+      .round-table {
+        position: absolute;
+        left: 19%;
+        right: 19%;
+        bottom: 18%;
+        height: 96px;
+        border-radius: 50%;
+        background: rgba(255,255,255,0.2);
+      }
+
+      .task-board {
+        position: absolute;
+        inset: 12%;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 18px;
+      }
+
+      .task-col {
+        border-radius: 20px;
+        background: rgba(255,255,255,0.12);
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .task-card {
+        height: 78px;
+        border-radius: 16px;
+        background: rgba(255,255,255,0.78);
+        box-shadow: 0 10px 24px rgba(0,0,0,0.12);
+      }
+
+      .task-card.done {
+        background: color-mix(in srgb, var(--warm) 72%, #ffffff);
+      }
+
+      .review-lines {
+        position: absolute;
+        left: 16%;
+        right: 16%;
+        top: 16%;
+        bottom: 22%;
+        border-radius: 28px;
+        background:
+          repeating-linear-gradient(180deg, rgba(255,255,255,0.24) 0 10px, rgba(255,255,255,0) 10px 36px),
+          rgba(255,255,255,0.1);
+        border: 1px solid rgba(255,255,255,0.2);
+      }
+
+      .checkmark {
+        position: absolute;
+        right: 18%;
+        bottom: 22%;
+        width: 140px;
+        height: 140px;
+        border-radius: 50%;
+        background: var(--warm);
+      }
+
+      .checkmark::after {
+        content: "";
+        position: absolute;
+        left: 34px;
+        top: 42px;
+        width: 62px;
+        height: 34px;
+        border-left: 12px solid #1f2b30;
+        border-bottom: 12px solid #1f2b30;
+        rotate: -45deg;
+      }
+
+      .split-compare {
+        position: absolute;
+        inset: 12%;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 22px;
+      }
+
+      .compare-side {
+        position: relative;
+        border-radius: 28px;
+        background: rgba(255,255,255,0.12);
+        overflow: hidden;
+      }
+
+      .compare-side.fake::after {
+        content: "";
+        position: absolute;
+        left: -8%;
+        right: -8%;
+        top: 50%;
+        height: 16px;
+        border-radius: 999px;
+        background: #c9584a;
+        rotate: -18deg;
+        box-shadow: 0 0 26px rgba(201, 88, 74, 0.45);
+      }
+
+      .salary-blur {
+        position: absolute;
+        inset: 14%;
+        border-radius: 26px;
+        background:
+          repeating-linear-gradient(180deg, rgba(31,43,48,0.16) 0 11px, rgba(31,43,48,0) 11px 34px),
+          rgba(255,255,255,0.8);
+        filter: blur(1.2px);
+      }
+
+      .form-areas {
+        position: absolute;
+        inset: 13%;
+        border-radius: 28px;
+        background: rgba(255,255,255,0.86);
+        padding: 28px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+
+      .form-area {
+        border-radius: 18px;
+        background: rgba(31,43,48,0.08);
+        border: 3px solid color-mix(in srgb, var(--accent) 70%, #ffffff);
+      }
+
+      .video-call {
+        position: absolute;
+        inset: 12%;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+
+      .call-tile {
+        position: relative;
+        border-radius: 24px;
+        background: rgba(255,255,255,0.14);
+        overflow: hidden;
+      }
+
+      .call-tile .person {
+        left: 50%;
+        bottom: 12%;
+        translate: -50% 0;
+      }
+
+      .cta-panel {
+        position: absolute;
+        inset: 13%;
+        border-radius: 34px;
+        background:
+          radial-gradient(circle at 80% 20%, rgba(216, 170, 103, 0.34), rgba(216, 170, 103, 0) 40%),
+          rgba(255, 255, 255, 0.78);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 26px;
+        padding: 52px;
+        color: #1f2b30;
+      }
+
+      .cta-line {
+        height: 22px;
+        border-radius: 999px;
+        background: rgba(31, 43, 48, 0.2);
+      }
+
+      .cta-line:nth-child(1) {
+        width: 78%;
+      }
+
+      .cta-line:nth-child(2) {
+        width: 62%;
+      }
+
+      .cta-line:nth-child(3) {
+        width: 86%;
+        background: var(--warm);
+      }
+
+      .copy-block {
+        position: relative;
+        min-height: 0;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        gap: 26px;
+      }
+
+      .headline {
+        max-width: 930px;
+        font-family: "Newsreader", "Songti SC", serif;
+        font-size: 76px;
+        line-height: 1.08;
+        font-weight: 900;
+        letter-spacing: 0;
+        text-wrap: balance;
+      }
+
+      .voice {
+        max-width: 920px;
+        font-size: 39px;
+        line-height: 1.34;
+        font-weight: 520;
+        color: var(--body);
+        text-wrap: balance;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+      }
+
+      .chip {
+        max-width: 100%;
+        padding: 16px 21px 17px;
+        border-radius: 999px;
+        font-size: 29px;
+        line-height: 1.1;
+        font-weight: 800;
+        color: var(--chip-fg);
+        background: color-mix(in srgb, var(--accent) 42%, var(--chip-bg));
+        border: 1px solid color-mix(in srgb, var(--fg) 25%, rgba(255, 255, 255, 0));
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.12);
+      }
+
+      .chip.hot {
+        background: color-mix(in srgb, var(--warm) 72%, var(--chip-bg));
+        color: #1f2b30;
+      }
+
+      .legal {
+        max-width: 930px;
+        color: var(--muted);
+        font-size: 25px;
+        line-height: 1.35;
+      }
+
+      .final-cta {
+        max-width: 920px;
+        padding: 30px 34px;
+        border-radius: 26px;
+        background: color-mix(in srgb, var(--warm) 72%, var(--chip-bg));
+        color: #1f2b30;
+        font-size: 38px;
+        line-height: 1.22;
+        font-weight: 900;
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.18);
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="165"
+      data-width="1080"
+      data-height="1920"
+    ></div>
+
+    <script>
+      const segments = [
+        {
+          tag: "第1段",
+          time: "00:00-00:15",
+          bg: "#101a24",
+          panel: "#172637",
+          panelDeep: "#0d161f",
+          fg: "#f6f0e7",
+          body: "#d9e1df",
+          muted: "#9fb6c1",
+          accent: "#7aa6bf",
+          warm: "#d8aa67",
+          chipBg: "#16232c",
+          chipFg: "#f6f0e7",
+          marker: "POST-GRAD OPT COUNTDOWN",
+          headline: "OPT最可惜的，是不知道下一步",
+          voice: "理想工作可以慢慢找，但时间已经开始计算。真正危险的是你还没有清楚的行动顺序。",
+          chips: ["OPT时间有限", "时间已经开始计算"],
+          shots: ["grad", "calendar", "job"],
+        },
+        {
+          tag: "第2段",
+          time: "00:15-00:30",
+          bg: "#111b25",
+          panel: "#1c2b36",
+          panelDeep: "#101820",
+          fg: "#f6f0e7",
+          body: "#dce4e0",
+          muted: "#9fb2b8",
+          accent: "#79a0bc",
+          warm: "#d8aa67",
+          chipBg: "#16232c",
+          chipFg: "#f6f0e7",
+          marker: "CAREER DIRECTION",
+          headline: "没有经验，也没有清晰方向",
+          voice: "毕业以后，岗位很多，路径却不清楚。软件开发、数据分析、商业分析，每一个选择都需要规划。",
+          chips: ["没有美国工作经验", "不知道投什么岗位", "缺少职业规划"],
+          shots: ["resume", "choices", "whiteboard"],
+        },
+        {
+          tag: "第3段",
+          time: "00:30-00:45",
+          bg: "#0f1821",
+          panel: "#172633",
+          panelDeep: "#0b1219",
+          fg: "#f6f0e7",
+          body: "#d7dfdd",
+          muted: "#96aab4",
+          accent: "#6c98b6",
+          warm: "#d8aa67",
+          chipBg: "#16232c",
+          chipFg: "#f6f0e7",
+          marker: "WAITING LOOP",
+          headline: "简历投了很多，却一直没有回应",
+          voice: "等待、刷新、再等待。OPT的时间就在这些空白收件箱和夜晚里一点点过去。",
+          chips: ["投了很多简历", "没有面试回应", "OPT时间正在流逝"],
+          shots: ["submitted", "inbox", "timelapse"],
+        },
+        {
+          tag: "第4段",
+          time: "00:45-01:00",
+          bg: "#17242d",
+          panel: "#243641",
+          panelDeep: "#15222a",
+          fg: "#f6f0e7",
+          body: "#e0e7e2",
+          muted: "#b0c3c3",
+          accent: "#8bb7c7",
+          warm: "#d8aa67",
+          chipBg: "#1c2a32",
+          chipFg: "#f6f0e7",
+          marker: "OPT EXPLAINED",
+          headline: "OPT是实践训练和工作授权",
+          voice: "简单来说，它面向F-1学生，工作内容需要和自己的专业相关。",
+          chips: ["F-1学生", "实践训练", "专业相关工作"],
+          shots: ["desk", "work", "concepts"],
+        },
+        {
+          tag: "第5段",
+          time: "01:00-01:15",
+          bg: "#192832",
+          panel: "#263945",
+          panelDeep: "#15232b",
+          fg: "#f6f0e7",
+          body: "#e2e9e5",
+          muted: "#b8c9c7",
+          accent: "#8fbccd",
+          warm: "#d8aa67",
+          chipBg: "#1d2d35",
+          chipFg: "#f6f0e7",
+          marker: "12 + 24 MONTHS",
+          headline: "一般OPT最长12个月，STEM可再延24个月",
+          voice: "符合条件的STEM专业学生，可以申请额外延期，合计最长可达36个月。",
+          chips: ["12个月OPT", "24个月STEM延期", "最长可达36个月"],
+          shots: ["timeline12", "timeline36", "career"],
+        },
+        {
+          tag: "第6段",
+          time: "01:15-01:30",
+          bg: "#20303a",
+          panel: "#2e424d",
+          panelDeep: "#18262e",
+          fg: "#f6f0e7",
+          body: "#e7eee9",
+          muted: "#c3d1cc",
+          accent: "#9ac1cb",
+          warm: "#d9b06f",
+          chipBg: "#22343d",
+          chipFg: "#f6f0e7",
+          marker: "REAL PROJECT EXPERIENCE",
+          headline: "真正重要的是能讲清楚的经验",
+          voice: "真实岗位、真实项目、真实工作内容，最后都要变成简历和面试里说得清楚的经历。",
+          chips: ["真实岗位", "真实项目", "面试中讲清楚的经验"],
+          shots: ["meeting", "coding", "interview"],
+        },
+        {
+          tag: "第7段",
+          time: "01:30-01:45",
+          bg: "#eef3ee",
+          panel: "#ffffff",
+          panelDeep: "#dbe6e1",
+          fg: "#1f2b30",
+          body: "#33444a",
+          muted: "#66787b",
+          accent: "#5c8da4",
+          warm: "#d2a25e",
+          chipBg: "#edf3ef",
+          chipFg: "#1f2b30",
+          marker: "E-VERIFY EMPLOYER",
+          headline: "E-Verify雇主，提供专业相关机会",
+          voice: "我们可以为符合条件的OPT和STEM OPT学生提供与专业相关的就业及职业发展机会。",
+          chips: ["E-Verify雇主", "与专业相关", "真实STEM项目"],
+          shots: ["office", "videoCall", "board"],
+        },
+        {
+          tag: "第8段",
+          time: "01:45-02:00",
+          bg: "#eff4ef",
+          panel: "#ffffff",
+          panelDeep: "#dde9e4",
+          fg: "#1f2b30",
+          body: "#33454a",
+          muted: "#687b7e",
+          accent: "#5f95a9",
+          warm: "#d2a25e",
+          chipBg: "#edf3ef",
+          chipFg: "#1f2b30",
+          marker: "REAL WORKFLOW",
+          headline: "不是写一个职位名称，而是完成任务",
+          voice: "在导师或管理人员指导下参与任务、完成项目、复盘反馈，专业能力才会真正提升。",
+          chips: ["真正参与任务", "完成项目", "真实指导和管理"],
+          shots: ["mentor", "done", "review"],
+        },
+        {
+          tag: "第9段",
+          time: "02:00-02:15",
+          bg: "#f0f4ef",
+          panel: "#ffffff",
+          panelDeep: "#dbe8e2",
+          fg: "#1f2b30",
+          body: "#34464a",
+          muted: "#6b7e7f",
+          accent: "#5c8fa2",
+          warm: "#d2a25e",
+          chipBg: "#edf3ef",
+          chipFg: "#1f2b30",
+          marker: "I-983 TRAINING PLAN",
+          headline: "符合条件时，协助准备和管理I-983",
+          voice: "培训计划需要说明岗位职责、培训目标、监督方式，以及如何提升专业能力。",
+          chips: ["I-983培训计划", "岗位职责", "培训目标", "监督方式"],
+          shots: ["form", "areas", "confirm"],
+        },
+        {
+          tag: "第10段",
+          time: "02:15-02:30",
+          bg: "#eef3ee",
+          panel: "#ffffff",
+          panelDeep: "#dde8e1",
+          fg: "#1f2b30",
+          body: "#34464a",
+          muted: "#697c7f",
+          accent: "#5f92a8",
+          warm: "#d2a25e",
+          chipBg: "#edf3ef",
+          chipFg: "#1f2b30",
+          marker: "COMPLIANT EMPLOYMENT",
+          headline: "真实工作内容，正式薪酬记录",
+          voice: "OPT不是买一份工作记录，也不是找地方挂名。工作流程、成果和管理记录都要真实。",
+          chips: ["正式薪酬记录", "不是挂名", "不是购买工作记录", "真实合规就业"],
+          shots: ["workday", "records", "compare"],
+        },
+        {
+          tag: "第11段",
+          time: "02:30-02:45",
+          bg: "#f4f2ec",
+          panel: "#ffffff",
+          panelDeep: "#e2e9e2",
+          fg: "#1f2b30",
+          body: "#34464a",
+          muted: "#667978",
+          accent: "#5a8ba1",
+          warm: "#d2a25e",
+          chipBg: "#f0f4ee",
+          chipFg: "#1f2b30",
+          marker: "NEXT STEP",
+          headline: "不要只是继续等待",
+          voice: "根据你的专业、毕业时间和OPT阶段，判断职业方向、简历、项目经历和面试准备从哪里开始。",
+          chips: ["职业方向分析", "简历优化", "项目经历整理", "面试准备"],
+          cta: "把你的专业、毕业时间和目前OPT阶段发给我们",
+          legal: "具体是否符合OPT或STEM OPT要求，需要根据个人情况、学校DSO指导及相关规定进一步确认。",
+          shots: ["consult", "montage", "cta"],
+        },
+      ];
+
+      const root = document.getElementById("root");
+
+      const person = (extra = "") =>
+        `<div class="person ${extra}"><span class="head"></span><span class="body"></span><span class="legs"></span></div>`;
+
+      const art = {
+        grad: `<div class="art"><div class="building"></div><div class="path"></div><div class="cap"></div>${person("")}<div class="floor"></div></div>`,
+        calendar: `<div class="art"><div class="calendar"></div><div class="paper" style="right:12%;bottom:18%;width:34%;height:22%;rotate:7deg"></div><div class="laptop" style="left:12%;width:34%;height:22%"></div></div>`,
+        job: `<div class="art"><div class="window"></div><div class="desk"></div><div class="laptop"></div>${person("small")}</div>`,
+        resume: `<div class="art"><div class="desk"></div><div class="paper" style="left:18%;top:16%;width:48%;height:62%;rotate:-3deg"></div><div class="paper" style="right:14%;bottom:16%;width:35%;height:42%;rotate:5deg"></div>${person("small")}</div>`,
+        choices: `<div class="art"><div class="mini-cards"><div class="mini-card"></div><div class="mini-card"></div><div class="mini-card"></div></div><div class="question">?</div></div>`,
+        whiteboard: `<div class="art"><div class="board-lines"></div>${person("small")}</div>`,
+        submitted: `<div class="art"><div class="mini-cards"><div class="mini-card"></div><div class="mini-card"></div><div class="mini-card"></div><div class="mini-card"></div></div></div>`,
+        inbox: `<div class="art"><div class="inbox"></div><div class="empty-ring"></div>${person("small")}</div>`,
+        timelapse: `<div class="art"><div class="window"></div><div class="calendar"></div>${person("small")}</div>`,
+        desk: `<div class="art"><div class="window"></div><div class="desk"></div><div class="paper" style="left:12%;top:20%;width:34%;height:48%"></div><div class="laptop" style="left:45%;width:36%"></div></div>`,
+        work: `<div class="art"><div class="desk"></div><div class="laptop" style="left:18%;width:56%;height:35%"></div>${person("small")}</div>`,
+        concepts: `<div class="art"><div class="concept-map"><span>F-1</span><span>OPT</span><span>STEM</span></div></div>`,
+        timeline12: `<div class="art"><div class="month-pill pill-a">12M</div><div class="timeline"><span class="fill"></span></div><div class="calendar months" style="width:38%;height:34%;left:52%;top:14%"></div></div>`,
+        timeline36: `<div class="art"><div class="month-pill pill-a">12</div><div class="month-pill pill-b">+24</div><div class="timeline long"><span class="fill"></span></div></div>`,
+        career: `<div class="art"><div class="building"></div><div class="timeline long" style="top:68%"><span class="fill"></span></div>${person("")}</div>`,
+        meeting: `<div class="art"><div class="round-table"></div><div class="people-row">${person("small")}${person("small")}${person("small")}</div></div>`,
+        coding: `<div class="art"><div class="desk"></div><div class="laptop" style="left:14%;width:58%;height:38%"></div><div class="task-board" style="inset:16% 10% 58%"><div class="task-col"><div class="task-card"></div></div><div class="task-col"><div class="task-card done"></div></div><div class="task-col"><div class="task-card"></div></div></div></div>`,
+        interview: `<div class="art"><div class="video-call"><div class="call-tile" data-layout-allow-overflow>${person("small")}</div><div class="call-tile" data-layout-allow-overflow>${person("small")}</div></div></div>`,
+        office: `<div class="art"><div class="building"></div><div class="window" style="left:14%;right:auto;width:68%;height:32%"></div>${person("")}</div>`,
+        videoCall: `<div class="art"><div class="video-call"><div class="call-tile" data-layout-allow-overflow>${person("small")}</div><div class="call-tile" data-layout-allow-overflow>${person("small")}</div><div class="call-tile" data-layout-allow-overflow>${person("small")}</div><div class="call-tile" data-layout-allow-overflow>${person("small")}</div></div></div>`,
+        board: `<div class="art"><div class="task-board"><div class="task-col"><div class="task-card"></div><div class="task-card"></div></div><div class="task-col"><div class="task-card done"></div><div class="task-card"></div></div><div class="task-col"><div class="task-card"></div><div class="task-card done"></div></div></div></div>`,
+        mentor: `<div class="art"><div class="board-lines"></div><div class="people-row" style="bottom:12%">${person("small")}${person("small")}</div></div>`,
+        done: `<div class="art"><div class="task-board"><div class="task-col"><div class="task-card"></div></div><div class="task-col"><div class="task-card"></div></div><div class="task-col"><div class="task-card done"></div><div class="checkmark" style="right:22%;bottom:19%;scale:.72"></div></div></div></div>`,
+        review: `<div class="art"><div class="review-lines"></div><div class="checkmark"></div>${person("small")}</div>`,
+        form: `<div class="art"><div class="paper" style="inset:12%;width:auto;height:auto"></div></div>`,
+        areas: `<div class="art"><div class="form-areas"><div class="form-area"></div><div class="form-area"></div><div class="form-area"></div><div class="form-area"></div></div></div>`,
+        confirm: `<div class="art"><div class="desk"></div><div class="paper" style="left:16%;top:18%;width:42%;height:52%"></div>${person("small")}<div class="checkmark" style="scale:.62;right:15%;bottom:25%"></div></div>`,
+        workday: `<div class="art"><div class="window"></div><div class="desk"></div><div class="laptop" style="left:18%;width:48%;height:32%"></div>${person("small")}</div>`,
+        records: `<div class="art"><div class="salary-blur"></div><div class="task-board" style="inset:58% 14% 12%"><div class="task-col"><div class="task-card done"></div></div><div class="task-col"><div class="task-card"></div></div><div class="task-col"><div class="task-card done"></div></div></div></div>`,
+        compare: `<div class="art"><div class="split-compare"><div class="compare-side fake"><div class="salary-blur" style="inset:20%"></div></div><div class="compare-side">${person("small")}<div class="task-card done" style="position:absolute;right:18%;bottom:20%;width:42%;height:22%"></div></div></div></div>`,
+        consult: `<div class="art"><div class="video-call"><div class="call-tile" data-layout-allow-overflow>${person("small")}</div><div class="call-tile" data-layout-allow-overflow><div class="board-lines" style="inset:12%"></div></div></div></div>`,
+        montage: `<div class="art"><div class="mini-cards"><div class="mini-card"></div><div class="mini-card"></div><div class="mini-card"></div></div><div class="checkmark" style="scale:.65;right:13%;bottom:18%"></div></div>`,
+        cta: `<div class="art"><div class="cta-panel"><span class="cta-line"></span><span class="cta-line"></span><span class="cta-line"></span></div></div>`,
+      };
+
+      function renderScene(segment, index) {
+        const sceneId = `scene-${index + 1}`;
+        const hotIndex = index >= 6 ? 0 : segment.chips.length - 1;
+        return `
+          <section
+            id="${sceneId}"
+            class="scene"
+            style="--bg:${segment.bg};--panel:${segment.panel};--panel-deep:${segment.panelDeep};--fg:${segment.fg};--body:${segment.body};--muted:${segment.muted};--accent:${segment.accent};--warm:${segment.warm};--chip-bg:${segment.chipBg};--chip-fg:${segment.chipFg};z-index:${index + 1}"
+          >
+            <div class="ambient" data-layout-ignore>
+              <div class="grain"></div>
+              <div class="orb orb-a"></div>
+              <div class="orb orb-b"></div>
+            </div>
+            <div class="scene-content">
+              <div class="section-tag">
+                <span>${segment.time}</span>
+                <div class="section-rule"></div>
+                <span>${segment.tag}</span>
+              </div>
+              <div class="media-shell">
+                <div class="media-topline"><span>${segment.marker}</span><span class="camera-dot"></span></div>
+                <div class="shot-grid">
+                  ${segment.shots.map((name) => `<div class="shot">${art[name]}</div>`).join("")}
+                </div>
+              </div>
+              <div class="copy-block">
+                <h1 class="headline">${segment.headline}</h1>
+                <p class="voice">${segment.voice}</p>
+                <div class="chips">
+                  ${segment.chips.map((chip, i) => `<span class="chip ${i === hotIndex ? "hot" : ""}">${chip}</span>`).join("")}
+                </div>
+                ${segment.cta ? `<div class="final-cta">${segment.cta}</div>` : ""}
+                ${segment.legal ? `<p class="legal">${segment.legal}</p>` : ""}
+              </div>
+            </div>
+          </section>
+        `;
+      }
+
+      root.insertAdjacentHTML("beforeend", segments.map(renderScene).join(""));
+      root.insertAdjacentHTML(
+        "beforeend",
+        `<audio id="narration" data-start="0" data-duration="165" data-track-index="2" src="assets/narration/opt-narration.wav" data-volume="1"></audio>`
+      );
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+
+      function fromIf(target, vars, position) {
+        const elements = gsap.utils.toArray(target);
+        if (elements.length > 0) {
+          tl.from(elements, vars, position);
+        }
+      }
+
+      function toIf(target, vars, position) {
+        const elements = gsap.utils.toArray(target);
+        if (elements.length > 0) {
+          tl.to(elements, vars, position);
+        }
+      }
+
+      function blurCrossfade(oldScene, newScene, t) {
+        tl.to(oldScene, { filter: "blur(13px)", scale: 1.025, opacity: 0, duration: 0.55, ease: "power2.inOut" }, t);
+        tl.fromTo(
+          newScene,
+          { filter: "blur(12px)", scale: 0.985, opacity: 0 },
+          { filter: "blur(0px)", scale: 1, opacity: 1, duration: 0.58, ease: "power2.inOut" },
+          t + 0.05
+        );
+      }
+
+      function verticalPush(oldScene, newScene, t) {
+        tl.to(oldScene, { y: -1920, duration: 0.48, ease: "power3.inOut" }, t);
+        tl.fromTo(newScene, { y: 1920, opacity: 1 }, { y: 0, opacity: 1, duration: 0.48, ease: "power3.inOut" }, t);
+        tl.set(oldScene, { opacity: 0 }, t + 0.5);
+      }
+
+      for (let i = 1; i < segments.length; i += 1) {
+        const oldScene = `#scene-${i}`;
+        const newScene = `#scene-${i + 1}`;
+        const t = i * 15 - 0.55;
+        if (i === 3 || i === 6 || i === 10) {
+          verticalPush(oldScene, newScene, t);
+        } else {
+          blurCrossfade(oldScene, newScene, t);
+        }
+      }
+
+      segments.forEach((segment, i) => {
+        const start = i * 15;
+        const selector = `#scene-${i + 1}`;
+
+        fromIf(`${selector} .section-tag`, { y: -24, opacity: 0, duration: 0.42, ease: "power2.out" }, start + 0.18);
+        fromIf(`${selector} .media-shell`, { y: 70, opacity: 0, scale: 0.965, duration: 0.72, ease: "power3.out" }, start + 0.28);
+        fromIf(`${selector} .shot`, { y: 48, opacity: 0, scale: 0.96, rotate: -1.4, duration: 0.58, stagger: 0.11, ease: "back.out(1.4)" }, start + 0.46);
+        fromIf(`${selector} .media-topline`, { y: -16, opacity: 0, duration: 0.38, ease: "sine.out" }, start + 0.62);
+        fromIf(`${selector} .headline`, { y: 48, opacity: 0, duration: 0.62, ease: "expo.out" }, start + 1.08);
+        fromIf(`${selector} .voice`, { y: 34, opacity: 0, duration: 0.54, ease: "power2.out" }, start + 1.38);
+        fromIf(`${selector} .chip`, { y: 22, opacity: 0, scale: 0.92, duration: 0.4, stagger: 0.08, ease: "back.out(1.7)" }, start + 1.76);
+        fromIf(`${selector} .person`, { y: 24, opacity: 0, scale: 0.92, duration: 0.5, stagger: 0.06, ease: "power3.out" }, start + 0.78);
+        fromIf(`${selector} .laptop, ${selector} .paper, ${selector} .calendar, ${selector} .task-board, ${selector} .form-areas`, { y: 20, opacity: 0, duration: 0.48, stagger: 0.08, ease: "power2.out" }, start + 0.92);
+        toIf(`${selector} .orb-a`, { x: -34, y: 28, scale: 1.08, duration: 6.2, repeat: 2, yoyo: true, ease: "sine.inOut" }, start + 0.1);
+        toIf(`${selector} .orb-b`, { x: 42, y: -36, scale: 1.12, duration: 5.4, repeat: 2, yoyo: true, ease: "sine.inOut" }, start + 0.3);
+      });
+
+      fromIf("#scene-11 .final-cta", { y: 24, opacity: 0, scale: 0.96, duration: 0.5, ease: "back.out(1.5)" }, 153.1);
+      fromIf("#scene-11 .legal", { y: 16, opacity: 0, duration: 0.42, ease: "power2.out" }, 153.45);
+      toIf("#scene-11 .copy-block, #scene-11 .media-shell, #scene-11 .section-tag", { opacity: 0, duration: 0.65, ease: "power1.inOut" }, 164.1);
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

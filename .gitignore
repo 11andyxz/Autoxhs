@@ -29,3 +29,7 @@ htmlcov/
 # Data / logs
 data/
 *.log
+
+# Installed agent skills (via `npx skills add`) — third-party, not part of this repo
+.agents/
+.claude/skills/libtv-skill

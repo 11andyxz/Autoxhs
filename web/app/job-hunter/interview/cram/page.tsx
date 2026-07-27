@@ -4,6 +4,8 @@ import Link from "next/link";
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { frontKey } from "@/lib/job-hunter/interview/frontKey";
+
 /**
  * 划词组件的「动作总线」:追问 / 生成记忆图卡 交给工作台的共享面板处理。
  * 工作台在最外层 Provider 一次,里面任何 CramSelectable(阅读区 / 复习卡背面 / 展开的卡片 / 追问答案)
@@ -422,6 +424,25 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [speaking, setSpeaking] = useState(false);
 
+  // 「学习这张」:清单里点某张卡 → 把它插进复习面板的队列(seq 每次自增,同一张也能再点一次)。
+  const [studyReq, setStudyReq] = useState<{ id: number; seq: number } | null>(null);
+  const studySeq = useRef(0);
+  const studyCard = useCallback((card: CramCard) => {
+    studySeq.current += 1;
+    setStudyReq({ id: card.id, seq: studySeq.current });
+  }, []);
+
+  // 已有题目的去重键(只看问答闪卡),给导入面板预检「这批里有几道已经有了」。
+  const existingQuestionKeys = useMemo(() => {
+    const s = new Set<string>();
+    for (const c of cards) {
+      if (c.kind !== "block" || !c.front) continue;
+      const k = frontKey(c.front);
+      if (k) s.add(k);
+    }
+    return s;
+  }, [cards]);
+
   const loadCards = useCallback(async () => {
     try {
       const res = await fetch(`/api/job-hunter/interview/cram/card?sessionId=${sessionId}`);
@@ -566,6 +587,7 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
         onReload={loadCards}
         speak={speak}
         speaking={speaking}
+        studyReq={studyReq}
       />
 
       {/* 阅读 + 划词 / 编辑 */}
@@ -626,13 +648,7 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
         </div>
         {editError && <p className="mb-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{editError}</p>}
         {importOpen && !editing && (
-          <ImportExcel
-            sessionId={sessionId}
-            onImported={() => {
-              loadCards();
-              setImportOpen(false);
-            }}
-          />
+          <ImportExcel sessionId={sessionId} existingKeys={existingQuestionKeys} onImported={loadCards} />
         )}
         {adding && !editing && (
           <AddMaterial
@@ -698,7 +714,14 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
       </div>
 
       {/* 卡片清单 */}
-      <CramCardList cards={cards} sessionId={sessionId} onReload={loadCards} speak={speak} speaking={speaking} />
+      <CramCardList
+        cards={cards}
+        sessionId={sessionId}
+        onReload={loadCards}
+        speak={speak}
+        speaking={speaking}
+        onStudy={studyCard}
+      />
     </div>
     </CramActions.Provider>
   );
@@ -712,12 +735,15 @@ function CramReview({
   onReload,
   speak,
   speaking,
+  studyReq,
 }: {
   sessionId: number;
   cards: CramCard[];
   onReload: () => void;
   speak: (t: string) => void;
   speaking: boolean;
+  /** 清单里点「学习」发来的请求(seq 自增)。null = 没点过。 */
+  studyReq: { id: number; seq: number } | null;
 }) {
   const [queue, setQueue] = useState<CramCard[]>([]);
   const [idx, setIdx] = useState(0);
@@ -725,6 +751,38 @@ function CramReview({
   const [grading, setGrading] = useState(false);
   const [lastLabel, setLastLabel] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const idxRef = useRef(0); // 给下面的插队用:setQueue 的函数式更新里读不到最新的 idx
+  useEffect(() => {
+    idxRef.current = idx;
+  }, [idx]);
+
+  // 清单点「学习」:没在复习就单张开一轮;正在复习就插到当前这张后面(答完立刻轮到它)。
+  // 依赖只看 seq —— cards 每次 loadCards 都换新数组,带进依赖会重复插队。
+  const cardsRef = useRef(cards);
+  cardsRef.current = cards;
+  useEffect(() => {
+    if (!studyReq) return;
+    const card = cardsRef.current.find((c) => c.id === studyReq.id);
+    if (!card) return;
+    setQueue((prev) => {
+      if (!prev.length) {
+        setIdx(0);
+        setRevealed(false);
+        setLastLabel(null);
+        setMsg(null);
+        return [card];
+      }
+      const pos = idxRef.current;
+      if (prev[pos]?.id === card.id) return prev; // 正在看这张,不用插
+      if (prev.slice(pos + 1).some((c) => c.id === card.id)) return prev; // 后面已经排着了
+      setMsg("已插进队列，当前这张答完就轮到它。");
+      const next = [...prev];
+      next.splice(pos + 1, 0, card);
+      return next;
+    });
+    rootRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [studyReq]);
 
   const counts = useMemo(
     () => ({
@@ -773,7 +831,7 @@ function CramReview({
   }
 
   return (
-    <div className="rounded-2xl border border-emerald-200 bg-gradient-to-b from-emerald-50/70 to-white p-5 shadow-sm">
+    <div ref={rootRef} className="rounded-2xl border border-emerald-200 bg-gradient-to-b from-emerald-50/70 to-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
         <p className="text-sm font-semibold text-emerald-900">🧠 遗忘曲线复习</p>
         <span className="text-xs text-slate-400">共 {counts.total} 张</span>
@@ -1198,12 +1256,14 @@ function CramCardList({
   onReload,
   speak,
   speaking,
+  onStudy,
 }: {
   cards: CramCard[];
   sessionId: number;
   onReload: () => void;
   speak: (t: string) => void;
   speaking: boolean;
+  onStudy: (card: CramCard) => void;
 }) {
   if (!cards.length) {
     return (
@@ -1215,10 +1275,20 @@ function CramCardList({
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <p className="text-sm font-semibold text-slate-800">全部卡片（{cards.length}）</p>
-      <p className="mt-0.5 text-xs text-slate-400">点任意一张展开看全文（可划词翻译 / 加词 / 加知识块）。</p>
+      <p className="mt-0.5 text-xs text-slate-400">
+        点任意一张展开看全文（可划词翻译 / 加词 / 加知识块）；点「学习」把它插进上面的复习队列，答完就进遗忘曲线。
+      </p>
       <div className="mt-3 space-y-1.5">
         {cards.map((c) => (
-          <CramCardRow key={c.id} card={c} sessionId={sessionId} onReload={onReload} speak={speak} speaking={speaking} />
+          <CramCardRow
+            key={c.id}
+            card={c}
+            sessionId={sessionId}
+            onReload={onReload}
+            speak={speak}
+            speaking={speaking}
+            onStudy={onStudy}
+          />
         ))}
       </div>
     </div>
@@ -1231,12 +1301,14 @@ function CramCardRow({
   onReload,
   speak,
   speaking,
+  onStudy,
 }: {
   card: CramCard;
   sessionId: number;
   onReload: () => void;
   speak: (t: string) => void;
   speaking: boolean;
+  onStudy: (card: CramCard) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   async function remove() {
@@ -1261,6 +1333,17 @@ function CramCardRow({
           <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SR_STATE_CLASS[card.state]}`}>
             {SR_STATE_LABEL[card.state]}
           </span>
+          <button
+            onClick={() => onStudy(card)}
+            title="插进上面的复习队列，自评后按遗忘曲线排下次"
+            className={`rounded-md px-2 py-0.5 text-xs font-medium transition ${
+              card.state === "new"
+                ? "bg-sky-600 text-white hover:bg-sky-700"
+                : "border border-slate-200 text-slate-500 hover:border-emerald-300 hover:text-emerald-600"
+            }`}
+          >
+            {card.state === "new" ? "学习" : "复习"}
+          </button>
           <button onClick={remove} className="text-xs text-slate-400 hover:text-rose-500">
             删除
           </button>
@@ -1384,7 +1467,16 @@ function AddMaterial({
 
 type ImportRow = { question: string; answer: string; major: string; category: string; stars: number };
 
-function ImportExcel({ sessionId, onImported }: { sessionId: number; onImported: () => void }) {
+function ImportExcel({
+  sessionId,
+  existingKeys,
+  onImported,
+}: {
+  sessionId: number;
+  /** 这份简历里已有的问答卡去重键,用来预告「这批里有几道会被跳过」。 */
+  existingKeys: Set<string>;
+  onImported: () => void;
+}) {
   const [rows, setRows] = useState<ImportRow[] | null>(null);
   const [fileName, setFileName] = useState("");
   const [parsing, setParsing] = useState(false);
@@ -1392,6 +1484,7 @@ function ImportExcel({ sessionId, onImported }: { sessionId: number; onImported:
   const [selMajors, setSelMajors] = useState<Set<string>>(new Set());
   const [starMin, setStarMin] = useState(0);
   const [importing, setImporting] = useState(false);
+  const [result, setResult] = useState<{ count: number; skipped: number } | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   async function handleFile(file: File | null) {
@@ -1417,6 +1510,7 @@ function ImportExcel({ sessionId, onImported }: { sessionId: number; onImported:
         setRows(rs);
         setSelMajors(new Set(rs.map((r) => r.major || "未分类")));
         setStarMin(0);
+        setResult(null);
       } else {
         setError(j?.error || "解析失败");
       }
@@ -1440,14 +1534,33 @@ function ImportExcel({ sessionId, onImported }: { sessionId: number; onImported:
     (r) => selMajors.has(r.major || "未分类") && r.stars >= starMin && (r.question || r.answer),
   );
 
+  // 预检:选中的这批里,有几道问题文本已经在卡片库里了(服务端会用同一套 frontKey 跳过)。
+  const dupCount = useMemo(() => {
+    const seen = new Set<string>();
+    let n = 0;
+    for (const r of filtered) {
+      const k = frontKey(r.question);
+      if (!k) continue;
+      if (existingKeys.has(k) || seen.has(k)) n++;
+      else seen.add(k);
+    }
+    return n;
+  }, [filtered, existingKeys]);
+  const freshCount = filtered.length - dupCount;
+
   async function doImport() {
     if (!filtered.length) return;
     setImporting(true);
     setError(null);
+    setResult(null);
     const items = filtered.map((r) => ({ front: r.question, content: r.answer }));
-    const r = await postJson<{ count: number }>("/api/job-hunter/interview/cram/import", { sessionId, items });
+    const r = await postJson<{ count: number; skipped: number }>("/api/job-hunter/interview/cram/import", {
+      sessionId,
+      items,
+    });
     setImporting(false);
     if (r.ok && r.data) {
+      setResult({ count: r.data.count, skipped: r.data.skipped ?? 0 });
       onImported();
     } else {
       setError(r.error || "导入失败");
@@ -1467,6 +1580,7 @@ function ImportExcel({ sessionId, onImported }: { sessionId: number; onImported:
     <div className="mb-3 rounded-xl border border-sky-200 bg-sky-50/40 p-3">
       <p className="mb-2 text-xs font-medium text-sky-700">
         导入面试题库 Excel（.xlsx）→ 每道题变成一张「问题 / 答案」闪卡，进遗忘曲线，答案可划词翻译 / 追问 / 加词。
+        <span className="ml-1 font-normal text-sky-600/80">已经导过的题会自动跳过，同一份表可以放心反复导。</span>
       </p>
       <label className="inline-flex cursor-pointer items-center rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-600 transition hover:border-sky-300">
         <input
@@ -1516,13 +1630,33 @@ function ImportExcel({ sessionId, onImported }: { sessionId: number; onImported:
               </button>
             ))}
           </div>
+          {dupCount > 0 && (
+            <p className="text-xs text-amber-600">
+              选中的 {filtered.length} 道里，有 <span className="font-semibold">{dupCount}</span> 道已经在卡片库里了，
+              导入时会自动跳过（不会变成两张、也不会丢掉已复习的进度）。
+            </p>
+          )}
           <button
             onClick={doImport}
-            disabled={importing || !filtered.length}
+            disabled={importing || !freshCount}
             className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-700 disabled:opacity-60"
           >
-            {importing ? "导入中…" : `导入选中的 ${filtered.length} 道题`}
+            {importing
+              ? "导入中…"
+              : !filtered.length
+                ? "没有选中的题目"
+                : !freshCount
+                  ? "这批题都已经导过了"
+                  : dupCount > 0
+                    ? `导入 ${freshCount} 道新题（跳过 ${dupCount} 道已有）`
+                    : `导入选中的 ${freshCount} 道题`}
           </button>
+          {result && (
+            <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+              已导入 <span className="font-semibold">{result.count}</span> 道新题
+              {result.skipped > 0 ? `，跳过 ${result.skipped} 道重复的。` : "。"}
+            </p>
+          )}
         </div>
       )}
     </div>

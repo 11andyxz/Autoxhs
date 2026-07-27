@@ -22,6 +22,21 @@ export function isValidEmail(s: string): boolean {
   return EMAIL_RE.test(s.trim());
 }
 
+/** 收件地址去空 + 按小写去重(保留首个写法),避免同一地址收到两封。 */
+export function dedupeAddresses(list: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of list) {
+    const s = (raw ?? "").trim();
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
+}
+
 /** 邮件头字段防注入:去掉换行(防 CRLF header injection),裁剪长度 */
 function sanitizeHeader(s: string, max = 998): string {
   return s.replace(/[\r\n]+/g, " ").trim().slice(0, max);
@@ -62,7 +77,8 @@ function getTransporter(cfg: GmailConfig): nodemailer.Transporter {
 }
 
 export interface SendInput {
-  to: string;
+  /** 收件人:单个邮箱或多个邮箱(同一封信同时发给多个地址) */
+  to: string | string[];
   cc?: string[];
   subject: string;
   /** markdown-lite 正文(与预览同一份);发信端渲染成 HTML,并保留纯文本兜底 */
@@ -72,7 +88,8 @@ export interface SendInput {
 export interface SendResult {
   messageId: string;
   from: string;
-  to: string;
+  /** 实际收件人(去重后,可能多个) */
+  to: string[];
   cc: string[];
 }
 
@@ -83,9 +100,11 @@ export interface SendResult {
 export async function sendWorkEmail(input: SendInput): Promise<SendResult> {
   const cfg = getConfig();
 
-  const to = input.to.trim();
-  if (!isValidEmail(to)) {
-    throw new Error("收件人邮箱格式不正确。");
+  // 逐个校验:每个元素都必须是「纯地址」,杜绝靠逗号/尖括号夹带收件人
+  const to = dedupeAddresses(Array.isArray(input.to) ? input.to : [input.to]);
+  if (!to.length) throw new Error("请填写收件人邮箱。");
+  for (const t of to) {
+    if (!isValidEmail(t)) throw new Error(`收件人邮箱「${t}」格式不正确。`);
   }
   const cc = (input.cc ?? []).map((e) => e.trim()).filter(Boolean);
   for (const c of cc) {
@@ -103,7 +122,7 @@ export async function sendWorkEmail(input: SendInput): Promise<SendResult> {
   const tx = getTransporter(cfg);
   const info = await tx.sendMail({
     from: { name: cfg.fromName, address: cfg.user },
-    to: { address: to },
+    to: to.map((address) => ({ address })),
     cc: cc.length ? cc.map((address) => ({ address })) : undefined,
     subject,
     text: body,

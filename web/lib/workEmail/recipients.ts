@@ -6,11 +6,15 @@ import type { RowDataPacket } from "mysql2/promise";
 
 import { getPool } from "@/lib/serviceFee/db";
 import { ensureEmployeeSchema } from "@/lib/employee/repo";
+import { allEmailsOf, parseEmailList } from "@/lib/employee/validate";
 
 export interface Recipient {
   id: number;
   name: string;
+  /** 主邮箱 */
   email: string;
+  /** 该雇员的全部邮箱(主邮箱在首位 + 备用邮箱);可勾选多个同时发送。 */
+  emails: string[];
 }
 
 /** 全部雇员(有邮箱的),按姓名排序,供「assign 用户」下拉框使用。 */
@@ -18,7 +22,7 @@ export async function listRecipients(): Promise<Recipient[]> {
   await ensureEmployeeSchema();
   const p = getPool();
   const [rows] = await p.query<RowDataPacket[]>(
-    `SELECT id, legal_first_name, legal_last_name, email
+    `SELECT id, legal_first_name, legal_last_name, email, extra_emails
        FROM emp_employee
       WHERE email <> ''
       ORDER BY legal_first_name ASC, legal_last_name ASC, id ASC`,
@@ -27,5 +31,9 @@ export async function listRecipients(): Promise<Recipient[]> {
     id: r.id as number,
     name: `${r.legal_first_name as string} ${r.legal_last_name as string}`.trim(),
     email: r.email as string,
+    emails: allEmailsOf({
+      email: r.email as string,
+      extraEmails: parseEmailList((r.extra_emails as string | null) ?? ""),
+    }),
   }));
 }

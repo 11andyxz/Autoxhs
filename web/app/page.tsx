@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: "Autoxhs 内部小工具集合。",
 };
 
-type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky" | "amber" | "fuchsia" | "indigo" | "teal";
+type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky" | "amber" | "fuchsia" | "indigo" | "teal" | "orange";
 
 const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string }> = {
   rose: {
@@ -54,6 +54,11 @@ const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string
     hoverBorder: "hover:border-teal-300",
     arrow: "text-teal-600",
   },
+  orange: {
+    tile: "bg-orange-50 text-orange-600",
+    hoverBorder: "hover:border-orange-300",
+    arrow: "text-orange-600",
+  },
 };
 
 const TOOLS: Array<{
@@ -71,6 +76,14 @@ const TOOLS: Array<{
     desc: "文案发表 + 评论互动一站式:AI 帮你重写标题、优化正文、生成标签并一键发布;还能按关键词/推荐/链接选定笔记,AI 生成「正向且相关」的评论后批量互动、点赞。",
     icon: "✍️",
     accent: "rose",
+  },
+  {
+    href: "/xhs-video",
+    name: "笔记视频讲解",
+    en: "Note Video Explainer",
+    desc: "粘贴一条已发布的小红书笔记链接,AI 自动写讲解脚本、配音,为每个分镜生成配图并配上逐句同步字幕,拼成竖屏短视频。可预览、可下载,不自动发布。需本地 rednote 服务 + 本机 Chrome。",
+    icon: "🎬",
+    accent: "orange",
   },
   {
     href: "/service-fee",

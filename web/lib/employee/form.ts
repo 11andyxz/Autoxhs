@@ -10,6 +10,7 @@ import { mimeForName, saveEmployeeFile } from "./storage";
 import {
   isAllowedFileName,
   MAX_FILE_BYTES,
+  parseEmailList,
   sanitizeCategoryName,
   trimEmployee,
   validateEmployee,
@@ -72,6 +73,21 @@ export function parseEmployeeForm(form: FormData): ParsedEmployeeForm {
     const v = form.get(k);
     return typeof v === "string" ? v : "";
   };
+  // 备用邮箱:前端传 JSON 数组;也兼容「逗号/换行分隔」的纯文本
+  let extraEmails: string[] = [];
+  const rawExtra = str("extraEmails").trim();
+  if (rawExtra.startsWith("[")) {
+    try {
+      const parsedExtra = JSON.parse(rawExtra);
+      if (!Array.isArray(parsedExtra)) return { ok: false, error: "备用邮箱格式有误。" };
+      extraEmails = parsedExtra.map((x) => String(x ?? ""));
+    } catch {
+      return { ok: false, error: "备用邮箱格式有误。" };
+    }
+  } else if (rawExtra) {
+    extraEmails = parseEmailList(rawExtra);
+  }
+
   const employee = trimEmployee({
     legalFirstName: str("legalFirstName"),
     legalLastName: str("legalLastName"),
@@ -79,6 +95,7 @@ export function parseEmployeeForm(form: FormData): ParsedEmployeeForm {
     address: str("address"),
     phone: str("phone"),
     notes: str("notes"),
+    extraEmails,
   });
   const errors = validateEmployee(employee);
   if (errors.length) return { ok: false, error: errors[0] };

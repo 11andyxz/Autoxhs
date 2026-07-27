@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "libtv-skill": {
+      "source": "libtv-labs/libtv-skills",
+      "sourceType": "github",
+      "skillPath": "skills/libtv-skill/SKILL.md",
+      "computedHash": "0422a91dad10346e62f7c470029721cd066112e51946246fd5b68bb2dacced46"
+    }
+  }
+}

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { dedupeEmails } from "@/lib/employee/validate";
 import { renderEmailHtml } from "@/lib/workEmail/render";
 import { defaultTargetWeek, detectNextWeekFromText } from "@/lib/workEmail/week";
 import type { Recipient } from "@/lib/workEmail/recipients";
@@ -16,6 +17,9 @@ const LOADING_HINTS = [
 const ACCEPT =
   ".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+/** 同一封信最多几个收件人(与服务端 /api/work-email/send 的 MAX_TO 一致) */
+const MAX_TO = 5;
+
 type SourceMode = "file" | "text";
 
 interface Draft {
@@ -25,7 +29,7 @@ interface Draft {
 
 interface SendResult {
   from: string;
-  to: string;
+  to: string[];
   cc: string[];
 }
 
@@ -34,6 +38,7 @@ export default function WorkEmailPage() {
   const [priorMode, setPriorMode] = useState<SourceMode>("file");
   const [priorFile, setPriorFile] = useState<File | null>(null);
   const [priorText, setPriorText] = useState("");
+  const [priorDragging, setPriorDragging] = useState(false);
 
   // 收件人（从数据库加载 + 可自定义）
   const [recipients, setRecipients] = useState<Recipient[]>([]);
@@ -41,6 +46,11 @@ export default function WorkEmailPage() {
   const [selectedId, setSelectedId] = useState<string>(""); // 雇员 id 字符串 或 "custom"
   const [customName, setCustomName] = useState("");
   const [customEmail, setCustomEmail] = useState("");
+  // 该雇员已登记的邮箱里,这次要发给哪些(默认只勾主邮箱;勾两个就同时发两个)
+  const [checkedEmails, setCheckedEmails] = useState<string[]>([]);
+  // 临时手动追加的收件邮箱(不在雇员库里的地址)
+  const [manualEmails, setManualEmails] = useState<string[]>([]);
+  const initForRef = useRef<string | null>(null); // 已按哪个 selectedId 初始化过勾选
 
   const [targetWeek, setTargetWeek] = useState("");
   const [weekNote, setWeekNote] = useState<string | null>(null);
@@ -117,7 +127,7 @@ export default function WorkEmailPage() {
   useEffect(() => {
     setSent(null);
     setSendError(null);
-  }, [subject, body, cc, selectedId, customEmail, customName]);
+  }, [subject, body, cc, selectedId, customEmail, customName, checkedEmails, manualEmails]);
 
   const selectedRecipient = useMemo(
     () => recipients.find((r) => String(r.id) === selectedId) ?? null,
@@ -125,7 +135,41 @@ export default function WorkEmailPage() {
   );
   const isCustom = selectedId === "custom";
   const recipientName = isCustom ? customName.trim() : selectedRecipient?.name ?? "";
-  const toEmail = isCustom ? customEmail.trim() : selectedRecipient?.email ?? "";
+  /** 选中雇员在「雇员信息」里登记的全部邮箱(主 + 备用) */
+  const knownEmails = useMemo(
+    () => (isCustom ? [] : selectedRecipient?.emails ?? []),
+    [isCustom, selectedRecipient],
+  );
+
+  // 换收件人时:默认只勾主邮箱,并清掉上一位遗留的手动邮箱(防误发)。
+  // 收件人列表还没到位时先不初始化,等下一轮 effect(避免把勾选清成空)。
+  useEffect(() => {
+    if (!selectedId) return;
+    if (initForRef.current === selectedId) return;
+    const isCustomSel = selectedId === "custom";
+    const r = recipients.find((x) => String(x.id) === selectedId) ?? null;
+    if (!r && !isCustomSel) return;
+    initForRef.current = selectedId;
+    setCheckedEmails(r ? [r.email] : []);
+    setManualEmails([]);
+  }, [selectedId, recipients]);
+
+  /** 本次真正的收件人列表(去重):勾选的雇员邮箱 / 自定义邮箱 + 手动追加的邮箱 */
+  const toEmails = useMemo(
+    () => dedupeEmails([...(isCustom ? [customEmail] : checkedEmails), ...manualEmails]),
+    [isCustom, customEmail, checkedEmails, manualEmails],
+  );
+
+  function toggleEmail(email: string, on: boolean) {
+    setCheckedEmails((list) => {
+      const rest = list.filter((e) => e.toLowerCase() !== email.toLowerCase());
+      if (!on) return rest;
+      // 按 knownEmails 的原顺序放回,保证「主邮箱在前」的展示顺序稳定
+      return knownEmails.filter(
+        (e) => e.toLowerCase() === email.toLowerCase() || rest.some((r) => r.toLowerCase() === e.toLowerCase()),
+      );
+    });
+  }
 
   const previewHtml = useMemo(() => renderEmailHtml(body), [body]);
   const ccList = useMemo(
@@ -159,6 +203,20 @@ export default function WorkEmailPage() {
     setPriorFile(f);
     setWeekNote(null);
     if (f) detectWeekFromFile(f);
+  }
+
+  /** 拖入上一封邮件文件:只认 PDF / DOCX,多个只取第一个。 */
+  function handlePriorDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setPriorDragging(false);
+    const f = Array.from(e.dataTransfer.files)[0];
+    if (!f) return;
+    if (!/\.(pdf|docx)$/i.test(f.name)) {
+      setError("只支持 PDF / DOCX 文件。");
+      return;
+    }
+    setError(null);
+    handlePriorFile(f);
   }
 
   // 粘贴文本时在前端直接识别(文本已在手,无需再请求服务端)。
@@ -228,8 +286,17 @@ export default function WorkEmailPage() {
 
   function handleClickSend() {
     setSendError(null);
-    if (!toEmail || !isValidEmail(toEmail)) {
-      setSendError("请先选择或填写有效的收件人邮箱。");
+    if (!toEmails.length) {
+      setSendError("请先勾选或填写至少一个收件人邮箱。");
+      return;
+    }
+    const badTo = toEmails.find((t) => !isValidEmail(t));
+    if (badTo) {
+      setSendError(`收件人邮箱「${badTo}」格式不正确。`);
+      return;
+    }
+    if (toEmails.length > MAX_TO) {
+      setSendError(`最多同时发给 ${MAX_TO} 个收件人。`);
       return;
     }
     if (!subject.trim()) {
@@ -256,7 +323,7 @@ export default function WorkEmailPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          to: toEmail,
+          to: toEmails,
           cc: ccList,
           subject: subject.trim(),
           body,
@@ -329,17 +396,37 @@ export default function WorkEmailPage() {
           </div>
 
           {priorMode === "file" ? (
-            <label className="mt-3 flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500 transition hover:border-amber-300 hover:bg-amber-50/40">
+            <label
+              onDragEnter={(e) => {
+                e.preventDefault();
+                setPriorDragging(true);
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                if (!priorDragging) setPriorDragging(true);
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setPriorDragging(false);
+              }}
+              onDrop={handlePriorDrop}
+              className={`mt-3 flex cursor-pointer items-center justify-center rounded-xl border border-dashed px-4 py-6 text-sm transition ${
+                priorDragging
+                  ? "border-amber-400 bg-amber-50 text-amber-700"
+                  : "border-slate-300 bg-slate-50 text-slate-500 hover:border-amber-300 hover:bg-amber-50/40"
+              }`}
+            >
               <input
                 type="file"
                 accept={ACCEPT}
                 className="hidden"
                 onChange={(e) => handlePriorFile(e.target.files?.[0] ?? null)}
               />
-              {priorFile ? (
+              {priorDragging ? (
+                <span className="font-medium">松开即可添加</span>
+              ) : priorFile ? (
                 <span className="font-medium text-slate-700">📄 {priorFile.name}</span>
               ) : (
-                <span>点击选择 PDF / DOCX 文件（上一封周报邮件）</span>
+                <span>点击选择，或把 PDF / DOCX 文件拖到这里（上一封周报邮件）</span>
               )}
             </label>
           ) : (
@@ -357,7 +444,7 @@ export default function WorkEmailPage() {
         <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <h2 className="text-sm font-semibold text-slate-800">② 指定收件人（assign 用户）</h2>
           <p className="mt-1 text-xs text-slate-400">
-            收件人来自「雇员信息」数据库；也可以临时手动填写。
+            收件人来自「雇员信息」数据库；也可以临时手动填写。可勾选 / 添加多个邮箱，一封邮件同时发给多个地址（最多 {MAX_TO} 个）。
           </p>
           <select
             value={selectedId}
@@ -389,6 +476,75 @@ export default function WorkEmailPage() {
               />
             </div>
           )}
+
+          {/* 该雇员登记的邮箱:勾选哪些就发给哪些(默认主邮箱) */}
+          {!isCustom && knownEmails.length > 0 && (
+            <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2.5">
+              <p className="text-xs font-medium text-slate-600">发送到（可多选）</p>
+              <div className="mt-1.5 space-y-1.5">
+                {knownEmails.map((em, i) => (
+                  <label key={em} className="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={checkedEmails.some((c) => c.toLowerCase() === em.toLowerCase())}
+                      onChange={(e) => toggleEmail(em, e.target.checked)}
+                      className="h-4 w-4 rounded border-slate-300 text-amber-500 focus:ring-amber-400"
+                    />
+                    <span>
+                      {em}
+                      {i === 0 && <span className="ml-1 text-[11px] text-slate-400">（主邮箱）</span>}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {knownEmails.length === 1 && (
+                <p className="mt-1.5 text-[11px] text-slate-400">
+                  这位雇员只登记了 1 个邮箱。去「雇员信息」给他加备用邮箱后，这里就能勾两个一起发。
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* 临时追加收件邮箱(不在雇员库里的地址) */}
+          <div className="mt-3 space-y-2">
+            {manualEmails.map((v, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <input
+                  value={v}
+                  onChange={(e) =>
+                    setManualEmails((list) => list.map((x, j) => (j === i ? e.target.value : x)))
+                  }
+                  placeholder="再加一个收件邮箱"
+                  type="email"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400"
+                />
+                <button
+                  type="button"
+                  onClick={() => setManualEmails((list) => list.filter((_, j) => j !== i))}
+                  className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-500 transition hover:border-rose-300 hover:text-rose-600"
+                >
+                  移除
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => setManualEmails((list) => [...list, ""])}
+              disabled={toEmails.length + manualEmails.filter((x) => !x.trim()).length >= MAX_TO}
+              className="rounded-xl border border-dashed border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-amber-400 hover:text-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              ＋ 添加收件邮箱
+            </button>
+          </div>
+
+          <p className="mt-2 text-xs text-slate-500">
+            将发送给：
+            {toEmails.length ? (
+              <span className="font-medium text-slate-700">{toEmails.join("、")}</span>
+            ) : (
+              <span className="text-rose-500">（还没选收件邮箱）</span>
+            )}
+          </p>
         </div>
 
         {/* ③ 目标周 */}
@@ -436,7 +592,9 @@ export default function WorkEmailPage() {
                 <p>
                   <span className="text-slate-400">收件人：</span>
                   {recipientName || "（未填姓名）"}{" "}
-                  <span className="text-slate-500">&lt;{toEmail || "（未填邮箱）"}&gt;</span>
+                  <span className="text-slate-500">
+                    &lt;{toEmails.length ? toEmails.join(", ") : "（未填邮箱）"}&gt;
+                  </span>
                 </p>
                 <div className="flex items-center gap-2">
                   <span className="shrink-0 text-slate-400">抄送 CC：</span>
@@ -497,7 +655,7 @@ export default function WorkEmailPage() {
                 ✅ 已发送！
                 <div className="mt-1 text-xs text-emerald-600">
                   <p>发件：{sent.from}</p>
-                  <p>收件：{sent.to}</p>
+                  <p>收件：{sent.to.join(", ")}</p>
                   {sent.cc.length > 0 && <p>抄送：{sent.cc.join(", ")}</p>}
                 </div>
               </div>
@@ -505,7 +663,8 @@ export default function WorkEmailPage() {
               <div className="rounded-2xl border border-amber-300 bg-amber-50 p-5 shadow-sm">
                 <p className="text-sm font-semibold text-amber-800">确认发送这封邮件？</p>
                 <p className="mt-1 text-xs text-amber-700">
-                  将发送给 <span className="font-medium">{toEmail}</span>
+                  将发送给 <span className="font-medium">{toEmails.join("、")}</span>
+                  （{toEmails.length} 个收件人）
                   {ccList.length > 0 && <>，抄送 {ccList.join(", ")}</>}。此操作会真实发出邮件。
                 </p>
                 <div className="mt-3 flex gap-2">

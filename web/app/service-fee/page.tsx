@@ -62,6 +62,24 @@ type Committed = {
   clientId: number | null;
   priorCharges: PriorCharges;
 };
+/** 一份 payroll summary PDF 里读出的雇主税(实际 tax 的自动来源) */
+type PayrollTaxFile = {
+  fileId: number;
+  fileName: string;
+  category: string;
+  payDay: string | null;
+  payrollType: string | null;
+  employerTax: number | null; // null = 未能识别
+  verified: boolean;
+  note?: string;
+};
+type PayrollTaxInfo = {
+  employeeName: string | null;
+  total: number;
+  parsedCount: number;
+  files: PayrollTaxFile[];
+  duplicatePayDays: string[];
+};
 
 function todayMonthDefaults() {
   const now = new Date();
@@ -95,6 +113,11 @@ export default function ServiceFeePage() {
   const [openDetail, setOpenDetail] = useState<number | null>(null);
   const [actualTaxInput, setActualTaxInput] = useState(""); // 客户「实际 tax」输入(税务余额减数)
   const [savingActualTax, setSavingActualTax] = useState(false);
+  // 实际 tax 的自动来源:该客户已上传的 payroll summary PDF 里的 Employer Taxes 合计
+  const [payrollTax, setPayrollTax] = useState<PayrollTaxInfo | null>(null);
+  const [payrollTaxLoading, setPayrollTaxLoading] = useState(false);
+  const [taxSourceOverride, setTaxSourceOverride] = useState<"auto" | "manual" | null>(null);
+  const [showTaxFiles, setShowTaxFiles] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -114,6 +137,37 @@ export default function ServiceFeePage() {
       setActualTaxInput("");
     }
   }, [clientInfo?.clientId, clientInfo?.actualTaxPaid]);
+
+  // 选中客户后,自动从其已上传的 payroll summary PDF 读出雇主税(实际 tax 的自动来源)
+  useEffect(() => {
+    const cid = clientInfo?.clientId;
+    setShowTaxFiles(false);
+    setTaxSourceOverride(null); // 换客户回到默认来源
+    if (cid == null) {
+      setPayrollTax(null);
+      setPayrollTaxLoading(false);
+      return;
+    }
+    let alive = true;
+    setPayrollTaxLoading(true);
+    (async () => {
+      try {
+        const res = await fetch(`/api/service-fee/payroll-tax?clientId=${cid}`);
+        const json = (await res.json().catch(() => null)) as
+          | ({ success?: boolean } & PayrollTaxInfo)
+          | null;
+        if (!alive) return;
+        setPayrollTax(json?.success ? json : null);
+      } catch {
+        if (alive) setPayrollTax(null);
+      } finally {
+        if (alive) setPayrollTaxLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [clientInfo?.clientId]);
 
   function showToast(msg: string) {
     setToast(msg);
@@ -462,15 +516,25 @@ export default function ServiceFeePage() {
     () => round2(paidTaxRecords.reduce((s, r) => s + (r.totalTax || 0), 0)),
     [paidTaxRecords],
   );
-  const taxBalance = round2(cumulativeTaxWithheld - num(actualTaxInput, 0));
-  const actualTaxDirty =
-    !!clientInfo && round2(num(actualTaxInput, 0)) !== round2(clientInfo.actualTaxPaid ?? 0);
+  // 实际 tax 有两个来源:payroll summary 自动读取(默认,上传即生效) / 手动填写(兜底)
+  const autoTax = round2(payrollTax?.total ?? 0);
+  const autoAvailable = !!payrollTax && payrollTax.parsedCount > 0;
+  const savedTax = round2(clientInfo?.actualTaxPaid ?? 0);
+  // 只要能从 payroll summary 读出来就默认用自动值(上传了就说明这笔薪资已发生);
+  // 库里存的手动值只作为「读不到」时的兜底,想用可以手动切过去。
+  const taxSource: "auto" | "manual" = autoAvailable ? taxSourceOverride ?? "auto" : "manual";
+  const effectiveActualTax = taxSource === "auto" ? autoTax : round2(num(actualTaxInput, 0));
+  const taxBalance = round2(cumulativeTaxWithheld - effectiveActualTax);
+  const actualTaxDirty = !!clientInfo && round2(num(actualTaxInput, 0)) !== savedTax;
+  const autoTaxUnsaved = autoAvailable && Math.abs(autoTax - savedTax) >= 0.005;
+  const unparsedTaxFiles = (payrollTax?.files ?? []).filter((f) => f.employerTax == null);
 
-  async function onSaveActualTax() {
+  /** 保存「实际 tax」到数据库(amount 省略则用手动输入框的值)。 */
+  async function onSaveActualTax(amount?: number) {
     const cid = clientInfo?.clientId;
     if (cid == null) return;
-    const amount = round2(num(actualTaxInput, 0));
-    if (!Number.isFinite(amount) || amount < 0) {
+    const value = round2(amount ?? num(actualTaxInput, 0));
+    if (!Number.isFinite(value) || value < 0) {
       showToast("实际 tax 必须是不小于 0 的数字");
       return;
     }
@@ -479,14 +543,14 @@ export default function ServiceFeePage() {
       const res = await fetch("/api/service-fee/actual-tax", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientId: cid, actualTax: amount }),
+        body: JSON.stringify({ clientId: cid, actualTax: value }),
       });
       const json = (await res.json()) as { success: boolean; actualTaxPaid?: number; error?: string };
       if (!json.success) {
         showToast(json.error ?? "保存失败,请稍后重试");
         return;
       }
-      setClientInfo((prev) => (prev ? { ...prev, actualTaxPaid: json.actualTaxPaid ?? amount } : prev));
+      setClientInfo((prev) => (prev ? { ...prev, actualTaxPaid: json.actualTaxPaid ?? value } : prev));
       showToast("已保存实际 tax");
     } catch {
       showToast("保存失败,请稍后重试");
@@ -585,7 +649,8 @@ export default function ServiceFeePage() {
           <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <h2 className="text-sm font-semibold text-slate-800">客户税务余额 <span className="text-slate-400">Tax Balance</span></h2>
             <p className="mt-1 text-xs text-slate-400">
-              余额 = 累计 Tax Withheld − 实际 tax。累计 Tax Withheld 只统计该客户「已付」的记录;实际 tax 保存后长期跟踪,刷新后仍在。
+              余额 = 累计 Tax Withheld − 实际 tax。累计 Tax Withheld 只统计该客户「已付」的记录;实际 tax 默认从该客户已上传的
+              <b className="text-slate-500"> payroll summary</b> 里自动读取 Employer Taxes 合计(上传了就说明这笔薪资已发生),也可以改成手动填写。
             </p>
             <div className="mt-4 grid gap-4 sm:grid-cols-3">
               <div className="rounded-xl bg-slate-50 px-4 py-3">
@@ -593,36 +658,171 @@ export default function ServiceFeePage() {
                 <div className="mt-1 text-lg font-bold text-slate-900">{usd(cumulativeTaxWithheld)}</div>
                 <div className="mt-0.5 text-[11px] text-slate-400">{paidTaxRecords.length} 条已付记录合计(共 {clientInfo!.history.length} 条)</div>
               </div>
+
               <div>
-                <span className="mb-1 block text-xs font-medium text-slate-600">实际 tax(Real Tax,$)</span>
-                <input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={actualTaxInput}
-                  onChange={(e) => setActualTaxInput(e.target.value)}
-                  placeholder="0.00"
-                  className={inputCls}
-                />
-                <div className="mt-2 flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={onSaveActualTax}
-                    disabled={savingActualTax || !actualTaxDirty}
-                    title={!actualTaxDirty ? "与已保存值一致" : "保存实际 tax 到数据库"}
-                    className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
-                  >
-                    {savingActualTax ? "保存中…" : "保存实际 tax"}
-                  </button>
-                  {actualTaxDirty && <span className="text-[11px] text-amber-600">未保存</span>}
+                <div className="mb-1 flex flex-wrap items-center justify-between gap-1">
+                  <span className="text-xs font-medium text-slate-600">实际 tax(Real Tax,$)</span>
+                  {autoAvailable && (
+                    <span className="inline-flex overflow-hidden rounded-lg border border-slate-200 text-[10px]">
+                      {(["auto", "manual"] as const).map((s) => (
+                        <button
+                          key={s}
+                          type="button"
+                          onClick={() => setTaxSourceOverride(s)}
+                          className={`px-2 py-0.5 font-medium transition ${
+                            taxSource === s ? "bg-slate-900 text-white" : "bg-white text-slate-500 hover:bg-slate-50"
+                          }`}
+                        >
+                          {s === "auto" ? "自动读取" : "手动填写"}
+                        </button>
+                      ))}
+                    </span>
+                  )}
                 </div>
+
+                {taxSource === "auto" ? (
+                  <>
+                    <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                      <div className="text-lg font-bold text-slate-900">{usd(autoTax)}</div>
+                      <div className="mt-0.5 text-[11px] text-slate-400">
+                        来自 {payrollTax!.parsedCount} 份 payroll summary
+                        {payrollTax!.employeeName ? ` · 雇员 ${payrollTax!.employeeName}` : ""}
+                      </div>
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowTaxFiles((v) => !v)}
+                        className="rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-600 transition hover:border-slate-300"
+                      >
+                        {showTaxFiles ? "收起明细" : "查看明细"}
+                      </button>
+                      {autoTaxUnsaved && (
+                        <button
+                          type="button"
+                          onClick={() => onSaveActualTax(autoTax)}
+                          disabled={savingActualTax}
+                          title="把自动读取的金额写入数据库(余额本来就按自动值算,这一步只是留档)"
+                          className="rounded-lg bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-slate-700 disabled:bg-slate-200 disabled:text-slate-400"
+                        >
+                          {savingActualTax ? "保存中…" : "存为实际 tax"}
+                        </button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={actualTaxInput}
+                      onChange={(e) => setActualTaxInput(e.target.value)}
+                      placeholder="0.00"
+                      className={inputCls}
+                    />
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onSaveActualTax()}
+                        disabled={savingActualTax || !actualTaxDirty}
+                        title={!actualTaxDirty ? "与已保存值一致" : "保存实际 tax 到数据库"}
+                        className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+                      >
+                        {savingActualTax ? "保存中…" : "保存实际 tax"}
+                      </button>
+                      {actualTaxDirty && <span className="text-[11px] text-amber-600">未保存</span>}
+                      {autoAvailable && (
+                        <button
+                          type="button"
+                          onClick={() => { setTaxSourceOverride("auto"); setActualTaxInput(String(autoTax)); }}
+                          className="rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-600 transition hover:border-slate-300"
+                        >
+                          用自动值 {usd(autoTax)}
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {payrollTaxLoading && (
+                  <p className="mt-2 text-[11px] text-slate-400">正在读取 payroll summary…</p>
+                )}
+                {!payrollTaxLoading && !autoAvailable && (
+                  <p className="mt-2 text-[11px] text-slate-400">
+                    没在该客户名下找到可识别的 payroll summary(需在「雇员信息」里以 <b>payroll summary</b> 分类上传 PDF),请手动填写。
+                  </p>
+                )}
               </div>
+
               <div className={`rounded-xl px-4 py-3 ${taxBalance >= 0 ? "bg-emerald-50" : "bg-red-50"}`}>
                 <div className="text-[11px] text-slate-500">客户目前的余额</div>
                 <div className={`mt-1 text-xl font-extrabold ${taxBalance >= 0 ? "text-emerald-700" : "text-red-600"}`}>{usd(taxBalance)}</div>
-                <div className="mt-0.5 text-[11px] text-slate-400">Tax Withheld − 实际 tax</div>
+                <div className="mt-0.5 text-[11px] text-slate-400">
+                  {usd(cumulativeTaxWithheld)} − {usd(effectiveActualTax)}({taxSource === "auto" ? "自动读取" : "手动"})
+                </div>
               </div>
             </div>
+
+            {/* 异常提示:同一发薪日多份(疑似重复上传) / 有份数没能识别 */}
+            {payrollTax && payrollTax.duplicatePayDays.length > 0 && (
+              <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+                ⚠️ 发薪日 {payrollTax.duplicatePayDays.join("、")} 各有多份 payroll summary,已全部计入。若是同一批薪资重复上传,请到「雇员信息」删掉多余的那份。
+              </p>
+            )}
+            {unparsedTaxFiles.length > 0 && (
+              <p className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-[11px] text-slate-500">
+                有 {unparsedTaxFiles.length} 份 payroll summary 没能读出雇主税(未计入):
+                {unparsedTaxFiles.map((f) => ` ${f.fileName}(${f.note ?? "未能识别"})`).join(";")}
+              </p>
+            )}
+
+            {/* 明细:每份 payroll summary 读出的雇主税 */}
+            {showTaxFiles && payrollTax && payrollTax.files.length > 0 && (
+              <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200">
+                <table className="w-full min-w-[520px] text-[11px]">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-left text-slate-500">
+                      {["payroll summary 文件", "批次", "发薪日", "Employer Taxes"].map((h) => (
+                        <th key={h} className="whitespace-nowrap px-2 py-1 font-medium">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {payrollTax.files.map((f) => (
+                      <tr key={f.fileId} className="border-b border-slate-100">
+                        <td className="px-2 py-1">
+                          <a
+                            href={`/api/employee/file/${f.fileId}?inline=1`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-violet-700 hover:underline"
+                          >
+                            {f.fileName}
+                          </a>
+                        </td>
+                        <td className="whitespace-nowrap px-2 py-1 text-slate-500">{f.payrollType ?? "—"}</td>
+                        <td className="whitespace-nowrap px-2 py-1 text-slate-500">{f.payDay ?? "—"}</td>
+                        <td className="whitespace-nowrap px-2 py-1 font-medium">
+                          {f.employerTax != null ? (
+                            <>
+                              {usd(f.employerTax)}
+                              {!f.verified && <span className="ml-1 text-[10px] font-normal text-amber-600">待核对</span>}
+                            </>
+                          ) : (
+                            <span className="font-normal text-amber-600">{f.note ?? "未能识别"}</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr className="bg-slate-50">
+                      <td className="px-2 py-1 font-semibold text-slate-700" colSpan={3}>合计(计入实际 tax)</td>
+                      <td className="whitespace-nowrap px-2 py-1 font-bold text-slate-900">{usd(autoTax)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
         )}
 

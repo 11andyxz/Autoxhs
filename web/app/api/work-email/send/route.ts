@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { rateLimit } from "@/lib/rateLimit";
 import {
+  dedupeAddresses,
   GmailNotConfiguredError,
   isValidEmail,
   sendWorkEmail,
@@ -14,6 +15,10 @@ export const dynamic = "force-dynamic";
 const MAX_SUBJECT = 300;
 const MAX_BODY = 20_000;
 const MAX_CC = 10;
+/** 同一封信最多几个收件人(To) */
+const MAX_TO = 5;
+/** 收件人列表落库(", " 拼接)后的长度上限,与 emp_work_email.to_email 对齐 */
+const MAX_TO_JOINED = 900;
 
 const GENERIC_ERROR = "发送失败,请稍后重试。";
 const RATE_LIMIT_ERROR = "当前请求较多,请稍后再试。";
@@ -46,7 +51,9 @@ export async function POST(req: NextRequest) {
   }
 
   const b = (payload ?? {}) as Record<string, unknown>;
-  const to = typeof b.to === "string" ? b.to.trim() : "";
+  // to 支持单个字符串(旧客户端)或字符串数组(可同时发多个邮箱)
+  const toRaw = Array.isArray(b.to) ? b.to : [b.to];
+  const to = dedupeAddresses(toRaw.map((t) => (typeof t === "string" ? t : "")));
   const subject = typeof b.subject === "string" ? b.subject.trim() : "";
   const body = typeof b.body === "string" ? b.body : "";
   const ccRaw = Array.isArray(b.cc) ? b.cc : [];
@@ -58,7 +65,12 @@ export async function POST(req: NextRequest) {
   const recipientName =
     typeof b.recipientName === "string" ? b.recipientName.trim().slice(0, 200) : "";
 
-  if (!isValidEmail(to)) return bad("请填写有效的收件人邮箱。");
+  if (!to.length) return bad("请填写收件人邮箱。");
+  if (to.length > MAX_TO) return bad(`最多同时发给 ${MAX_TO} 个收件人。`);
+  for (const t of to) {
+    if (!isValidEmail(t)) return bad(`收件人邮箱「${t}」格式不正确。`);
+  }
+  if (to.join(", ").length > MAX_TO_JOINED) return bad("收件人邮箱过长,请减少收件人。");
   if (!subject) return bad("请填写邮件主题。");
   if (subject.length > MAX_SUBJECT) return bad("邮件主题过长。");
   if (!body.trim()) return bad("邮件正文不能为空。");
@@ -79,7 +91,7 @@ export async function POST(req: NextRequest) {
     try {
       await insertWorkEmailLog({
         employeeId,
-        toEmail: result.to,
+        toEmail: result.to.join(", "),
         recipientName,
         cc: result.cc,
         fromEmail: result.from,

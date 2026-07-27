@@ -9,6 +9,7 @@ import {
   saveHandoff,
   type ResumeExportKind,
 } from "@/lib/job-hunter/handoff";
+import { fileToHtml, isDocx } from "@/lib/job-hunter/docxToHtml";
 import { buildResumeHtml } from "@/lib/job-hunter/resumeHtml";
 import type { JobHunterResult } from "@/lib/job-hunter/schema";
 
@@ -18,11 +19,20 @@ const LOADING_HINTS = [
   "正在撰写求职信与匹配分析……",
 ];
 
+// 保留原格式模式:先转 HTML,再在原版式上按 JD 就地改写(整份改写较慢)。
+const PRESERVE_HINTS = [
+  "正在把简历转成 HTML(保留原格式)……",
+  "正在按 JD 在原版式上就地改写、强化关键词……",
+  "保留格式的整份改写较慢(约 3~4 分钟),请耐心等待……",
+];
+
 type ApiResponse = {
   success: boolean;
   data?: JobHunterResult;
   error?: string;
   jdText?: string;
+  // 保留原格式模式下,后端一并返回「定制后仍保留原格式」的完整简历 HTML。
+  resumeHtml?: string;
 };
 
 type SourceMode = "file" | "text";
@@ -40,10 +50,15 @@ export default function TailorTab() {
   const [jdText, setJdText] = useState("");
 
   const [allowEmbellish, setAllowEmbellish] = useState(false);
+  // 默认保留原格式:上传 .docx 时不套固定模板,在原版式上按 JD 改写。
+  const [preserveFormat, setPreserveFormat] = useState(true);
 
   const [loading, setLoading] = useState(false);
+  const [preserving, setPreserving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<JobHunterResult | null>(null);
+  // 保留原格式模式下,后端返回的「定制后仍保留原格式」的完整 HTML(替代固定模板渲染)。
+  const [preserveHtml, setPreserveHtml] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<DownloadKind | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
@@ -62,10 +77,18 @@ export default function TailorTab() {
   // 公网部署:Indeed 投递依赖本机服务,远程用不了,隐藏相关入口。
   const isPublicDeploy = process.env.NEXT_PUBLIC_DEPLOY_MODE === "public";
 
+  // 保留原格式时用后端返回的 HTML;否则用固定模板渲染结构化结果。
   const resumeHtml = useMemo(
-    () => (result ? buildResumeHtml(result.resume) : ""),
-    [result],
+    () => preserveHtml ?? (result ? buildResumeHtml(result.resume) : ""),
+    [preserveHtml, result],
   );
+
+  // 保留原格式只对上传的 .docx 有效;PDF / 粘贴文本无法还原格式,会回退到经典模板。
+  const preserveBlocked =
+    preserveFormat &&
+    resumeMode === "file" &&
+    !!resumeFile &&
+    !isDocx(resumeFile);
 
   function handlePrintResume() {
     const win = resumeFrameRef.current?.contentWindow;
@@ -188,16 +211,53 @@ export default function TailorTab() {
     setError(null);
     setDownloadError(null);
     setResult(null);
+    setPreserveHtml(null);
+
+    // 保留原格式仅对上传的 .docx 有效;其它输入回退到经典模板。
+    const canPreserve =
+      preserveFormat && resumeMode === "file" && !!resumeFile && isDocx(resumeFile);
+
     setLoading(true);
-
-    const fd = new FormData();
-    if (resumeMode === "file" && resumeFile) fd.append("resumeFile", resumeFile);
-    else fd.append("resumeText", resumeText);
-    if (jdMode === "file" && jdFile) fd.append("jdFile", jdFile);
-    else fd.append("jdText", jdText);
-    fd.append("allowEmbellish", allowEmbellish ? "true" : "false");
-
+    setPreserving(canPreserve);
     try {
+      if (canPreserve) {
+        // 客户端先把 .docx 高保真转成 HTML(保留字体/版式),再交给后端在原版式上按 JD 改写。
+        let sourceHtml: string;
+        try {
+          sourceHtml = await fileToHtml(resumeFile!);
+        } catch {
+          setError("简历转换失败,请确认是有效的 .docx 文件。");
+          return;
+        }
+        const fd = new FormData();
+        fd.append("resumeHtml", sourceHtml);
+        if (jdMode === "file" && jdFile) fd.append("jdFile", jdFile);
+        else fd.append("jdText", jdText);
+        fd.append("allowEmbellish", allowEmbellish ? "true" : "false");
+
+        const res = await fetch("/api/job-hunter/generate-preserve", {
+          method: "POST",
+          body: fd,
+        });
+        const json = (await res.json().catch(() => null)) as ApiResponse | null;
+        if (!res.ok || !json?.success || !json.data || !json.resumeHtml) {
+          setError(json?.error || "生成失败,请稍后重试。");
+          return;
+        }
+        setResult(json.data);
+        setPreserveHtml(json.resumeHtml);
+        setResolvedJd(json.jdText ?? (jdMode === "text" ? jdText : ""));
+        return;
+      }
+
+      // 经典模板流程:解析成结构化 JSON,再套固定模板渲染。
+      const fd = new FormData();
+      if (resumeMode === "file" && resumeFile) fd.append("resumeFile", resumeFile);
+      else fd.append("resumeText", resumeText);
+      if (jdMode === "file" && jdFile) fd.append("jdFile", jdFile);
+      else fd.append("jdText", jdText);
+      fd.append("allowEmbellish", allowEmbellish ? "true" : "false");
+
       const res = await fetch("/api/job-hunter/generate", { method: "POST", body: fd });
       const json = (await res.json().catch(() => null)) as ApiResponse | null;
       if (!res.ok || !json?.success || !json.data) {
@@ -210,7 +270,27 @@ export default function TailorTab() {
       setError("网络异常,请稍后重试。");
     } finally {
       setLoading(false);
+      setPreserving(false);
     }
+  }
+
+  // 保留原格式模式:简历 Word 直接下载「定制后仍保留原格式」的 HTML(以 .doc 打开保留大部分排版);
+  // 否则走服务端按结构化结果生成的 .docx。
+  function handleDownloadResumeWord() {
+    if (preserveHtml) {
+      const base = (result?.resume.name?.trim() || "Resume").replace(/[^\w.-]+/g, "_");
+      const blob = new Blob([preserveHtml], { type: "application/msword" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${base}_tailored.doc`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      return;
+    }
+    void handleDownload("resume-docx");
   }
 
   async function handleDownload(kind: DownloadKind) {
@@ -280,6 +360,33 @@ export default function TailorTab() {
         accept={ACCEPT}
       />
 
+      {/* 保留原格式开关(仅上传文件时相关) */}
+      {resumeMode === "file" && (
+        <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <label className="flex items-start gap-3">
+            <input
+              type="checkbox"
+              checked={preserveFormat}
+              onChange={(e) => setPreserveFormat(e.target.checked)}
+              className="mt-1 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+            />
+            <span>
+              <span className="text-sm font-medium text-slate-800">
+                保留简历原格式（推荐 · 适用于上传的 Word .docx）
+              </span>
+              <span className="mt-1 block text-xs leading-relaxed text-slate-500">
+                打开后：先把你的 .docx 高保真转成 HTML（字体 / 字号 / 颜色 / 版式都保留），AI 只在<b>原版式上按 JD 改写文字</b>（重排经历、强化关键词），<b>不套用固定模板</b>。整份改写较慢（约 3~4 分钟）。关闭则按经典模板重排（更快，但不保留你的原格式）。
+              </span>
+              {preserveBlocked && (
+                <span className="mt-1 block text-xs leading-relaxed text-amber-600">
+                  ⚠️ 当前文件不是 .docx，无法保留原格式；生成时会自动改用经典模板（PDF / 粘贴文本同理）。
+                </span>
+              )}
+            </span>
+          </label>
+        </div>
+      )}
+
       {/* JD 输入 */}
       <SourceCard
         title="② 目标岗位 JD"
@@ -323,7 +430,11 @@ export default function TailorTab() {
         disabled={loading}
         className="mt-5 w-full rounded-xl bg-cyan-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-60"
       >
-        {loading ? LOADING_HINTS[hintIndex] : "生成定制简历"}
+        {loading
+          ? preserving
+            ? PRESERVE_HINTS[hintIndex % PRESERVE_HINTS.length]
+            : LOADING_HINTS[hintIndex % LOADING_HINTS.length]
+          : "生成定制简历"}
       </button>
 
       {/* 面试题库入口(始终可用:只需①的简历,JD 可选;不必先定制简历) */}
@@ -400,12 +511,18 @@ export default function TailorTab() {
 
           <DownloadBlock
             onPrintResume={handlePrintResume}
+            onDownloadResumeWord={handleDownloadResumeWord}
             onDownload={handleDownload}
             downloading={downloading}
+            preserveMode={!!preserveHtml}
             error={downloadError}
           />
 
-          <ResumeHtmlPreview html={resumeHtml} frameRef={resumeFrameRef} />
+          <ResumeHtmlPreview
+            html={resumeHtml}
+            frameRef={resumeFrameRef}
+            preserveMode={!!preserveHtml}
+          />
           <CoverLetterPreview text={result.coverLetter} />
         </div>
       )}
@@ -436,6 +553,21 @@ function SourceCard({
   placeholder: string;
   accept: string;
 }) {
+  const [dragging, setDragging] = useState(false);
+
+  // 拖入文件:只接受 PDF / DOCX,其它类型忽略(与点击选择的 accept 一致)
+  function acceptDropped(files: FileList | null) {
+    const f = files?.[0];
+    if (!f) return;
+    const name = f.name.toLowerCase();
+    const okName = name.endsWith(".pdf") || name.endsWith(".docx");
+    const okType =
+      f.type === "application/pdf" ||
+      f.type ===
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    if (okName || okType) onFile(f);
+  }
+
   return (
     <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex items-center justify-between">
@@ -457,7 +589,30 @@ function SourceCard({
 
       {mode === "file" ? (
         <div className="mt-3">
-          <label className="flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500 transition hover:border-cyan-300 hover:bg-cyan-50/40">
+          <label
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragEnter={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              setDragging(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              acceptDropped(e.dataTransfer.files);
+            }}
+            className={`flex cursor-pointer items-center justify-center rounded-xl border border-dashed px-4 py-6 text-sm transition ${
+              dragging
+                ? "border-cyan-400 bg-cyan-50 text-cyan-700 ring-2 ring-cyan-200"
+                : "border-slate-300 bg-slate-50 text-slate-500 hover:border-cyan-300 hover:bg-cyan-50/40"
+            }`}
+          >
             <input
               type="file"
               accept={accept}
@@ -466,8 +621,10 @@ function SourceCard({
             />
             {file ? (
               <span className="font-medium text-slate-700">📄 {file.name}</span>
+            ) : dragging ? (
+              <span className="font-medium">松手即可上传</span>
             ) : (
-              <span>点击选择 PDF / DOCX 文件</span>
+              <span>点击选择，或把 PDF / DOCX 文件拖到这里</span>
             )}
           </label>
         </div>
@@ -549,17 +706,21 @@ function KeywordRow({
 
 function DownloadBlock({
   onPrintResume,
+  onDownloadResumeWord,
   onDownload,
   downloading,
+  preserveMode,
   error,
 }: {
   onPrintResume: () => void;
+  onDownloadResumeWord: () => void;
   onDownload: (k: DownloadKind) => void;
   downloading: DownloadKind | null;
+  preserveMode: boolean;
   error: string | null;
 }) {
-  const downloads: Array<{ kind: DownloadKind; label: string; icon: string }> = [
-    { kind: "resume-docx", label: "简历 Word", icon: "📝" },
+  // 简历 Word 单独处理(保留原格式时走客户端下载);求职信 / 分析报告仍走服务端。
+  const others: Array<{ kind: DownloadKind; label: string; icon: string }> = [
     { kind: "cover-pdf", label: "求职信 PDF", icon: "✉️" },
     { kind: "analysis-pdf", label: "分析报告 PDF", icon: "📊" },
   ];
@@ -574,7 +735,19 @@ function DownloadBlock({
           <span aria-hidden>📄</span>
           下载简历 PDF
         </button>
-        {downloads.map((b) => (
+        <button
+          onClick={onDownloadResumeWord}
+          disabled={!preserveMode && downloading !== null}
+          className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-medium text-slate-700 transition hover:border-cyan-300 hover:bg-cyan-50/40 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <span aria-hidden>📝</span>
+          {!preserveMode && downloading === "resume-docx"
+            ? "生成中…"
+            : preserveMode
+              ? "简历 Word（保留格式）"
+              : "简历 Word"}
+        </button>
+        {others.map((b) => (
           <button
             key={b.kind}
             onClick={() => onDownload(b.kind)}
@@ -588,6 +761,7 @@ function DownloadBlock({
       </div>
       <p className="mt-2 text-xs text-slate-400">
         简历 PDF 由浏览器打印生成：点「下载简历 PDF」后，在打印窗口的「目标 / 打印机」里选「另存为 PDF」即可（版式与下方预览一致）。
+        {preserveMode && "「简历 Word（保留格式）」以 Word 打开会保留你原简历的大部分排版。"}
       </p>
       {error && <p className="mt-3 text-sm text-rose-600">{error}</p>}
     </div>
@@ -597,14 +771,16 @@ function DownloadBlock({
 function ResumeHtmlPreview({
   html,
   frameRef,
+  preserveMode,
 }: {
   html: string;
   frameRef: React.RefObject<HTMLIFrameElement | null>;
+  preserveMode: boolean;
 }) {
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
       <p className="px-2 pb-2 pt-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
-        改写后的简历（下方即为打印 / PDF 效果）
+        改写后的简历（{preserveMode ? "保留原格式" : "经典模板"} · 下方即为打印 / PDF 效果）
       </p>
       <iframe
         ref={frameRef}

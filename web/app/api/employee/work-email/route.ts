@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { isValidEmail } from "@/lib/workEmail/gmail";
+import { parseEmailList } from "@/lib/employee/validate";
+import { dedupeAddresses, isValidEmail } from "@/lib/workEmail/gmail";
 import { insertManualWorkEmail } from "@/lib/workEmail/log";
 
 export const runtime = "nodejs";
@@ -9,6 +10,7 @@ export const dynamic = "force-dynamic";
 const MAX_SUBJECT = 300;
 const MAX_BODY = 20_000;
 const MAX_CC = 10;
+const MAX_TO = 5;
 
 function bad(error: string, status = 400) {
   return NextResponse.json({ success: false, error }, { status });
@@ -47,8 +49,17 @@ export async function POST(req: NextRequest) {
   if (!subject) return bad("请填写邮件标题。");
   if (subject.length > MAX_SUBJECT) return bad("邮件标题过长。");
 
-  const toEmail = typeof b.toEmail === "string" ? b.toEmail.trim() : "";
-  if (!isValidEmail(toEmail)) return bad("请填写有效的收件人邮箱。");
+  // 收件人:toEmails 数组 或 toEmail(单个 / 逗号分隔多个)。多个时以 ", " 拼接入库。
+  const toRaw = Array.isArray(b.toEmails)
+    ? b.toEmails.map((t) => (typeof t === "string" ? t : ""))
+    : parseEmailList(typeof b.toEmail === "string" ? b.toEmail : "");
+  const toList = dedupeAddresses(toRaw);
+  if (!toList.length) return bad("请填写有效的收件人邮箱。");
+  if (toList.length > MAX_TO) return bad(`最多 ${MAX_TO} 个收件人。`);
+  for (const t of toList) {
+    if (!isValidEmail(t)) return bad(`收件人邮箱「${t}」格式不正确。`);
+  }
+  const toEmail = toList.join(", ");
 
   const body = typeof b.body === "string" ? b.body : "";
   if (!body.trim()) return bad("邮件正文不能为空。");

@@ -178,6 +178,26 @@ export async function generateCoverImage(userPrompt: string): Promise<Buffer> {
   return Buffer.from(b64, "base64");
 }
 
+/**
+ * 通用生图:按传入的完整提示词生成一张图,返回 PNG 字节。
+ * 不附加封面模板/水印,由调用方自行组织提示(如「视频讲解」为每个分镜配图)。
+ * size 默认竖版 2:3(贴近竖屏视频);可传 1024x1024 / 1536x1024 等。
+ */
+export async function generateImageFromPrompt(
+  prompt: string,
+  size: string = COVER_SIZE,
+): Promise<Buffer> {
+  const client = getClient(120_000, 0); // 生图较慢,给足超时并关闭自动重试避免翻倍
+  const result = await client.images.generate({
+    model: getImageModel(),
+    prompt,
+    size: size as "1024x1536",
+  });
+  const b64 = result.data?.[0]?.b64_json;
+  if (!b64) throw new Error("生图返回为空");
+  return Buffer.from(b64, "base64");
+}
+
 // ---- 语音转文字（面试语音作答）----
 const DEFAULT_TRANSCRIBE_MODEL = "whisper-1"; // 通用稳定;可用 OPENAI_TRANSCRIBE_MODEL 覆盖(如 gpt-4o-transcribe)
 type Uploadable = Awaited<ReturnType<typeof toFile>>;

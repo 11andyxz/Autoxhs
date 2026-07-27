@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { addCramCardsBulk, getCramSession } from "@/lib/job-hunter/interview/cram";
+import { addCramCardsBulk, getCramSession, listCramFrontKeys } from "@/lib/job-hunter/interview/cram";
+import { frontKey } from "@/lib/job-hunter/interview/frontKey";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
 
 export const runtime = "nodejs";
@@ -9,7 +10,11 @@ export const maxDuration = 60;
 
 const MAX_ITEMS = 5000;
 
-/** 批量导入题库:{sessionId, items:[{front(问题), content(答案)}]} → 建成问答闪卡(kind='block')。 */
+/**
+ * 批量导入题库:{sessionId, items:[{front(问题), content(答案)}]} → 建成问答闪卡(kind='block')。
+ * 去重:同一份简历里、问题文本(空白/大小写不敏感)已经有卡的直接跳过,批次内部重复也只留第一条。
+ * 所以同一份 Excel 反复导、或先导 5★ 再导全部,都只会补进新题,已复习的进度不会被复制一份。
+ */
 export async function POST(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
   let body: { sessionId?: unknown; items?: unknown };
@@ -36,8 +41,27 @@ export async function POST(req: NextRequest) {
   try {
     const s = await getCramSession(sessionId);
     if (!s) return bad("这份简历不存在。", 404);
-    const count = await addCramCardsBulk(sessionId, items);
-    return NextResponse.json({ success: true, count });
+
+    const existing = await listCramFrontKeys(sessionId, "block");
+    const batch = new Set<string>();
+    const fresh: typeof items = [];
+    let skipped = 0;
+    for (const it of items) {
+      const key = frontKey(it.front);
+      if (!key) {
+        fresh.push(it); // 没有问题文本的(只有答案)不参与去重,照常导入
+        continue;
+      }
+      if (existing.has(key) || batch.has(key)) {
+        skipped++;
+        continue;
+      }
+      batch.add(key);
+      fresh.push(it);
+    }
+
+    const count = fresh.length ? await addCramCardsBulk(sessionId, fresh) : 0;
+    return NextResponse.json({ success: true, count, skipped, total: items.length });
   } catch (err) {
     return fail(err, "cram-import");
   }

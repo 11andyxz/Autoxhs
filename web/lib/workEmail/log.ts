@@ -20,7 +20,7 @@ export function ensureWorkEmailSchema(): Promise<void> {
       CREATE TABLE IF NOT EXISTS emp_work_email (
         id INT AUTO_INCREMENT PRIMARY KEY,
         employee_id INT NULL,
-        to_email VARCHAR(320) NOT NULL,
+        to_email VARCHAR(1000) NOT NULL,
         recipient_name VARCHAR(255) NOT NULL DEFAULT '',
         cc TEXT NULL,
         from_email VARCHAR(320) NOT NULL,
@@ -33,6 +33,20 @@ export function ensureWorkEmailSchema(): Promise<void> {
           REFERENCES emp_employee(id) ON DELETE SET NULL
       )
     `);
+    // 老库的 to_email 只有 VARCHAR(320):一封信发给多个邮箱时要存逗号拼接的列表,先加宽。
+    // 目录表可能滞后 → 加宽失败不影响发信(只是记录可能被截断),记日志不抛。
+    try {
+      const [col] = await p.query<RowDataPacket[]>(
+        `SELECT character_maximum_length AS len FROM information_schema.columns
+          WHERE table_schema = DATABASE() AND table_name = 'emp_work_email' AND column_name = 'to_email'`,
+      );
+      const len = Number(col[0]?.len ?? 0);
+      if (len && len < 1000) {
+        await p.query("ALTER TABLE emp_work_email MODIFY COLUMN to_email VARCHAR(1000) NOT NULL");
+      }
+    } catch (err) {
+      console.error("[work-email] 加宽 to_email 失败", { name: (err as Error)?.name });
+    }
   })().catch((err) => {
     schemaReady = null;
     throw err;
@@ -42,6 +56,7 @@ export function ensureWorkEmailSchema(): Promise<void> {
 
 export interface NewWorkEmail {
   employeeId: number | null;
+  /** 收件人;多个时用 ", " 拼接(与 cc 一致) */
   toEmail: string;
   recipientName: string;
   cc: string[];

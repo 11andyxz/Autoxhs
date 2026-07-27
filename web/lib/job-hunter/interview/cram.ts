@@ -1,5 +1,6 @@
 import type { RowDataPacket, ResultSetHeader } from "mysql2";
 
+import { frontKey } from "@/lib/job-hunter/interview/frontKey";
 import { getPool } from "@/lib/serviceFee/db";
 
 /**
@@ -232,6 +233,25 @@ export async function addCramCard(v: {
     ],
   );
   return res.insertId;
+}
+
+/**
+ * 这份简历下、指定类型的卡片「正面」去重键集合(给题库导入做去重)。
+ * 表上没有 front 的唯一键(历史数据里已有重复,加唯一键会卡住迁移),所以在应用层比对。
+ */
+export async function listCramFrontKeys(sessionId: number, kind: CramCardKind = "block"): Promise<Set<string>> {
+  await ensureCramSchema();
+  const p = getPool();
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT front FROM ip_cram_card WHERE session_id = ? AND kind = ? AND front IS NOT NULL AND front <> ''",
+    [sessionId, kind],
+  );
+  const keys = new Set<string>();
+  for (const r of rows as Array<{ front: string }>) {
+    const k = frontKey(r.front);
+    if (k) keys.add(k);
+  }
+  return keys;
 }
 
 /** 批量加入复习卡(题库导入用)。分批(每批 100)一条 INSERT ... VALUES 多行,due_at=NOW()。 */

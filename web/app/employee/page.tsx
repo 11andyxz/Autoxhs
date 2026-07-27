@@ -5,8 +5,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ALLOWED_FILE_EXTENSIONS,
+  allEmailsOf,
   isAllowedFileName,
+  MAX_EXTRA_EMAILS,
   MAX_FILE_BYTES,
+  parseEmailList,
   sanitizeCategoryName,
   validateEmployee,
   type EmployeeInput,
@@ -26,13 +29,18 @@ type EmployeeWithFiles = {
   id: number;
   legalFirstName: string;
   legalLastName: string;
+  /** 主邮箱(同一主邮箱视为同一雇员) */
   email: string;
+  /** 备用邮箱;发工作邮件时可与主邮箱一起选中 */
+  extraEmails: string[];
   address: string;
   phone: string;
   notes: string;
   createdAt: string;
   updatedAt: string;
   files: EmployeeFileItem[];
+  /** 已登记但尚无文件的分类(空占位),用于展示「缺失」栏目。 */
+  emptyCategories: string[];
 };
 type PaymentFileItem = { id: number; originalName: string; mimeType: string; sizeBytes: number };
 type FeeRecord = {
@@ -86,6 +94,7 @@ const EMPTY: EmployeeInput = {
   address: "",
   phone: "",
   notes: "",
+  extraEmails: [],
 };
 
 function fmtSize(bytes: number): string {
@@ -96,6 +105,11 @@ function fmtSize(bytes: number): string {
 
 function isPdf(file: File): boolean {
   return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+}
+
+/** 备用邮箱提交前清洗:去空格、丢掉空行(「＋ 添加邮箱」可能留下空输入框)。 */
+function cleanExtras(list: string[] | undefined): string[] {
+  return (list ?? []).map((s) => s.trim()).filter(Boolean);
 }
 
 /** 可在浏览器内嵌预览的类型:PDF 与图片(Word 不支持,只下载)。 */
@@ -173,6 +187,98 @@ async function filesFromDataTransfer(dt: DataTransfer): Promise<DroppedFile[]> {
     if (out.length) return out;
   }
   return plainFiles;
+}
+
+/**
+ * 拖拽上传的公共逻辑:返回高亮状态 + 一组事件处理器,摊到任意容器上即可支持拖入
+ * (含文件夹,递归)。页面上所有上传入口共用这一份,行为一致。
+ */
+function useFileDrop(onFiles: (items: DroppedFile[]) => void, disabled = false) {
+  const [dragging, setDragging] = useState(false);
+  const dropHandlers = {
+    onDragEnter: (e: React.DragEvent) => {
+      if (disabled) return;
+      e.preventDefault();
+      setDragging(true);
+    },
+    onDragOver: (e: React.DragEvent) => {
+      if (disabled) return;
+      e.preventDefault(); // 允许放置
+      if (!dragging) setDragging(true);
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      // 只在真正离开拖放区(而非移到其子元素)时取消高亮
+      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+    },
+    onDrop: async (e: React.DragEvent) => {
+      if (disabled) return;
+      e.preventDefault();
+      setDragging(false);
+      onFiles(await filesFromDataTransfer(e.dataTransfer));
+    },
+  };
+  return { dragging, dropHandlers };
+}
+
+/**
+ * 邮箱输入:主邮箱 + 任意多个备用邮箱(可增删)。主邮箱是雇员的去重键;
+ * 备用邮箱只是「也能收信的地址」,发工作邮件时可勾选一起发。
+ */
+function EmailFields({
+  email,
+  extraEmails,
+  onChangeEmail,
+  onChangeExtras,
+}: {
+  email: string;
+  extraEmails: string[];
+  onChangeEmail: (v: string) => void;
+  onChangeExtras: (list: string[]) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <Field label="Email(主邮箱)">
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => onChangeEmail(e.target.value)}
+          placeholder="name@example.com"
+          className={inputCls}
+          autoComplete="off"
+        />
+      </Field>
+      {extraEmails.map((v, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <input
+            type="email"
+            value={v}
+            onChange={(e) => onChangeExtras(extraEmails.map((x, j) => (j === i ? e.target.value : x)))}
+            placeholder={`备用邮箱 ${i + 1}`}
+            className={inputCls}
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            onClick={() => onChangeExtras(extraEmails.filter((_, j) => j !== i))}
+            className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-500 transition hover:border-red-300 hover:text-red-600"
+          >
+            移除
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={() => onChangeExtras([...extraEmails, ""])}
+        disabled={extraEmails.length >= MAX_EXTRA_EMAILS}
+        className="rounded-xl border border-dashed border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-violet-400 hover:text-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        ＋ 添加邮箱
+      </button>
+      <p className="text-[11px] text-slate-400">
+        可加最多 {MAX_EXTRA_EMAILS} 个备用邮箱;发工作邮件时能勾选多个邮箱同时发送。
+      </p>
+    </div>
+  );
 }
 
 /**
@@ -283,7 +389,6 @@ function PendingFiles({
 export default function EmployeePage() {
   const [form, setForm] = useState<EmployeeInput>(EMPTY);
   const [pending, setPending] = useState<PendingFile[]>([]);
-  const [dragging, setDragging] = useState(false);
   const [filling, setFilling] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
@@ -293,6 +398,7 @@ export default function EmployeePage() {
   const [query, setQuery] = useState("");
   const [preview, setPreview] = useState<EmployeeFileItem | null>(null);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
+  const [copyTarget, setCopyTarget] = useState<EmployeeWithFiles | null>(null); // 「复制分类」的目标雇员
   const [payTarget, setPayTarget] = useState<number | null>(null); // 待「标记已付」的收费记录 id
   const [addWorkTarget, setAddWorkTarget] = useState<AddWorkTarget | null>(null);
 
@@ -301,6 +407,8 @@ export default function EmployeePage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // addFiles 是函数声明(已提升),可以在此先取用
+  const { dragging, dropHandlers } = useFileDrop(addFiles);
 
   useEffect(() => {
     document.title = "雇员信息 · Employee Information";
@@ -416,11 +524,11 @@ export default function EmployeePage() {
       }
       const d = json.data;
       setForm((prev) => ({
+        ...prev, // 保留 I-983 不含的字段(电话 / 备注 / 备用邮箱)
         legalFirstName: d.firstName || prev.legalFirstName,
         legalLastName: d.lastName || prev.legalLastName,
         email: d.email || prev.email,
         address: d.address || prev.address,
-        phone: prev.phone, // I-983 不含雇员本人电话,保持原值
       }));
       showToast("已从 I-983 自动填充表单");
     } catch {
@@ -432,20 +540,6 @@ export default function EmployeePage() {
 
   function removePending(uid: number) {
     setPending((p) => p.filter((f) => f.uid !== uid));
-  }
-
-  function onDragOver(e: React.DragEvent) {
-    e.preventDefault(); // 允许放置
-    if (!dragging) setDragging(true);
-  }
-  function onDragLeave(e: React.DragEvent) {
-    // 只在真正离开拖放区(而非移到其子元素)时取消高亮
-    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
-  }
-  async function onDrop(e: React.DragEvent) {
-    e.preventDefault();
-    setDragging(false);
-    addFiles(await filesFromDataTransfer(e.dataTransfer)); // 支持拖入文件夹(递归)
   }
 
   function onReset() {
@@ -468,6 +562,7 @@ export default function EmployeePage() {
       fd.append("legalFirstName", form.legalFirstName.trim());
       fd.append("legalLastName", form.legalLastName.trim());
       fd.append("email", form.email.trim());
+      fd.append("extraEmails", JSON.stringify(cleanExtras(form.extraEmails)));
       fd.append("address", form.address.trim());
       fd.append("phone", form.phone.trim());
       fd.append("notes", (form.notes ?? "").trim());
@@ -505,11 +600,13 @@ export default function EmployeePage() {
       const hay = [
         p.displayName,
         emp?.email,
+        ...(emp?.extraEmails ?? []),
         emp?.phone,
         emp?.address,
         emp?.notes,
         p.feeClientName,
         ...(emp?.files.map((f) => f.category) ?? []),
+        ...(emp?.emptyCategories ?? []),
       ]
         .filter(Boolean)
         .join(" ")
@@ -541,9 +638,12 @@ export default function EmployeePage() {
             <Field label="Legal Last Name">
               <input type="text" value={form.legalLastName} onChange={(e) => setField("legalLastName", e.target.value)} className={inputCls} autoComplete="off" />
             </Field>
-            <Field label="Email">
-              <input type="email" value={form.email} onChange={(e) => setField("email", e.target.value)} placeholder="name@example.com" className={inputCls} autoComplete="off" />
-            </Field>
+            <EmailFields
+              email={form.email}
+              extraEmails={form.extraEmails ?? []}
+              onChangeEmail={(v) => setField("email", v)}
+              onChangeExtras={(list) => setForm((f) => ({ ...f, extraEmails: list }))}
+            />
             <Field label="Phone(选填)">
               <input type="tel" value={form.phone} onChange={(e) => setField("phone", e.target.value)} placeholder="(555) 123-4567" className={inputCls} autoComplete="off" />
             </Field>
@@ -568,10 +668,7 @@ export default function EmployeePage() {
             {filling ? "正在识别 I-983…" : "上传 I-983 PDF 会自动识别学生信息并填入上方表单(姓名 / 邮箱 / 地址;电话需手填)。"}
           </p>
           <div
-            onDragEnter={onDragOver}
-            onDragOver={onDragOver}
-            onDragLeave={onDragLeave}
-            onDrop={onDrop}
+            {...dropHandlers}
             className={`mt-4 flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-5 py-8 text-center transition ${
               dragging ? "border-violet-400 bg-violet-50" : "border-slate-300"
             }`}
@@ -667,13 +764,23 @@ export default function EmployeePage() {
                       <h3 className="text-sm font-semibold text-slate-900">{p.displayName}</h3>
                       <div className="flex items-center gap-3">
                         {emp ? (
-                          <button
-                            type="button"
-                            onClick={() => setEditTarget({ mode: "edit", employee: emp })}
-                            className="rounded-lg border border-violet-200 px-2.5 py-1 text-xs font-medium text-violet-700 transition hover:border-violet-400"
-                          >
-                            编辑
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => setCopyTarget(emp)}
+                              title="从另一个员工复制文档分类栏目(只复制分类名,不复制文件)"
+                              className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:border-violet-400 hover:text-violet-700"
+                            >
+                              复制分类
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditTarget({ mode: "edit", employee: emp })}
+                              className="rounded-lg border border-violet-200 px-2.5 py-1 text-xs font-medium text-violet-700 transition hover:border-violet-400"
+                            >
+                              编辑
+                            </button>
+                          </>
                         ) : (
                           <button
                             type="button"
@@ -690,12 +797,17 @@ export default function EmployeePage() {
                     {emp ? (
                       <>
                         <p className="mt-1 text-xs text-slate-500">
-                          {[emp.email, emp.phone, emp.address].filter(Boolean).join(" · ")}
+                          {[allEmailsOf(emp).join(" / "), emp.phone, emp.address].filter(Boolean).join(" · ")}
                         </p>
                         {emp.notes && (
                           <p className="mt-1 whitespace-pre-wrap text-xs text-slate-500">备注:{emp.notes}</p>
                         )}
-                        <EmployeeFiles files={emp.files} onPreview={setPreview} />
+                        <EmployeeFiles
+                          emp={emp}
+                          onPreview={setPreview}
+                          onUploaded={(msg) => { showToast(msg); loadPeople(); }}
+                          onError={showToast}
+                        />
                       </>
                     ) : (
                       <p className="mt-1 text-xs text-amber-600">仅收费客户,未录入雇员资料</p>
@@ -718,7 +830,8 @@ export default function EmployeePage() {
                           setAddWorkTarget({
                             employeeId: emp.id,
                             employeeName: p.displayName,
-                            toEmail: emp.email ?? "",
+                            // 预填该雇员的全部邮箱(多个用逗号分隔,可自行删减)
+                            toEmail: allEmailsOf(emp).join(", "),
                           })
                         }
                       />
@@ -750,6 +863,13 @@ export default function EmployeePage() {
           loadPeople();
         }}
       />
+      <CopyCategoriesModal
+        target={copyTarget}
+        people={people}
+        onClose={() => setCopyTarget(null)}
+        onCopied={(msg) => { setCopyTarget(null); showToast(msg); loadPeople(); }}
+        onError={showToast}
+      />
       <AddWorkEmailModal
         target={addWorkTarget}
         onClose={() => setAddWorkTarget(null)}
@@ -763,44 +883,356 @@ export default function EmployeePage() {
   );
 }
 
-function EmployeeFiles({
-  files,
-  onPreview,
-}: {
-  files: EmployeeFileItem[];
-  onPreview: (f: EmployeeFileItem) => void;
-}) {
-  if (!files.length) return <p className="mt-3 text-xs text-slate-400">无文件</p>;
-  const byCategory = new Map<string, EmployeeFileItem[]>();
+/** 一个分类栏目:合并「有文件的分类」与「空占位分类」后的展示单元。 */
+type CategoryRow = { label: string; files: EmployeeFileItem[] };
+
+/**
+ * 把文件按分类归组,再并入空占位分类(去重,不分大小写:同名有文件的优先),
+ * 最后按分类名不分大小写排序,保证每个员工的栏目顺序一致。
+ */
+function buildCategoryRows(files: EmployeeFileItem[], emptyCategories: string[]): CategoryRow[] {
+  const map = new Map<string, CategoryRow>();
   for (const f of files) {
-    const list = byCategory.get(f.category) ?? [];
-    list.push(f);
-    byCategory.set(f.category, list);
+    const key = f.category.toLowerCase();
+    const row = map.get(key) ?? { label: f.category, files: [] };
+    row.files.push(f);
+    map.set(key, row);
   }
+  for (const c of emptyCategories) {
+    const key = c.toLowerCase();
+    if (!map.has(key)) map.set(key, { label: c, files: [] });
+  }
+  return Array.from(map.values()).sort((a, b) =>
+    a.label.localeCompare(b.label, undefined, { sensitivity: "base" }),
+  );
+}
+
+/** 某雇员的全部分类 key(去重、排序)= 有文件的分类 ∪ 空占位分类。 */
+function categorySetOf(emp: EmployeeWithFiles): string[] {
+  return buildCategoryRows(emp.files, emp.emptyCategories).map((r) => r.label);
+}
+
+/**
+ * 往某分类栏目上传文件:复用 PATCH /api/employee/[id](需带雇员基本信息,原样回传即可)。
+ * 文件落库后该分类即由「空占位」变为「有文件」。
+ */
+async function uploadFilesToCategory(
+  emp: EmployeeWithFiles,
+  category: string,
+  files: File[],
+): Promise<{ ok: boolean; error?: string }> {
+  const fd = new FormData();
+  fd.append("legalFirstName", emp.legalFirstName);
+  fd.append("legalLastName", emp.legalLastName);
+  fd.append("email", emp.email);
+  // PATCH 会整体覆盖基本信息,备用邮箱必须原样回传,否则会被清空
+  fd.append("extraEmails", JSON.stringify(emp.extraEmails ?? []));
+  fd.append("address", emp.address);
+  fd.append("phone", emp.phone);
+  fd.append("notes", emp.notes ?? "");
+  fd.append("categories", JSON.stringify(files.map(() => category)));
+  files.forEach((f) => fd.append("files", f));
+  try {
+    const res = await fetch(`/api/employee/${emp.id}`, { method: "PATCH", body: fd });
+    const json = (await res.json()) as { success: boolean; error?: string };
+    if (!json.success) return { ok: false, error: json.error ?? "上传失败,请稍后重试。" };
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "上传失败,请稍后重试。" };
+  }
+}
+
+function EmployeeFiles({
+  emp,
+  onPreview,
+  onUploaded,
+  onError,
+}: {
+  emp: EmployeeWithFiles;
+  onPreview: (f: EmployeeFileItem) => void;
+  onUploaded: (msg: string) => void;
+  onError: (msg: string) => void;
+}) {
+  // 用 Set 跟踪「正在上传中的分类」:多个分类可并发上传,各自独立禁用/恢复自己的按钮,
+  // 避免单一标量被后一次上传覆盖,导致前一次仍在途的按钮误恢复、可被重复点击造成重复上传。
+  const [busyCategories, setBusyCategories] = useState<Set<string>>(() => new Set());
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingCategoryRef = useRef<string | null>(null);
+
+  const rows = buildCategoryRows(emp.files, emp.emptyCategories);
+
+  function triggerUpload(category: string) {
+    pendingCategoryRef.current = category;
+    fileInputRef.current?.click();
+  }
+  async function onPick(list: FileList | null) {
+    const category = pendingCategoryRef.current;
+    // 必须先快照文件再清空 input.value:list 与 fileInputRef.current.files 是同一个「实时」FileList,
+    // 先清空 value 会把它一并清空,之后再读就成了 0 个文件 → 上传静默失效。
+    const files = list ? Array.from(list) : [];
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    await upload(category, files);
+  }
+  /** 校验后上传到某分类(选择与拖入共用)。 */
+  async function upload(category: string | null, files: File[]) {
+    if (!files.length || !category) return;
+    if (busyCategories.has(category)) return; // 该分类已有上传在途,忽略重复触发
+    for (const f of files) {
+      if (f.size === 0) return onError(`「${f.name}」是空文件。`);
+      if (f.size > MAX_FILE_BYTES) return onError(`「${f.name}」超过 20MB。`);
+      if (!isAllowedFileName(f.name)) return onError(`「${f.name}」类型不支持(仅 PDF / 图片 / Word)。`);
+    }
+    setBusyCategories((s) => new Set(s).add(category));
+    const res = await uploadFilesToCategory(emp, category, files);
+    setBusyCategories((s) => {
+      const next = new Set(s);
+      next.delete(category);
+      return next;
+    });
+    if (res.ok) onUploaded(`已上传到「${category}」`);
+    else onError(res.error ?? "上传失败,请稍后重试。");
+  }
+
+  if (!rows.length) return <p className="mt-3 text-xs text-slate-400">无文件</p>;
+
   return (
     <div className="mt-3 space-y-2">
-      {Array.from(byCategory.entries()).map(([category, list]) => (
-        <div key={category} className="rounded-lg bg-slate-50 px-3 py-2">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-violet-700">{category}</p>
-          <ul className="mt-1 space-y-1">
-            {list.map((f) => (
-              <li key={f.id} className="flex items-center justify-between gap-3 text-xs">
-                <span className="truncate text-slate-700">{f.originalName} <span className="text-slate-400">({fmtSize(f.sizeBytes)})</span></span>
-                <span className="flex shrink-0 items-center gap-3">
-                  {isPreviewable(f.mimeType) && (
-                    <button type="button" onClick={() => onPreview(f)} className="font-medium text-violet-700 hover:underline">
-                      预览
-                    </button>
-                  )}
-                  <a href={`/api/employee/file/${f.id}`} className="font-medium text-violet-700 hover:underline">
-                    下载
-                  </a>
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept={ALLOWED_FILE_EXTENSIONS.map((x) => `.${x}`).join(",")}
+        onChange={(e) => onPick(e.target.files)}
+        className="hidden"
+      />
+      {rows.map((row) => (
+        <CategoryBlock
+          key={row.label}
+          row={row}
+          busy={busyCategories.has(row.label)}
+          onUploadClick={() => triggerUpload(row.label)}
+          onDropFiles={(items) => void upload(row.label, items.map((i) => i.file))}
+          onPreview={onPreview}
+        />
       ))}
+    </div>
+  );
+}
+
+/** 单个分类栏目:文件列表 + 「上传」按钮,整块也是拖放区(拖入即上传到该分类)。 */
+function CategoryBlock({
+  row,
+  busy,
+  onUploadClick,
+  onDropFiles,
+  onPreview,
+}: {
+  row: CategoryRow;
+  busy: boolean;
+  onUploadClick: () => void;
+  onDropFiles: (items: DroppedFile[]) => void;
+  onPreview: (f: EmployeeFileItem) => void;
+}) {
+  const empty = row.files.length === 0;
+  const { dragging, dropHandlers } = useFileDrop(onDropFiles, busy);
+  return (
+    <div
+      {...dropHandlers}
+      title={`可把文件拖到这里上传到「${row.label}」`}
+      className={`rounded-lg px-3 py-2 transition ${
+        dragging
+          ? "border-2 border-dashed border-violet-400 bg-violet-50"
+          : empty
+            ? "border border-dashed border-amber-200 bg-amber-50/50"
+            : "bg-slate-50"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-violet-700">
+          {row.label}
+          {empty && <span className="ml-2 font-medium normal-case text-amber-600">缺失</span>}
+        </p>
+        <button
+          type="button"
+          onClick={onUploadClick}
+          disabled={busy}
+          className="shrink-0 rounded-lg border border-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-500 transition hover:border-violet-400 hover:text-violet-700 disabled:opacity-50"
+        >
+          {busy ? "上传中…" : "上传"}
+        </button>
+      </div>
+      {dragging ? (
+        <p className="mt-1 text-[11px] font-medium text-violet-700">松开即上传到「{row.label}」</p>
+      ) : empty ? (
+        <p className="mt-1 text-[11px] text-slate-400">待上传 · 可拖拽文件到此处</p>
+      ) : (
+        <ul className="mt-1 space-y-1">
+          {row.files.map((f) => (
+            <li key={f.id} className="flex items-center justify-between gap-3 text-xs">
+              <span className="truncate text-slate-700">{f.originalName} <span className="text-slate-400">({fmtSize(f.sizeBytes)})</span></span>
+              <span className="flex shrink-0 items-center gap-3">
+                {isPreviewable(f.mimeType) && (
+                  <button type="button" onClick={() => onPreview(f)} className="font-medium text-violet-700 hover:underline">
+                    预览
+                  </button>
+                )}
+                <a href={`/api/employee/file/${f.id}`} className="font-medium text-violet-700 hover:underline">
+                  下载
+                </a>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 「复制分类」弹窗:把另一个雇员的分类栏目(key)复制成当前(目标)雇员的空占位。
+ * 只复制分类名,不复制文件;目标已有(不分大小写)的分类会自动跳过。
+ */
+function CopyCategoriesModal({
+  target,
+  people,
+  onClose,
+  onCopied,
+  onError,
+}: {
+  target: EmployeeWithFiles | null;
+  people: Person[];
+  onClose: () => void;
+  onCopied: (msg: string) => void;
+  onError: (msg: string) => void;
+}) {
+  const [sourceId, setSourceId] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setSourceId(null);
+    setSaving(false);
+  }, [target]);
+  useEffect(() => {
+    if (!target) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+  }, [target, onClose]);
+
+  if (!target) return null;
+
+  const targetName = `${target.legalFirstName} ${target.legalLastName}`.trim();
+  const targetLower = new Set(categorySetOf(target).map((k) => k.toLowerCase()));
+  // 候选来源 = 其他有雇员资料的人,且至少有一个分类
+  const sources = people
+    .map((p) => p.employee)
+    .filter((e): e is EmployeeWithFiles => !!e && e.id !== target.id)
+    .map((e) => ({ emp: e, keys: categorySetOf(e) }))
+    .filter((s) => s.keys.length > 0);
+  const selected = sources.find((s) => s.emp.id === sourceId) ?? null;
+  const newKeys = selected ? selected.keys.filter((k) => !targetLower.has(k.toLowerCase())) : [];
+
+  async function onConfirm() {
+    if (!selected) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/employee/copy-categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceId: selected.emp.id, targetId: target!.id }),
+      });
+      const json = (await res.json()) as { success: boolean; added?: number; error?: string };
+      if (!json.success) { onError(json.error ?? "复制失败,请稍后重试。"); return; }
+      const added = json.added ?? 0;
+      onCopied(added > 0 ? `已复制 ${added} 个分类到「${targetName}」` : "没有新的分类需要复制(目标已有)。");
+    } catch {
+      onError("复制失败,请稍后重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div onClick={onClose} className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4">
+      <div onClick={(e) => e.stopPropagation()} className="my-8 w-full max-w-lg rounded-2xl bg-white shadow-xl">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
+          <h3 className="text-sm font-semibold text-slate-800">复制分类到 · {targetName}</h3>
+          <button type="button" onClick={onClose} className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300">✕ 关闭</button>
+        </div>
+
+        <div className="space-y-3 px-5 py-4">
+          <p className="text-xs text-slate-500">
+            选择一个「来源员工」,把他的文档分类栏目(<b>只复制分类名,不复制文件</b>)补到「{targetName}」名下,
+            让栏目结构保持一致。目标已有的分类会自动跳过。
+          </p>
+
+          {sources.length === 0 ? (
+            <p className="rounded-xl bg-slate-50 px-4 py-6 text-center text-sm text-slate-400">没有其他可复制的员工。</p>
+          ) : (
+            <ul className="max-h-72 space-y-2 overflow-y-auto">
+              {sources.map(({ emp, keys }) => {
+                const name = `${emp.legalFirstName} ${emp.legalLastName}`.trim();
+                const addable = keys.filter((k) => !targetLower.has(k.toLowerCase()));
+                const checked = sourceId === emp.id;
+                return (
+                  <li key={emp.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSourceId(emp.id)}
+                      className={`w-full rounded-xl border px-3 py-2 text-left transition ${
+                        checked ? "border-violet-400 bg-violet-50" : "border-slate-200 hover:border-slate-300"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium text-slate-800">{name}</span>
+                        <span className="shrink-0 text-[11px] text-slate-500">
+                          {keys.length} 个分类{addable.length > 0 ? ` · 新增 ${addable.length}` : " · 无新增"}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap gap-1">
+                        {keys.map((k) => {
+                          const isNew = !targetLower.has(k.toLowerCase());
+                          return (
+                            <span
+                              key={k}
+                              className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                                isNew ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400 line-through"
+                              }`}
+                            >
+                              {k}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          {selected && (
+            <p className="text-[11px] text-slate-500">
+              将新增 <b className="text-emerald-700">{newKeys.length}</b> 个分类
+              {newKeys.length > 0 ? `:${newKeys.join(", ")}` : "(该来源的分类目标都已有)"}。
+            </p>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-3 border-t border-slate-200 px-5 py-3">
+          <button type="button" onClick={onClose} disabled={saving} className="rounded-xl border border-slate-200 px-5 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-300 disabled:opacity-50">取消</button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={saving || !selected || newKeys.length === 0}
+            className="rounded-xl bg-violet-600 px-6 py-2 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:opacity-50"
+          >
+            {saving ? "复制中…" : "复制分类"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -893,6 +1325,7 @@ function PaymentUploadModal({
   const [saving, setSaving] = useState(false);
   const uidRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const { dragging, dropHandlers } = useFileDrop((items) => addFiles(items.map((i) => i.file)));
 
   useEffect(() => {
     if (recordId == null) return;
@@ -910,11 +1343,12 @@ function PaymentUploadModal({
 
   if (recordId == null) return null;
 
-  function onPick(list: FileList | null) {
-    if (!list || !list.length) return;
+  /** 选择或拖入凭证:逐个校验(空 / >20MB / 类型),通过的加入待上传列表。 */
+  function addFiles(files: File[]) {
+    if (!files.length) return;
     const added: PendingFile[] = [];
     const rejected: string[] = [];
-    for (const file of Array.from(list)) {
+    for (const file of files) {
       if (file.size === 0) { rejected.push(`「${file.name}」是空文件`); continue; }
       if (file.size > MAX_FILE_BYTES) { rejected.push(`「${file.name}」超过 20MB`); continue; }
       if (!isAllowedFileName(file.name)) { rejected.push(`「${file.name}」类型不支持`); continue; }
@@ -922,8 +1356,12 @@ function PaymentUploadModal({
       added.push({ uid: uidRef.current, file, category: "", groupId: uidRef.current });
     }
     if (added.length) setPending((p) => [...p, ...added]);
-    if (rejected.length) setErrors([`以下文件未添加:${rejected.join(";")}`]);
+    setErrors(rejected.length ? [`以下文件未添加:${rejected.join(";")}`] : []);
+  }
+  function onPick(list: FileList | null) {
+    const files = list ? Array.from(list) : [];
     if (fileInputRef.current) fileInputRef.current.value = "";
+    addFiles(files);
   }
 
   async function onSubmit() {
@@ -960,13 +1398,34 @@ function PaymentUploadModal({
             onChange={(e) => onPick(e.target.files)}
             className="hidden"
           />
-          <button
-            type="button"
+          <div
+            {...dropHandlers}
+            role="button"
+            tabIndex={0}
             onClick={() => fileInputRef.current?.click()}
-            className="w-full rounded-xl border-2 border-dashed border-slate-300 px-4 py-6 text-sm font-medium text-slate-600 transition hover:border-emerald-400 hover:text-emerald-700"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
+            className={`w-full cursor-pointer rounded-xl border-2 border-dashed px-4 py-6 text-center text-sm font-medium transition ${
+              dragging
+                ? "border-emerald-400 bg-emerald-50 text-emerald-700"
+                : "border-slate-300 text-slate-600 hover:border-emerald-400 hover:text-emerald-700"
+            }`}
           >
-            + 选择凭证 <span className="text-[11px] font-normal text-slate-400">PDF / 图片 / Word,单个 ≤ 20MB</span>
-          </button>
+            {dragging ? (
+              "松开即可添加凭证"
+            ) : (
+              <>
+                + 选择凭证{" "}
+                <span className="text-[11px] font-normal text-slate-400">
+                  或拖拽到此处 · PDF / 图片 / Word,单个 ≤ 20MB
+                </span>
+              </>
+            )}
+          </div>
           {pending.length > 0 && (
             <ul className="space-y-1">
               {pending.map((f) => (
@@ -1070,6 +1529,11 @@ function AddWorkEmailModal({
   const [saving, setSaving] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [parsedNote, setParsedNote] = useState<string | null>(null);
+  // 拖入邮件 PDF/Word 也能自动读取(只取第一个文件)
+  const { dragging, dropHandlers } = useFileDrop((items) => {
+    const f = items[0]?.file;
+    if (f) void onPickFile(f);
+  }, parsing);
 
   // 打开时按目标雇员预填收件人;发送时间默认当下(用户改成真实的过去日期)
   useEffect(() => {
@@ -1147,7 +1611,8 @@ function AddWorkEmailModal({
   async function onSubmit() {
     if (!target) return;
     if (!subject.trim()) return setError("请填写邮件标题。");
-    if (!toEmail.trim()) return setError("请填写收件人邮箱。");
+    const toEmails = parseEmailList(toEmail);
+    if (!toEmails.length) return setError("请填写收件人邮箱。");
     if (!sentAt.trim()) return setError("请选择发送时间。");
     if (!body.trim()) return setError("请填写邮件正文。");
     setSaving(true);
@@ -1159,7 +1624,7 @@ function AddWorkEmailModal({
         body: JSON.stringify({
           employeeId: target.employeeId,
           subject: subject.trim(),
-          toEmail: toEmail.trim(),
+          toEmails,
           recipientName: recipientName.trim(),
           sentAt,
           cc: cc
@@ -1208,11 +1673,18 @@ function AddWorkEmailModal({
             补录以前没经工具发送、因而没入库的工作邮件。只记录到数据库，<b>不会真的发送邮件</b>。
           </p>
 
-          {/* 上传邮件 PDF/Word → 自动读取并填好下面各项 */}
-          <div className="mb-3 rounded-lg border border-dashed border-violet-300 bg-violet-50/50 p-3">
+          {/* 上传(或拖入)邮件 PDF/Word → 自动读取并填好下面各项 */}
+          <div
+            {...dropHandlers}
+            className={`mb-3 rounded-lg border border-dashed p-3 transition ${
+              dragging ? "border-violet-500 bg-violet-100" : "border-violet-300 bg-violet-50/50"
+            }`}
+          >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-xs text-slate-600">
-                有这封邮件的 PDF / Word？上传自动读取标题、收件人、时间和正文
+                {dragging
+                  ? "松开即可读取这封邮件"
+                  : "有这封邮件的 PDF / Word？上传或拖到这里，自动读取标题、收件人、时间和正文"}
               </span>
               <label
                 className={`shrink-0 cursor-pointer rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-700 ${
@@ -1249,12 +1721,14 @@ function AddWorkEmailModal({
             </label>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="block">
-                <span className="text-xs font-medium text-slate-600">收件人邮箱 *</span>
+                <span className="text-xs font-medium text-slate-600">
+                  收件人邮箱 *<span className="ml-1 font-normal text-slate-400">多个用逗号分隔</span>
+                </span>
                 <input
-                  type="email"
+                  type="text"
                   value={toEmail}
                   onChange={(e) => setToEmail(e.target.value)}
-                  placeholder="name@example.com"
+                  placeholder="name@example.com, name2@example.com"
                   className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-violet-400 focus:ring-1 focus:ring-violet-300"
                 />
               </label>
@@ -1388,13 +1862,13 @@ function EditEmployeeModal({
 }) {
   const [form, setForm] = useState<EmployeeInput>(EMPTY);
   const [pending, setPending] = useState<PendingFile[]>([]);
-  const [dragging, setDragging] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const uidRef = useRef(0);
   const gidRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const { dragging, dropHandlers } = useFileDrop(addFiles);
 
   useEffect(() => {
     if (!target) return;
@@ -1407,6 +1881,7 @@ function EditEmployeeModal({
         address: e.address,
         phone: e.phone,
         notes: e.notes,
+        extraEmails: e.extraEmails ?? [],
       });
     } else {
       setForm({ ...EMPTY, legalFirstName: target.firstName, legalLastName: target.lastName });
@@ -1455,18 +1930,6 @@ function EditEmployeeModal({
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (folderInputRef.current) folderInputRef.current.value = "";
   }
-  function onDragOver(e: React.DragEvent) {
-    e.preventDefault();
-    if (!dragging) setDragging(true);
-  }
-  function onDragLeave(e: React.DragEvent) {
-    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
-  }
-  async function onDrop(e: React.DragEvent) {
-    e.preventDefault();
-    setDragging(false);
-    addFiles(await filesFromDataTransfer(e.dataTransfer));
-  }
 
   async function onSubmit() {
     const errs = validateEmployee(form);
@@ -1481,6 +1944,7 @@ function EditEmployeeModal({
       fd.append("legalFirstName", form.legalFirstName.trim());
       fd.append("legalLastName", form.legalLastName.trim());
       fd.append("email", form.email.trim());
+      fd.append("extraEmails", JSON.stringify(cleanExtras(form.extraEmails)));
       fd.append("address", form.address.trim());
       fd.append("phone", form.phone.trim());
       fd.append("notes", (form.notes ?? "").trim());
@@ -1521,9 +1985,12 @@ function EditEmployeeModal({
             <Field label="Legal Last Name">
               <input type="text" value={form.legalLastName} onChange={(e) => setField("legalLastName", e.target.value)} className={inputCls} autoComplete="off" />
             </Field>
-            <Field label="Email">
-              <input type="email" value={form.email} onChange={(e) => setField("email", e.target.value)} className={inputCls} autoComplete="off" />
-            </Field>
+            <EmailFields
+              email={form.email}
+              extraEmails={form.extraEmails ?? []}
+              onChangeEmail={(v) => setField("email", v)}
+              onChangeExtras={(list) => setForm((f) => ({ ...f, extraEmails: list }))}
+            />
             <Field label="Phone(选填)">
               <input type="tel" value={form.phone} onChange={(e) => setField("phone", e.target.value)} className={inputCls} autoComplete="off" />
             </Field>
@@ -1563,10 +2030,7 @@ function EditEmployeeModal({
             />
             <input ref={folderInputRef} type="file" multiple onChange={(e) => onPick(e.target.files)} className="hidden" />
             <div
-              onDragEnter={onDragOver}
-              onDragOver={onDragOver}
-              onDragLeave={onDragLeave}
-              onDrop={onDrop}
+              {...dropHandlers}
               className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-4 py-6 text-center transition ${
                 dragging ? "border-violet-400 bg-violet-50" : "border-slate-300"
               }`}

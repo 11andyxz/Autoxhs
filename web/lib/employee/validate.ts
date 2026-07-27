@@ -6,14 +6,22 @@
 export interface EmployeeInput {
   legalFirstName: string;
   legalLastName: string;
+  /** 主邮箱:同一主邮箱视为同一雇员(去重键) */
   email: string;
   address: string;
   phone: string;
   /** 备注:任意补充信息(选填) */
   notes?: string;
+  /** 备用邮箱(主邮箱之外的其他邮箱);发工作邮件时可与主邮箱一起选中,同时发多个。 */
+  extraEmails?: string[];
 }
 
 export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** 备用邮箱个数上限(不含主邮箱) */
+export const MAX_EXTRA_EMAILS = 4;
+/** 备用邮箱落库(逗号拼接)后的长度上限 */
+export const MAX_EXTRA_EMAILS_LEN = 1000;
 
 /** 单文件大小上限:20MB */
 export const MAX_FILE_BYTES = 20 * 1024 * 1024;
@@ -82,6 +90,39 @@ export function sanitizeStoredFileName(name: string): string {
   return ext ? `${cleanStem}.${ext}` : cleanStem;
 }
 
+/** 把「逗号 / 分号 / 换行 / 空白」分隔的邮箱串拆成数组(去空)。 */
+export function parseEmailList(raw: string): string[] {
+  return raw
+    .split(/[,;\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** 数组 → 落库 / 展示用的 "a@x.com, b@y.com"(去空)。 */
+export function formatEmailList(list: string[]): string {
+  return list.map((s) => s.trim()).filter(Boolean).join(", ");
+}
+
+/** 按小写去重(保留首次出现的原始写法)、去空。 */
+export function dedupeEmails(list: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of list) {
+    const s = raw.trim();
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
+}
+
+/** 该雇员的全部收件邮箱 = 主邮箱 + 备用邮箱(去重,主邮箱在首位)。 */
+export function allEmailsOf(e: { email: string; extraEmails?: string[] | null }): string[] {
+  return dedupeEmails([e.email ?? "", ...(e.extraEmails ?? [])]);
+}
+
 /** 校验雇员基本信息,返回中文错误列表(空数组=通过)。客户端与服务端都调用。 */
 export function validateEmployee(e: EmployeeInput): string[] {
   const errs: string[] = [];
@@ -99,6 +140,23 @@ export function validateEmployee(e: EmployeeInput): string[] {
 
   if (!email) errs.push("请填写 Email。");
   else if (email.length > MAX_NAME_LEN || !EMAIL_RE.test(email)) errs.push("Email 格式不正确。");
+
+  // 备用邮箱(选填):逐个校验格式,并与主邮箱一起查重(不分大小写)
+  const extras = (e.extraEmails ?? []).map((s) => (s ?? "").trim()).filter(Boolean);
+  if (extras.length > MAX_EXTRA_EMAILS) errs.push(`备用邮箱最多 ${MAX_EXTRA_EMAILS} 个。`);
+  const seenEmails = new Set(email ? [email.toLowerCase()] : []);
+  for (const x of extras) {
+    if (x.length > MAX_NAME_LEN || !EMAIL_RE.test(x)) {
+      errs.push(`备用邮箱「${x}」格式不正确。`);
+      continue;
+    }
+    if (seenEmails.has(x.toLowerCase())) {
+      errs.push(`邮箱「${x}」重复了,请删掉一个。`);
+      continue;
+    }
+    seenEmails.add(x.toLowerCase());
+  }
+  if (formatEmailList(extras).length > MAX_EXTRA_EMAILS_LEN) errs.push("备用邮箱过长。");
 
   if (!address) errs.push("请填写 Address。");
   else if (address.length > MAX_ADDRESS_LEN) errs.push("Address 过长。");
@@ -122,6 +180,8 @@ export function trimEmployee(e: EmployeeInput): EmployeeInput {
     address: e.address.trim(),
     phone: e.phone.trim(),
     notes: (e.notes ?? "").trim(),
+    // 空行直接丢掉(UI 上「+ 添加邮箱」可能留下空输入框);重复项由 validateEmployee 报错
+    extraEmails: (e.extraEmails ?? []).map((s) => (s ?? "").trim()).filter(Boolean),
   };
 }
 
