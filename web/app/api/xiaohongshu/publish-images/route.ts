@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { CTA_LINE } from "@/lib/schema";
 import { getDoneNoteIds, markPublished, parseNoteId } from "@/lib/xiaohongshu/notesDb";
 import {
   PRIVACY_PUBLIC,
@@ -137,7 +138,10 @@ export async function POST(req: NextRequest) {
 
   const width = Number.isFinite(Number(request.width)) ? Math.round(Number(request.width)) : 1440;
   const height = Number.isFinite(Number(request.height)) ? Math.round(Number(request.height)) : 1920;
-  const desc = buildDesc(body, tags);
+  // caption 有字数上限，超了小红书会从尾部静默截断（标签和 CTA 首当其冲）。
+  // 这里按「标签 > CTA > 正文」的优先级自己截，并把截断量回报给前端。
+  const descResult = buildDesc(body, tags, { ctaLine: CTA_LINE });
+  const desc = descResult.desc;
   const note = buildImageNoteBody({
     title,
     desc,
@@ -174,6 +178,10 @@ export async function POST(req: NextRequest) {
         imageCount: fileIds.length,
         title,
         descPreview: desc.slice(0, 120),
+        descLength: descResult.length,
+        descLimit: descResult.limit,
+        descTruncated: descResult.truncated,
+        descOmitted: descResult.omitted,
         privacy,
         width,
         height,
@@ -215,6 +223,9 @@ export async function POST(req: NextRequest) {
       shareLink,
       privacy,
       dedupRecorded,
+      descLength: descResult.length,
+      descTruncated: descResult.truncated,
+      descOmitted: descResult.omitted,
     });
   } catch (error) {
     const isAbort = (error as Error)?.name === "AbortError";

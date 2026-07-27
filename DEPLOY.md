@@ -25,7 +25,15 @@
 - 本地不设这两个变量 → 登录门与范围限定都不生效,本机使用照旧。
 
 ## 注意事项
-- **函数超时**:Vercel Hobby 函数上限 60s。**生成题库 / 技术八股文**较重(约 1 分钟,可能超时)——
-  建议在**本地生成**(存同一个 Aiven 库,线上立即可见);复习/评分/单词/划词/发音等都在 60s 内,线上正常。
+- **函数超时:300 秒,不是 60 秒。** 本项目已启用 **Fluid compute**,即使在 Hobby 计划下函数上限也是
+  300s(查证命令见下)。`generate-preserve` 等路由声明的 `maxDuration = 300` 是**真实生效**的。
+  > 早先本文写的「Hobby 上限 60s」是**旧信息、已作废**——那是未启用 Fluid 时的传统限制,别再照抄。
+  > 查证:`GET https://api.vercel.com/v9/projects/<projectId>?teamId=<teamId>` →
+  > `defaultResourceConfig.fluid = true`、`functionDefaultTimeout = 300`。
+- **实测耗时**(本机,同一份简历 + 一份 FinTech JD):保留原格式整份改写约 **139s**;经典模板约 **43s**。
+  两者都在 300s 内。若将来某条链路真顶到 300s,再考虑改造成
+  「OpenAI `background: true` + 轮询 `responses.retrieve()`」——已验证 SDK(4.104)支持,每次请求都是秒级。
+- **生成题库 / 技术八股文**:线上已**主动关闭**(见 `app/api/job-hunter/interview/build/route.ts` 里的
+  `NEXT_PUBLIC_DEPLOY_MODE=public` 闸门 + 前端置灰),只在本地跑;存的是同一个 Aiven 库,线上立即可见。
 - **Aiven 连接数上限低(76)**:连接池已挂 `globalThis` 防 dev HMR 泄漏(见 `lib/serviceFee/db.ts`)。
 - 本地反复重启用根目录的 `./restart.sh`(杀旧进程 + 清 `.next` + 重启)。

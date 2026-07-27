@@ -33,3 +33,6 @@ data/
 # Installed agent skills (via `npx skills add`) — third-party, not part of this repo
 .agents/
 .claude/skills/libtv-skill
+
+# Vercel 项目链接(不应提交)
+.vercel

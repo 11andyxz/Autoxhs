@@ -1,8 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
+import { CTA_LINE } from "@/lib/schema";
 import { LAYOUT_META, PALETTES, STYLES } from "@/lib/xiaohongshu/cards/tokens";
+import { buildDesc } from "@/lib/xiaohongshu/publishBody";
 import {
   MAX_CARDS,
   MIN_CARDS,
@@ -86,6 +88,10 @@ export default function CardStudio({
   const busy = phase !== "idle";
   const ready = Boolean(deckId && outline && outline.cards.length > 0);
   const canStart = title.trim().length > 0 && body.trim().length > 0;
+
+  // caption 预算：设计卡片模式下完整正文放在笔记正文里，而普通图文笔记的正文有字数上限。
+  // 提前算出来，超了就明说会截掉多少 —— 不能等发出去才发现结尾的标签被小红书吃了。
+  const descInfo = useMemo(() => buildDesc(body, tags, { ctaLine: CTA_LINE }), [body, tags]);
 
   /** 出图内容变了：已上传的 file_id 全部作废，避免发出旧图 */
   function invalidateUpload() {
@@ -319,6 +325,16 @@ export default function CardStudio({
       <p className="text-[11px] text-gray-500">
         设计卡片模式：正文不会逐字入图，只提炼成 {MIN_CARDS}~{MAX_CARDS} 张卡片；完整正文仍放在笔记正文（caption）里。
       </p>
+      {descInfo.truncated ? (
+        <p className="mt-1 text-[11px] leading-relaxed text-amber-600">
+          ⚠️ 笔记正文超出上限（{descInfo.length}/{descInfo.limit} 字），末尾 {descInfo.omitted} 字会被截掉。
+          标签和「评论 dd」已自动挪到前面保住。想让全文完整入图，请改用「文字卡」模式（长文不受这个限制）。
+        </p>
+      ) : (
+        <p className="mt-1 text-[11px] text-gray-400">
+          笔记正文 {descInfo.length}/{descInfo.limit} 字（含标签）。
+        </p>
+      )}
 
       {/* 控件 */}
       <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -485,7 +501,10 @@ export default function CardStudio({
               setAwaitingConfirm(true);
               setFeedback({
                 tone: "info",
-                message: `即将以${visibility === 1 ? "「仅自己可见」" : "「公开」"}发布 ${outline?.cards.length ?? 0} 张设计卡笔记，确认？`,
+                message:
+                  `即将以${visibility === 1 ? "「仅自己可见」" : "「公开」"}发布 ${outline?.cards.length ?? 0} 张设计卡笔记` +
+                  (descInfo.truncated ? `（笔记正文将被截掉末尾 ${descInfo.omitted} 字）` : "") +
+                  "，确认？",
               });
             }}
             disabled={busy || awaitingConfirm}

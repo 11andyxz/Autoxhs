@@ -2,9 +2,11 @@
 
 import { useRef, useState } from "react";
 
+import { CTA_LINE } from "@/lib/schema";
 import { collapseBlankLines, pickCharsPerCard } from "@/lib/xiaohongshu/cards";
 import { PALETTES, STYLES } from "@/lib/xiaohongshu/cards/tokens";
 import type { CardOutline, PaletteId, StyleId } from "@/lib/xiaohongshu/cards/types";
+import { buildDesc } from "@/lib/xiaohongshu/publishBody";
 import { parseNoteId } from "@/lib/xiaohongshu/url";
 import type { RewriteData } from "@/lib/schema";
 
@@ -794,6 +796,18 @@ export default function BatchPublish() {
                           : PALETTES[item.outline.palette].name}
                       </p>
                     )}
+                    {useCards && item.body
+                      ? (() => {
+                          // 设计卡片模式下完整正文进 caption，超出上限的部分会被截掉。
+                          // 标签和 CTA 已由 buildDesc 保住，但仍要让用户看见丢了多少。
+                          const d = buildDesc(item.body, item.tags ?? [], { ctaLine: CTA_LINE });
+                          return d.truncated ? (
+                            <p className="mt-1 text-[11px] text-amber-600">
+                              笔记正文超上限，末尾 {d.omitted} 字被截掉（标签与 CTA 已保住）
+                            </p>
+                          ) : null;
+                        })()
+                      : null}
                     {item.overflow?.length ? (
                       <p className="mt-1 text-[11px] text-amber-600">
                         第 {item.overflow.join("、")} 张文字偏长，已自动缩到最小字号

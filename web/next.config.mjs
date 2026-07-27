@@ -9,6 +9,11 @@ const nextConfig = {
   // 避免被打包器处理（pdfjs 的可选 canvas 依赖、puppeteer 的动态 require 会报错；
   // ffmpeg-static 用 __dirname 定位自带二进制，被打包后路径会失效）。
   serverExternalPackages: ["puppeteer-core", "pdfjs-dist", "ffmpeg-static"],
+  // 默认简历是运行时用 fs 读的静态文件（不在 public/，见该路由注释）。
+  // 打包器看不出这层依赖，得显式告诉它一起带上，否则 Vercel 上这个接口会 404。
+  outputFileTracingIncludes: {
+    "/api/job-hunter/default-resume": ["./assets/default-resume/**"],
+  },
 };
 
 export default nextConfig;

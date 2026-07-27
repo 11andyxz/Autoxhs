@@ -4,6 +4,8 @@
  * 不得拼接进此处。
  */
 
+import { ADAPT_POLICY, type TailorMode } from "./tailorMode";
+
 const BASE = `You are an elite resume writer and career coach specializing in the North American job market. You will receive a candidate's existing RESUME and a target JOB DESCRIPTION (JD). Your job is to produce a single resume that is specifically tailored to win an interview for that exact role.
 
 Always return your answer through the provided JSON schema only. Do not add any prose outside the JSON.
@@ -49,11 +51,21 @@ const EMBELLISH_CLAUSE = `Embellishment mode (EXPLICITLY ENABLED BY THE USER):
 - Keep everything realistic, internally consistent, and aligned with the candidate's apparent seniority and field so the result is believable.
 - Still write in the JD's language and still fill analysis.missingKeywords with anything you could not convincingly cover.`;
 
+/** 默认档:锁死雇主/地点/时间,但工作内容按 JD 就地改写(在原有内容基础上)。 */
+const ADAPT_CLAUSE = `${ADAPT_POLICY}
+- Anything the JD asks for that you could not honestly cover still goes into analysis.missingKeywords.`;
+
 /** 重试时追加的修复指令(开发者指令,非用户输入) */
 export const REPAIR_CLAUSE = `Your previous output did not conform. Return ONLY valid JSON matching the schema: a non-empty resume (name, headline, contacts, summary bullets, experience items, and any extra sections), a non-empty cover letter, and analysis with matchScore (0-100), addedKeywords, missingKeywords, and changeSummary (in Chinese). No extra text.`;
 
-export function buildSystemPrompt(allowEmbellish: boolean): string {
-  return `${BASE}\n\n${allowEmbellish ? EMBELLISH_CLAUSE : TRUTHFUL_CLAUSE}`;
+const CLAUSES: Record<TailorMode, string> = {
+  strict: TRUTHFUL_CLAUSE,
+  adapt: ADAPT_CLAUSE,
+  embellish: EMBELLISH_CLAUSE,
+};
+
+export function buildSystemPrompt(mode: TailorMode): string {
+  return `${BASE}\n\n${CLAUSES[mode]}`;
 }
 
 /** 把简历与 JD 包成带清晰分隔符的用户消息(明确标注为数据) */

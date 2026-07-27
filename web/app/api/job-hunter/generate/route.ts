@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { MissingApiKeyError } from "@/lib/openai";
 import { generateTailoredResume } from "@/lib/job-hunter/generate";
+import { tailorModeFromForm } from "@/lib/job-hunter/tailorMode";
 import { extractTextFromFile, FileParseError } from "@/lib/job-hunter/parse";
 import { rateLimit } from "@/lib/rateLimit";
 
@@ -81,10 +82,10 @@ export async function POST(req: NextRequest) {
     return bad(GENERIC_ERROR, 500);
   }
 
-  const allowEmbellish = form.get("allowEmbellish") === "true";
+  const mode = tailorModeFromForm(form);
 
   try {
-    const data = await generateTailoredResume(resumeText, jdText, allowEmbellish);
+    const data = await generateTailoredResume(resumeText, jdText, mode);
     // 一并回传解析后的 JD 文本,供「专项训练」复用(简历里不含 JD)
     return NextResponse.json({ success: true, data, jdText }, { status: 200 });
   } catch (err) {

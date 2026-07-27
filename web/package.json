@@ -7,6 +7,7 @@
     "dev": "next dev -p 3100",
     "predev:verify": "node scripts/copy-pdf-worker.mjs",
     "dev:verify": "NEXT_DIST_DIR=.next-verify next dev -p 3111",
+    "dev:public": "NEXT_DIST_DIR=.next-public NEXT_PUBLIC_DEPLOY_MODE=public next dev -p 3112",
     "prebuild": "node scripts/copy-pdf-worker.mjs",
     "build": "next build",
     "start": "next start -p 3100",

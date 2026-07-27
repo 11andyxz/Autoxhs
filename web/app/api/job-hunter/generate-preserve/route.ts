@@ -6,6 +6,7 @@ import { htmlToText, splitHtmlDoc } from "@/lib/job-hunter/align";
 import { generateTailoredResume } from "@/lib/job-hunter/generate";
 import { extractTextFromFile, FileParseError } from "@/lib/job-hunter/parse";
 import { TailorFormatError, tailorResumeHtmlToJd } from "@/lib/job-hunter/tailorFormat";
+import { tailorModeFromForm } from "@/lib/job-hunter/tailorMode";
 import { rateLimit } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
@@ -84,7 +85,7 @@ export async function POST(req: NextRequest) {
     return bad(GENERIC_ERROR, 500);
   }
 
-  const allowEmbellish = form.get("allowEmbellish") === "true";
+  const mode = tailorModeFromForm(form);
   // 从原格式 HTML 里取纯文本,喂给「匹配分析 / 求职信」链路(它不需要格式,只要事实)。
   const resumeText = htmlToText(splitHtmlDoc(resumeHtml).body).slice(0, MAX_TEXT_LENGTH);
   if (!resumeText.trim()) {
@@ -94,8 +95,8 @@ export async function POST(req: NextRequest) {
   try {
     // 两条链路并行:结构化「匹配分析 + 求职信」与「保留原格式的定制简历 HTML」。
     const [data, tailoredHtml] = await Promise.all([
-      generateTailoredResume(resumeText, jdText, allowEmbellish),
-      tailorResumeHtmlToJd(resumeHtml, jdText, allowEmbellish),
+      generateTailoredResume(resumeText, jdText, mode),
+      tailorResumeHtmlToJd(resumeHtml, jdText, mode),
     ]);
     return NextResponse.json(
       { success: true, data, resumeHtml: tailoredHtml, jdText },

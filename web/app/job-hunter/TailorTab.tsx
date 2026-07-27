@@ -44,13 +44,18 @@ export default function TailorTab() {
   const [resumeMode, setResumeMode] = useState<SourceMode>("file");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [resumeText, setResumeText] = useState("");
+  // 是否用的是自动预填的默认简历(用于在卡片下提示一句)。
+  const [defaultResumeLoaded, setDefaultResumeLoaded] = useState(false);
 
   const [jdMode, setJdMode] = useState<SourceMode>("text");
   const [jdFile, setJdFile] = useState<File | null>(null);
   const [jdText, setJdText] = useState("");
 
   const [allowEmbellish, setAllowEmbellish] = useState(false);
+  // 默认档:雇主/地点/时间/职位名不动,只在原有内容基础上按 JD 改写工作内容。
+  const [adaptContent, setAdaptContent] = useState(true);
   // 默认保留原格式:上传 .docx 时不套固定模板,在原版式上按 JD 改写。
+  // (线上也开着:项目已启用 Vercel Fluid,函数上限 300s;整份改写实测约 139s,放得下。)
   const [preserveFormat, setPreserveFormat] = useState(true);
 
   const [loading, setLoading] = useState(false);
@@ -90,9 +95,21 @@ export default function TailorTab() {
     !!resumeFile &&
     !isDocx(resumeFile);
 
+  // 下载 / 打印共用的文件名前缀。
+  const resumeFileBase = `${(result?.resume.name?.trim() || "Resume").replace(/[^\w.-]+/g, "_")}_tailored`;
+
   function handlePrintResume() {
     const win = resumeFrameRef.current?.contentWindow;
     if (!win) return;
+    // Chrome 拿**顶层页面标题**给「另存为 PDF」命名,不临时改的话简历会被存成「小红书文案发表.pdf」。
+    const prev = document.title;
+    document.title = resumeFileBase;
+    const restore = () => {
+      document.title = prev;
+    };
+    win.addEventListener("afterprint", restore, { once: true });
+    window.addEventListener("afterprint", restore, { once: true });
+    window.setTimeout(restore, 60_000); // 兜底:afterprint 没触发也别把标题留住
     win.focus();
     win.print();
   }
@@ -192,6 +209,30 @@ export default function TailorTab() {
     }
   }, [result]);
 
+  // 进页面自动填入默认简历(见 /api/job-hunter/default-resume),不用每次手动选文件;
+  // 用户换成别的文件后就不再回填(下面的 setResumeFile 只在还是空的时候执行)。
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/job-hunter/default-resume");
+        if (!res.ok) return;
+        const blob = await res.blob();
+        const name =
+          res.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] ||
+          "resume.docx";
+        if (cancelled) return;
+        setResumeFile((cur) => cur ?? new File([blob], name, { type: blob.type }));
+        setDefaultResumeLoaded(true);
+      } catch {
+        // 没有默认简历就正常显示空的上传框
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function validate(): string | null {
     if (resumeMode === "file" ? !resumeFile : !resumeText.trim()) {
       return "请提供简历(上传 PDF/DOCX 或粘贴文本)。";
@@ -234,6 +275,7 @@ export default function TailorTab() {
         if (jdMode === "file" && jdFile) fd.append("jdFile", jdFile);
         else fd.append("jdText", jdText);
         fd.append("allowEmbellish", allowEmbellish ? "true" : "false");
+        fd.append("adaptContent", adaptContent ? "true" : "false");
 
         const res = await fetch("/api/job-hunter/generate-preserve", {
           method: "POST",
@@ -257,6 +299,7 @@ export default function TailorTab() {
       if (jdMode === "file" && jdFile) fd.append("jdFile", jdFile);
       else fd.append("jdText", jdText);
       fd.append("allowEmbellish", allowEmbellish ? "true" : "false");
+      fd.append("adaptContent", adaptContent ? "true" : "false");
 
       const res = await fetch("/api/job-hunter/generate", { method: "POST", body: fd });
       const json = (await res.json().catch(() => null)) as ApiResponse | null;
@@ -278,12 +321,11 @@ export default function TailorTab() {
   // 否则走服务端按结构化结果生成的 .docx。
   function handleDownloadResumeWord() {
     if (preserveHtml) {
-      const base = (result?.resume.name?.trim() || "Resume").replace(/[^\w.-]+/g, "_");
       const blob = new Blob([preserveHtml], { type: "application/msword" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${base}_tailored.doc`;
+      a.download = `${resumeFileBase}.doc`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -347,17 +389,25 @@ export default function TailorTab() {
         )}
       </header>
 
-      {/* 简历输入 */}
+      {/* 简历输入(默认已预填一份,可直接换掉) */}
       <SourceCard
         title="① 你的简历"
         mode={resumeMode}
         onMode={setResumeMode}
         file={resumeFile}
-        onFile={setResumeFile}
+        onFile={(f) => {
+          setResumeFile(f);
+          setDefaultResumeLoaded(false);
+        }}
         text={resumeText}
         onText={setResumeText}
         placeholder="把简历内容粘贴到这里……"
         accept={ACCEPT}
+        hint={
+          defaultResumeLoaded && resumeMode === "file"
+            ? "已自动填入默认简历，直接换成别的文件即可覆盖。"
+            : undefined
+        }
       />
 
       {/* 保留原格式开关(仅上传文件时相关) */}
@@ -382,6 +432,12 @@ export default function TailorTab() {
                   ⚠️ 当前文件不是 .docx，无法保留原格式；生成时会自动改用经典模板（PDF / 粘贴文本同理）。
                 </span>
               )}
+              {isPublicDeploy && (
+                <span className="mt-1 block text-xs leading-relaxed text-slate-400">
+                  线上单次请求上限 300 秒（已启用 Vercel Fluid），整份改写实测约 140 秒，放得下；
+                  真遇到超时就关掉这个开关走经典模板（约 45 秒）。
+                </span>
+              )}
             </span>
           </label>
         </div>
@@ -399,6 +455,34 @@ export default function TailorTab() {
         placeholder="把目标岗位的职位描述(JD)粘贴到这里……"
         accept={ACCEPT}
       />
+
+      {/* 不激进匹配(默认开):锁住雇主/地点/时间,只按 JD 改写工作内容 */}
+      <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={adaptContent}
+            disabled={allowEmbellish}
+            onChange={(e) => setAdaptContent(e.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500 disabled:opacity-50"
+          />
+          <span>
+            <span className="text-sm font-medium text-slate-800">
+              按 JD 改写工作内容（不激进匹配 · 默认开启）
+            </span>
+            <span className="mt-1 block text-xs leading-relaxed text-slate-500">
+              <b>雇主、工作地点、起止时间、职位名称一律不动</b>；在这些真实岗位内，AI 会<b>在你原有内容的基础上</b>按 JD
+              改写工作内容——换成 JD 的技术栈和说法、重排要点、突出相关成果，但不会凭空加你没做过的事，也不会把成果挪到别家公司。
+              关闭则只做重排和措辞优化，几乎不动原句。
+            </span>
+            {allowEmbellish && (
+              <span className="mt-1 block text-xs leading-relaxed text-amber-600">
+                已开启下方的「激进匹配」，本档被它覆盖。
+              </span>
+            )}
+          </span>
+        </label>
+      </div>
 
       {/* 演绎模式开关 */}
       <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -437,32 +521,59 @@ export default function TailorTab() {
           : "生成定制简历"}
       </button>
 
-      {/* 面试题库入口(始终可用:只需①的简历,JD 可选;不必先定制简历) */}
-      <div className="mt-4 rounded-2xl border border-indigo-200 bg-indigo-50/50 p-5 shadow-sm">
+      {/* 面试题库入口(只需①的简历,JD 可选;不必先定制简历)。
+          题库要连数据库、出题约 1 分钟,公网部署上关掉:入口置灰 + 说明,middleware 里也真拦。 */}
+      <div
+        className={`mt-4 rounded-2xl border p-5 shadow-sm ${
+          isPublicDeploy ? "border-slate-200 bg-slate-50" : "border-indigo-200 bg-indigo-50/50"
+        }`}
+      >
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-sm font-semibold text-indigo-900">🧠 简历面试题库 · 遗忘曲线复习</p>
-            <p className="mt-1 text-xs leading-relaxed text-indigo-700">
+            <p
+              className={`text-sm font-semibold ${
+                isPublicDeploy ? "text-slate-500" : "text-indigo-900"
+              }`}
+            >
+              🧠 简历面试题库 · 遗忘曲线复习
+            </p>
+            <p
+              className={`mt-1 text-xs leading-relaxed ${
+                isPublicDeploy ? "text-slate-400" : "text-indigo-700"
+              }`}
+            >
               不改简历也行——用上面「① 你的简历」（JD 可选），我来当面试官，按你的简历出一套面试题（以概念 / 场景 / 系统设计等技术题为主，少量行为面试），你作答、AI 打分；每道题按遗忘曲线自动安排下次复习。题库绑定这份简历，进度自动保存。
             </p>
           </div>
           <button
             onClick={handleBuildBank}
-            disabled={buildingBank}
-            className="shrink-0 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={buildingBank || isPublicDeploy}
+            className={`shrink-0 rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-60 ${
+              isPublicDeploy ? "bg-slate-400" : "bg-indigo-600 hover:bg-indigo-700"
+            }`}
           >
-            {buildingBank ? "正在出题（约 1 分钟）…" : "用这份简历生成题库 →"}
+            {isPublicDeploy
+              ? "线上暂未开放"
+              : buildingBank
+                ? "正在出题（约 1 分钟）…"
+                : "用这份简历生成题库 →"}
           </button>
         </div>
-        <label className="mt-3 flex items-center gap-2 text-xs text-indigo-700">
-          <input
-            type="checkbox"
-            checked={rebuildBank}
-            onChange={(e) => setRebuildBank(e.target.checked)}
-            className="h-3.5 w-3.5 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500"
-          />
-          重新生成（覆盖这份简历的旧题库；出题需要约 1 分钟）
-        </label>
+        {isPublicDeploy ? (
+          <p className="mt-3 text-xs leading-relaxed text-slate-500">
+            🔒 这个功能只在 Andy 本地环境下开放，线上暂时 disable 了这个功能。
+          </p>
+        ) : (
+          <label className="mt-3 flex items-center gap-2 text-xs text-indigo-700">
+            <input
+              type="checkbox"
+              checked={rebuildBank}
+              onChange={(e) => setRebuildBank(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500"
+            />
+            重新生成（覆盖这份简历的旧题库；出题需要约 1 分钟）
+          </label>
+        )}
         {bankError && <p className="mt-2 text-sm text-rose-600">{bankError}</p>}
       </div>
 
@@ -542,6 +653,7 @@ function SourceCard({
   onText,
   placeholder,
   accept,
+  hint,
 }: {
   title: string;
   mode: SourceMode;
@@ -552,6 +664,8 @@ function SourceCard({
   onText: (t: string) => void;
   placeholder: string;
   accept: string;
+  /** 文件框下面的一行小字说明(可选)。 */
+  hint?: string;
 }) {
   const [dragging, setDragging] = useState(false);
 
@@ -627,6 +741,7 @@ function SourceCard({
               <span>点击选择，或把 PDF / DOCX 文件拖到这里</span>
             )}
           </label>
+          {hint && <p className="mt-2 text-xs text-slate-400">{hint}</p>}
         </div>
       ) : (
         <textarea

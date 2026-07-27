@@ -24,6 +24,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "/Users/andyxiongzheng/AndyXiongZheng LLC/ForwardCraft/web", "run", "dev"],
       "port": 3000
+    },
+    {
+      "name": "autoxhs-web-public",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/andyxiongzheng/AndyXiongZheng LLC/Autoxhs/web", "run", "dev:public"],
+      "port": 3112
     }
   ]
 }

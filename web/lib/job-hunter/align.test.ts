@@ -181,11 +181,32 @@ describe("htmlToText", () => {
 });
 
 describe("buildAlignedDoc", () => {
-  it("拼回原样式 + 打印样式,body 原样嵌入(不再套 .page)", () => {
+  it("拼回原样式 + 打印样式,body 原样嵌入(只多一层给 Word 用的 WordSection1)", () => {
     const doc = buildAlignedDoc("<p>hello</p>", "<style>.docx{color:red}</style>");
     expect(doc).toContain("<!doctype html>");
     expect(doc).toContain("<style>.docx{color:red}</style>"); // 原样式保留
-    expect(doc).toContain("<body><p>hello</p></body>"); // body 原样,无 .page 包裹
+    expect(doc).toContain('<body><div class="WordSection1"><p>hello</p></div></body>');
     expect(doc).toContain("@page { margin: 0; }"); // 打印样式
+  });
+
+  it("没有 docx 的 section 时不注入 Word 页面设置", () => {
+    expect(buildAlignedDoc("<p>hello</p>")).not.toContain("WordSection1 {");
+  });
+
+  it("按 section 的尺寸给 Word/WPS 写页面设置(装在 MSO 条件注释里,浏览器跳过)", () => {
+    const doc = buildAlignedDoc(
+      '<section class="docx" style="padding: 36pt; width: 612pt; min-height: 792pt;"></section>',
+    );
+    expect(doc).toContain("<!--[if gte mso 9]>");
+    expect(doc).toContain("@page WordSection1 { size: 612pt 792pt; margin: 36pt 36pt 36pt 36pt; }");
+  });
+
+  it("项目符号在这里才落成真实字符(样式与正文拼到一起后)", () => {
+    const doc = buildAlignedDoc(
+      '<p class="docx-num-1-0">Hello</p>',
+      '<style>p.docx-num-1-0:before { content: "•\\9"; }</style>',
+    );
+    expect(doc).toContain('<p class="docx-num-1-0">•\u00a0Hello</p>');
+    expect(doc).toContain('content: ""');
   });
 });

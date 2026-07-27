@@ -8,6 +8,8 @@
  * 只能在浏览器里调用(用到 document、动态 import docx-preview)。
  */
 
+import { hardenDocxStyles } from "./docxFonts";
+
 export function isDocx(file: File): boolean {
   return (
     file.name.toLowerCase().endsWith(".docx") ||
@@ -37,7 +39,12 @@ export async function convertDocxToHtml(file: File): Promise<string> {
     });
     const css = styleEl.innerHTML; // <style>…</style> 块
     const bodyHtml = content.innerHTML;
-    return `<!doctype html><html><head><meta charset="utf-8">${css}</head><body>${bodyHtml}</body></html>`;
+    // Word 的字体名照搬进 CSS 会有两个坑:本机没装的字体(含 "Times New Roman Bold" 这种
+    // 伪族名)整段打印不出来,Symbol/Wingdings 的项目符号变豆腐块。转换后立刻加固,
+    // 页面预览和交给服务端改写的 HTML 就都是干净的。
+    return hardenDocxStyles(
+      `<!doctype html><html><head><meta charset="utf-8">${css}</head><body>${bodyHtml}</body></html>`,
+    );
   } finally {
     content.remove();
     styleEl.remove();

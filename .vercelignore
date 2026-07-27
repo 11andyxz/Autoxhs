@@ -1,0 +1,20 @@
+# 手动部署(npx vercel --prod)时要从**仓库根目录**跑(项目的 Root Directory = web),
+# 于是整个仓库都会被上传。这里把与 web 构建无关的大目录排掉:不排的话要传 350MB+,
+# 实测会 Upload aborted。
+#
+# 尤其注意 web/uploads:那是雇员证件/PII 的本地存储,**绝不该上传到 Vercel**。
+
+opt-promo-video
+web/uploads
+
+# 构建产物 / 依赖(Vercel 会自己装、自己构建)
+web/.next*
+web/node_modules
+web/tsconfig.tsbuildinfo
+
+# 与 web 应用无关的东西
+src
+tests
+.venv
+**/__pycache__
+**/*.pyc

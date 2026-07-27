@@ -2,6 +2,8 @@ import type OpenAI from "openai";
 
 import { getClient } from "@/lib/openai";
 
+import { hardenDocxHtml, wordPageSetup } from "./docxFonts";
+
 /**
  * 「按规则对齐改写简历」的核心逻辑。
  *
@@ -292,9 +294,18 @@ export function sanitizeModelHtml(raw: string): string {
  * 关键是保留原样式,让改写结果与原简历的字体/版式一致;这里只额外补一小段打印样式:
  * 打印时去掉浏览器默认页眉页脚(@page margin:0),并去掉 docx-preview 外层灰底/阴影/边距,
  * 避免与页面自身页边距叠加。
+ *
+ * 拼好后统一做一次加固(见 docxFonts.ts):Word 简历里 "Times New Roman Bold" 这类伪字体名、
+ * 本机没装的 宋体/Cambria/Calibri,以及 Symbol/Wingdings 私用区的项目符号,直接打印会**整段消失**
+ * 或变豆腐块 □;项目符号又是 CSS ::before 生成内容,Word/WPS 的 HTML 导入不认、会整排丢失。
+ * 必须在**样式与正文拼到一起之后**再加固 —— 落地项目符号要同时看到 CSS 规则和对应段落。
+ * 加固幂等,客户端转换时已修过字体也无妨。
  */
 export function buildAlignedDoc(bodyHtml: string, styleHtml = ""): string {
-  return `<!doctype html>
+  // 「下载 Word」其实是 HTML 换个 .doc 后缀,给 Word/WPS 补一份它们认的页面设置
+  // (放在 MSO 条件注释里,浏览器当普通注释跳过,不影响打印)。
+  const wordPage = wordPageSetup(bodyHtml) ?? "";
+  return hardenDocxHtml(`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -316,9 +327,10 @@ ${styleHtml}
     a { color: inherit !important; text-decoration: none !important; }
   }
 </style>
+${wordPage}
 </head>
-<body>${bodyHtml}</body>
-</html>`;
+<body><div class="WordSection1">${bodyHtml}</div></body>
+</html>`);
 }
 
 // ---- 模型调用:按规则改写 HTML ----

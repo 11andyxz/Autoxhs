@@ -168,9 +168,18 @@ export default function AlignTab() {
     }
   }
 
-  function printFrame(ref: React.RefObject<HTMLIFrameElement | null>) {
+  function printFrame(ref: React.RefObject<HTMLIFrameElement | null>, filename: string) {
     const win = ref.current?.contentWindow;
     if (!win) return;
+    // Chrome 拿**顶层页面标题**给「另存为 PDF」命名,不临时改的话简历会被存成「小红书文案发表.pdf」。
+    const prev = document.title;
+    document.title = filename;
+    const restore = () => {
+      document.title = prev;
+    };
+    win.addEventListener("afterprint", restore, { once: true });
+    window.addEventListener("afterprint", restore, { once: true });
+    window.setTimeout(restore, 60_000); // 兜底:afterprint 没触发也别把标题留住
     win.focus();
     win.print();
   }
@@ -398,7 +407,7 @@ export default function AlignTab() {
             <p className="text-sm font-semibold text-slate-800">下载文件</p>
             <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
               <button
-                onClick={() => printFrame(resultFrameRef)}
+                onClick={() => printFrame(resultFrameRef, "Resume_aligned")}
                 className="flex items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700"
               >
                 <span aria-hidden>📄</span>
