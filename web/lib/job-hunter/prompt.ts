@@ -4,7 +4,7 @@
  * 不得拼接进此处。
  */
 
-import { ADAPT_POLICY, type TailorMode } from "./tailorMode";
+import { ADAPT_POLICY, lightPolicy, type TailorSpec } from "./tailorMode";
 
 const BASE = `You are an elite resume writer and career coach specializing in the North American job market. You will receive a candidate's existing RESUME and a target JOB DESCRIPTION (JD). Your job is to produce a single resume that is specifically tailored to win an interview for that exact role.
 
@@ -55,17 +55,33 @@ const EMBELLISH_CLAUSE = `Embellishment mode (EXPLICITLY ENABLED BY THE USER):
 const ADAPT_CLAUSE = `${ADAPT_POLICY}
 - Anything the JD asks for that you could not honestly cover still goes into analysis.missingKeywords.`;
 
+/** 轻度激进:硬约束同 adapt,但允许在真实岗位内补充没做过的工作内容(职位名视子选项)。 */
+function lightClause(allowRetitle: boolean): string {
+  return `${lightPolicy(allowRetitle)}
+- analysis.missingKeywords should list only what you still could not cover believably even after adding content.
+- analysis.changeSummary MUST call out (in Chinese) which additions are newly invented${
+    allowRetitle ? " and which job titles you re-labelled" : ""
+  }, so the candidate knows what they need to be able to defend in an interview.`;
+}
+
 /** 重试时追加的修复指令(开发者指令,非用户输入) */
 export const REPAIR_CLAUSE = `Your previous output did not conform. Return ONLY valid JSON matching the schema: a non-empty resume (name, headline, contacts, summary bullets, experience items, and any extra sections), a non-empty cover letter, and analysis with matchScore (0-100), addedKeywords, missingKeywords, and changeSummary (in Chinese). No extra text.`;
 
-const CLAUSES: Record<TailorMode, string> = {
-  strict: TRUTHFUL_CLAUSE,
-  adapt: ADAPT_CLAUSE,
-  embellish: EMBELLISH_CLAUSE,
-};
+function clauseFor({ mode, allowRetitle }: TailorSpec): string {
+  switch (mode) {
+    case "strict":
+      return TRUTHFUL_CLAUSE;
+    case "adapt":
+      return ADAPT_CLAUSE;
+    case "light":
+      return lightClause(allowRetitle);
+    case "embellish":
+      return EMBELLISH_CLAUSE;
+  }
+}
 
-export function buildSystemPrompt(mode: TailorMode): string {
-  return `${BASE}\n\n${CLAUSES[mode]}`;
+export function buildSystemPrompt(spec: TailorSpec): string {
+  return `${BASE}\n\n${clauseFor(spec)}`;
 }
 
 /** 把简历与 JD 包成带清晰分隔符的用户消息(明确标注为数据) */

@@ -11,17 +11,76 @@
  *  - privacy_type 必须由调用方显式传入，不吃默认值（见下面的注释）
  */
 
+import { type HashTag, type TagLike, formatTopic, tagName } from "./topics";
+
 /** 笔记可见性。实测语义：0=公开、1=仅自己可见（rednoteApi.md / creator_api.md 两处文档都写反了）。 */
 export const PRIVACY_PUBLIC = 0;
 export const PRIVACY_SELF = 1;
 
-// 与 xhs_api.py:386-390 的两个常量逐字节一致，改动会导致发布被拒
+// 与 xhs_api.py 的常量逐字节一致，改动会导致发布被拒
 const SOURCE = '{"type":"web","ids":"","extraInfo":"{\\"systemId\\":\\"web\\"}"}';
-const BUSINESS_BINDS =
-  '{"version":1,"noteId":0,"bizType":0,"noteOrderBind":{},"notePostTiming":{},' +
-  '"noteCollectionBind":{"id":""},"noteSketchCollectionBind":{"id":""},' +
-  '"coProduceBind":{"enable":true},"noteCopyBind":{"copyable":true},' +
-  '"interactionPermissionBind":{"commentPermission":0},"optionRelationList":[]}';
+
+/** 「声明原创」在 business_binds 里的 bind 类型（既是 type 也是 bizType）。 */
+const ORIGINAL_STATEMENT = "ORIGINAL_STATEMENT";
+
+export type BusinessBindsOptions = {
+  /**
+   * 声明原创的 bizId = **自己的 user_id**（rednote 的 /creator/me 取）。
+   * 留空就是不声明原创（optionRelationList 为 []）。
+   */
+  originalUserId?: string;
+  /**
+   * 合集 id。⚠️ 目前用不上：长文/图文笔记（common.type="normal"）加不进 type=2 的长文合集，
+   * 服务端会静默丢弃这个绑定（creator_publish_options.md §3 有三条证据链）。字段留着，等有普通合集再用。
+   */
+  collectionId?: string;
+  /** 0 = 所有人可评论（网页版默认） */
+  commentPermission?: number;
+  copyable?: boolean;
+  coproduce?: boolean;
+};
+
+/**
+ * 组 `common.business_binds` —— 注意它是一个 **JSON 字符串**，不是对象。
+ *
+ * 键顺序与 rednote 的 build_business_binds()、以及网页版抓包实样逐字节一致，
+ * 别改顺序也别改空对象/空数组的写法。
+ */
+export function buildBusinessBinds(options: BusinessBindsOptions = {}): string {
+  const {
+    originalUserId = "",
+    collectionId = "",
+    commentPermission = 0,
+    copyable = true,
+    coproduce = true,
+  } = options;
+
+  return JSON.stringify({
+    version: 1,
+    noteId: 0,
+    bizType: 0,
+    noteOrderBind: {},
+    notePostTiming: {},
+    noteCollectionBind: { id: collectionId },
+    noteSketchCollectionBind: { id: "" },
+    coProduceBind: { enable: coproduce },
+    noteCopyBind: { copyable },
+    interactionPermissionBind: { commentPermission },
+    optionRelationList: originalUserId
+      ? [
+          {
+            type: ORIGINAL_STATEMENT,
+            relationList: [
+              { bizType: ORIGINAL_STATEMENT, bizId: originalUserId, extraInfo: "{}" },
+            ],
+          },
+        ]
+      : [],
+  });
+}
+
+/** 默认：不声明原创、不绑合集。 */
+const BUSINESS_BINDS = buildBusinessBinds();
 
 export type PublishImage = {
   fileId: string;
@@ -40,6 +99,13 @@ export type BuildImageNoteBodyParams = {
    * 所以这里宁可让类型强制调用方每次都写出来。
    */
   privacy: typeof PRIVACY_PUBLIC | typeof PRIVACY_SELF;
+  /**
+   * 已解析的真话题。顺序必须与 desc 里 `#name[话题]#` 的出现顺序**完全一致**
+   * —— 直接用 buildDesc 回的 keptTags 切出来，别自己另拼一份。
+   */
+  hashTags?: readonly HashTag[];
+  /** buildBusinessBinds() 的结果（声明原创等）。不传就是默认的「什么都不绑」。 */
+  businessBinds?: string;
 };
 
 export type ImageNoteBody = {
@@ -66,8 +132,13 @@ export function buildImageNoteBody(params: BuildImageNoteBodyParams): ImageNoteB
       title: params.title,
       desc: params.desc,
       ats: [],
-      hash_tag: [],
-      business_binds: BUSINESS_BINDS,
+      hash_tag: (params.hashTags ?? []).map((t) => ({
+        id: t.id,
+        name: t.name,
+        link: t.link,
+        type: "topic",
+      })),
+      business_binds: params.businessBinds ?? BUSINESS_BINDS,
       privacy_info: { op_type: 1, type: params.privacy, user_ids: [] },
       goods_info: { extension: { live_preheat: "0" } },
       biz_relations: [],
@@ -140,29 +211,41 @@ export type DescResult = {
   /** 最终 caption 长度（码点） */
   length: number;
   limit: number;
+  /**
+   * 实际写进 desc 的标签个数（从头数）。
+   * hash_tag 必须与 desc 严格对应，所以调用方要用它切一刀：`tags.slice(0, keptTags)`。
+   */
+  keptTags: number;
+  /** 来源署名是否写进去了（额度实在不够时会被舍弃） */
+  keptSources: boolean;
 };
 
 /**
- * 把正文与标签拼成笔记 caption，并保证在字数上限内。
+ * 把正文、来源署名与标签拼成笔记 caption，并保证在字数上限内。
+ *
+ * 版式（从上到下）：正文 → 来源署名 → 固定 CTA → 话题。
+ * 标签一律写成 `#<name>[话题]#`（可点击话题的固定写法，见 topics.ts）；
+ * 传进来的可以是标签名（前端预览手里只有名字）也可以是解析好的 HashTag，两者出的字一样长。
  *
  * 保命顺序（空间不够时先牺牲正文）：
  *  1. **标签** —— 没了就没有流量入口
- *  2. **结尾 CTA**（正文最后一句的「评论 dd」引导）—— 没了就没有转化
- *  3. 正文 —— 从尾部按自然边界截断
+ *  2. **结尾 CTA**（「评论 dd」引导）—— 没了就没有转化
+ *  3. **来源署名** —— 内容可信度的凭据
+ *  4. 正文 —— 从尾部按自然边界截断
  *
- * 与其让小红书从尾巴上乱砍（把 1、2 砍掉、正文还断在半句），不如我们自己按优先级砍。
- * ctaLine 传入正文里那句固定引导语（lib/schema 的 CTA_LINE），会被挪到标签之前保留。
+ * 与其让小红书从尾巴上乱砍（把 1、2、3 砍掉、正文还断在半句），不如我们自己按优先级砍。
+ * ⚠️ 来源署名必须走 `sourceLines` 传进来，**不要**自己先拼到 body 末尾 ——
+ * 那样它就排在正文里，一超额度就跟着正文一起被截掉（真踩过这个坑）。
  */
 export function buildDesc(
   body: string,
-  tags: string[],
-  options: { limit?: number; ctaLine?: string } = {},
+  tags: readonly TagLike[],
+  options: { limit?: number; ctaLine?: string; sourceLines?: readonly string[] } = {},
 ): DescResult {
   const limit = options.limit ?? DESC_MAX_CHARS;
-  const tagLine = tags
-    .map((t) => t.trim())
-    .filter(Boolean)
-    .join(" ");
+  const names = tags.map((t) => tagName(t)).filter(Boolean);
+  const sources = (options.sourceLines ?? []).map((s) => s.trim()).filter(Boolean);
+  const sourceBlock = sources.join("\n");
 
   let text = body.trim();
   // CTA 通常已经是正文最后一句：先摘出来，免得截断时被一起砍掉
@@ -171,17 +254,51 @@ export function buildDesc(
     text = text.slice(0, text.length - cta.length).trimEnd();
   }
 
-  const tail = [cta, tagLine].filter(Boolean).join("\n\n");
-  // 尾部（CTA + 标签）本身就超预算：只能保尾部，正文全舍
+  const makeTail = (count: number, withSources: boolean) => {
+    const tagLine = names.slice(0, count).map(formatTopic).join(" ");
+    return [withSources ? sourceBlock : "", cta, tagLine].filter(Boolean).join("\n\n");
+  };
+
+  // 尾部（来源 + CTA + 标签）自己就撑爆了额度：**整个整个地丢弃末尾的标签**，
+  // 绝不按字符截断标签行 —— 半截的 `#foo[话` 既没用，又会让 hash_tag 与 desc 对不上。
+  let keptSources = sourceBlock.length > 0;
+  let keptTags = names.length;
+  while (keptTags > 0 && len(makeTail(keptTags, keptSources)) > limit) keptTags -= 1;
+  // 标签都丢光了还是放不下 → 再舍来源署名（CTA 最后才动）
+  if (keptSources && len(makeTail(keptTags, true)) > limit) {
+    keptSources = false;
+    keptTags = names.length;
+    while (keptTags > 0 && len(makeTail(keptTags, false)) > limit) keptTags -= 1;
+  }
+
+  const tail = makeTail(keptTags, keptSources);
   const tailLen = tail ? len(tail) + 2 : 0; // +2 是与正文之间的空行
   const bodyBudget = limit - tailLen;
   if (bodyBudget <= 0) {
+    // 只放得下尾部，正文全舍。上面已经保证 len(tail) ≤ limit，
+    // 唯一还会被硬截的情况是「一个标签都放不下、CTA 自己还超长」（此时 keptTags 已是 0）。
     const desc = truncateAtBoundary(tail, limit);
-    return { desc, truncated: true, omitted: len(text), length: len(desc), limit };
+    return {
+      desc,
+      truncated: true,
+      omitted: len(text),
+      length: len(desc),
+      limit,
+      keptTags,
+      keptSources,
+    };
   }
 
   const kept = truncateAtBoundary(text, bodyBudget);
   const omitted = Math.max(0, len(text) - len(kept));
   const desc = [kept, tail].filter(Boolean).join("\n\n");
-  return { desc, truncated: omitted > 0, omitted, length: len(desc), limit };
+  return {
+    desc,
+    truncated: omitted > 0 || keptTags < names.length || (sources.length > 0 && !keptSources),
+    omitted,
+    length: len(desc),
+    limit,
+    keptTags,
+    keptSources,
+  };
 }

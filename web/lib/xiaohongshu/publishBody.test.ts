@@ -3,14 +3,23 @@ import { describe, expect, it } from "vitest";
 import {
   PRIVACY_PUBLIC,
   PRIVACY_SELF,
+  buildBusinessBinds,
   buildDesc,
   buildImageNoteBody,
 } from "./publishBody";
+import type { HashTag } from "./topics";
 
 const IMAGES = [
   { fileId: "a1", width: 1440, height: 1920 },
   { fileId: "b2", width: 1440, height: 1920 },
 ];
+
+const topic = (name: string, id = `id-${name}`): HashTag => ({
+  id,
+  name,
+  link: `https://www.xiaohongshu.com/page/topics/p-${name}?naviHidden=yes`,
+  type: "topic",
+});
 
 describe("buildImageNoteBody", () => {
   it("按顺序放入全部图片，不做任何裁剪", () => {
@@ -65,8 +74,32 @@ describe("buildImageNoteBody", () => {
     expect(body.common.source).toBe(
       '{"type":"web","ids":"","extraInfo":"{\\"systemId\\":\\"web\\"}"}',
     );
-    expect(body.common.business_binds).toContain('"interactionPermissionBind":{"commentPermission":0}');
-    expect(body.common.business_binds).toContain('"coProduceBind":{"enable":true}');
+    expect(body.common.business_binds).toBe(
+      '{"version":1,"noteId":0,"bizType":0,"noteOrderBind":{},"notePostTiming":{},' +
+        '"noteCollectionBind":{"id":""},"noteSketchCollectionBind":{"id":""},' +
+        '"coProduceBind":{"enable":true},"noteCopyBind":{"copyable":true},' +
+        '"interactionPermissionBind":{"commentPermission":0},"optionRelationList":[]}',
+    );
+  });
+
+  it("默认不带话题；给了 hashTags 就按顺序原样写进 hash_tag", () => {
+    const tags = [topic("OPT", "5d93"), topic("留学生找工作", "6173")];
+    expect(
+      buildImageNoteBody({ title: "t", desc: "d", images: IMAGES, privacy: PRIVACY_PUBLIC })
+        .common.hash_tag,
+    ).toEqual([]);
+
+    const body = buildImageNoteBody({
+      title: "t",
+      desc: "d",
+      images: IMAGES,
+      privacy: PRIVACY_PUBLIC,
+      hashTags: tags,
+    });
+    expect(body.common.hash_tag).toEqual([
+      { id: "5d93", name: "OPT", link: tags[0].link, type: "topic" },
+      { id: "6173", name: "留学生找工作", link: tags[1].link, type: "topic" },
+    ]);
   });
 
   it("图文笔记不带视频信息", () => {
@@ -80,9 +113,51 @@ describe("buildImageNoteBody", () => {
   });
 });
 
+describe("buildBusinessBinds", () => {
+  it("声明原创 = optionRelationList 里放一条 ORIGINAL_STATEMENT，bizId 是自己的 user_id", () => {
+    const binds = JSON.parse(buildBusinessBinds({ originalUserId: "66ba3e71000000001d030729" }));
+    expect(binds.optionRelationList).toEqual([
+      {
+        type: "ORIGINAL_STATEMENT",
+        relationList: [
+          {
+            bizType: "ORIGINAL_STATEMENT",
+            bizId: "66ba3e71000000001d030729",
+            extraInfo: "{}",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("不声明原创时该数组为空（不是省略键）", () => {
+    expect(JSON.parse(buildBusinessBinds()).optionRelationList).toEqual([]);
+  });
+
+  it("键顺序与网页版抓包实样一致——顺序漂移过发布可能被拒", () => {
+    expect(Object.keys(JSON.parse(buildBusinessBinds({ originalUserId: "u" })))).toEqual([
+      "version",
+      "noteId",
+      "bizType",
+      "noteOrderBind",
+      "notePostTiming",
+      "noteCollectionBind",
+      "noteSketchCollectionBind",
+      "coProduceBind",
+      "noteCopyBind",
+      "interactionPermissionBind",
+      "optionRelationList",
+    ]);
+  });
+});
+
 describe("buildDesc", () => {
-  it("正文与标签之间空一行", () => {
-    expect(buildDesc("正文", ["#求职", "#北美"]).desc).toBe("正文\n\n#求职 #北美");
+  it("标签写成可点击话题的固定格式 `#name[话题]#`，与正文空一行", () => {
+    expect(buildDesc("正文", ["#求职", "#北美"]).desc).toBe("正文\n\n#求职[话题]# #北美[话题]#");
+  });
+
+  it("传 HashTag 与传标签名出的字一样（前端预览与实际发布一致）", () => {
+    expect(buildDesc("正文", [topic("求职")]).desc).toBe(buildDesc("正文", ["#求职"]).desc);
   });
 
   it("没有标签时只留正文", () => {
@@ -90,37 +165,41 @@ describe("buildDesc", () => {
   });
 
   it("忽略空白标签", () => {
-    expect(buildDesc("正文", ["  ", "#a"]).desc).toBe("正文\n\n#a");
+    expect(buildDesc("正文", ["  ", "#a"]).desc).toBe("正文\n\n#a[话题]#");
   });
 
   it("正文为空时只留标签", () => {
-    expect(buildDesc("   ", ["#a"]).desc).toBe("#a");
+    expect(buildDesc("   ", ["#a"]).desc).toBe("#a[话题]#");
   });
 
-  it("没超上限时不标记截断", () => {
-    const r = buildDesc("短正文", ["#a"]);
+  it("没超上限时不标记截断，keptTags = 全部", () => {
+    const r = buildDesc("短正文", ["#a", "#b"]);
     expect(r.truncated).toBe(false);
     expect(r.omitted).toBe(0);
+    expect(r.keptTags).toBe(2);
   });
 });
 
 describe("buildDesc 超长截断", () => {
   const TAGS = ["#北美求职", "#找工作"];
   const CTA = '有需要进一步咨询以及帮助的同学 可以评论"dd"';
+  /** 与实现同口径：UTF-16 单元数 */
+  const len = (s: string) => s.length;
 
   it("超上限时标签一定保住——这是流量入口，绝不能被砍", () => {
     const body = "很".repeat(2000);
     const r = buildDesc(body, TAGS, { limit: 300 });
-    expect(r.desc.endsWith("#北美求职 #找工作")).toBe(true);
+    expect(r.desc.endsWith("#北美求职[话题]# #找工作[话题]#")).toBe(true);
     expect(r.truncated).toBe(true);
     expect(r.omitted).toBeGreaterThan(0);
+    expect(r.keptTags).toBe(2);
   });
 
   it("超上限时正文末尾的 CTA 被挪到标签前保住", () => {
     const body = `${"很".repeat(2000)}\n\n${CTA}`;
     const r = buildDesc(body, TAGS, { limit: 300, ctaLine: CTA });
     expect(r.desc).toContain(CTA);
-    expect(r.desc.endsWith("#北美求职 #找工作")).toBe(true);
+    expect(r.desc.endsWith("#北美求职[话题]# #找工作[话题]#")).toBe(true);
     // CTA 在标签之前
     expect(r.desc.indexOf(CTA)).toBeLessThan(r.desc.indexOf("#北美求职"));
   });
@@ -178,7 +257,61 @@ describe("buildDesc 超长截断", () => {
     const manyTags = Array.from({ length: 30 }, (_, i) => `#超长标签名称${i}`);
     const r = buildDesc("正文".repeat(50), manyTags, { limit: 120 });
     expect(r.truncated).toBe(true);
-    expect(r.desc).toContain("#超长标签名称0");
+    expect(r.desc).toContain("#超长标签名称0[话题]#");
     expect([...r.desc].length).toBeLessThanOrEqual(120);
+  });
+
+  it("正文超长时来源署名照样保住——它在受保护的尾部，不跟着正文被截", () => {
+    // 线上真踩过：署名先拼在正文末尾 → caption 到 1778 字被截 → 署名整块消失、CTA 和话题却还在
+    const sourceLines = ["来源:USCIS -> Optional Practical Training Extension for STEM Students"];
+    const r = buildDesc("很".repeat(3000), TAGS, { limit: 400, ctaLine: CTA, sourceLines });
+    expect(r.desc).toContain(sourceLines[0]);
+    expect(r.keptSources).toBe(true);
+    expect([...r.desc].length).toBeLessThanOrEqual(400);
+  });
+
+  it("版式固定：正文 → 来源 → CTA → 话题", () => {
+    const sourceLines = ["来源:USCIS -> A", "来源:ICE SEVP -> B"];
+    const r = buildDesc("正文", TAGS, { limit: 1000, ctaLine: CTA, sourceLines });
+    expect(r.desc.indexOf("正文")).toBeLessThan(r.desc.indexOf("来源:USCIS"));
+    expect(r.desc.indexOf("来源:USCIS")).toBeLessThan(r.desc.indexOf("来源:ICE SEVP"));
+    expect(r.desc.indexOf("来源:ICE SEVP")).toBeLessThan(r.desc.indexOf(CTA));
+    expect(r.desc.indexOf(CTA)).toBeLessThan(r.desc.indexOf("#北美求职"));
+    expect(r.desc.trimEnd().endsWith("#找工作[话题]#")).toBe(true);
+  });
+
+  it("正文自带 CTA 结尾时不会重复一份，署名插在它前面", () => {
+    const r = buildDesc(`正文\n\n${CTA}`, [], {
+      limit: 1000,
+      ctaLine: CTA,
+      sourceLines: ["来源:USCIS -> A"],
+    });
+    expect(r.desc.split(CTA)).toHaveLength(2);
+    expect(r.desc.indexOf("来源:USCIS")).toBeLessThan(r.desc.indexOf(CTA));
+  });
+
+  it("额度极小时先丢标签、再丢署名，CTA 最后才动", () => {
+    const r = buildDesc("正文", TAGS, {
+      limit: len(CTA) + 4,
+      ctaLine: CTA,
+      sourceLines: ["来源:USCIS -> 一个很长很长很长的官方页面标题"],
+    });
+    expect(r.desc).toContain(CTA);
+    expect(r.keptSources).toBe(false);
+    expect(r.keptTags).toBe(0);
+    expect(r.truncated).toBe(true);
+  });
+
+  it("标签放不下时整个整个地丢，绝不留半截话题——keptTags 与 desc 严格对得上", () => {
+    const manyTags = Array.from({ length: 30 }, (_, i) => `#超长标签名称${i}`);
+    const r = buildDesc("正文".repeat(50), manyTags, { limit: 120 });
+    expect(r.keptTags).toBeGreaterThan(0);
+    expect(r.keptTags).toBeLessThan(manyTags.length);
+    // desc 里出现的话题个数 == keptTags，且每个都是完整的 `#name[话题]#`
+    expect(r.desc.match(/#[^#]+\[话题\]#/g) ?? []).toHaveLength(r.keptTags);
+    // 被丢掉的那些一个字都没留下
+    for (let i = r.keptTags; i < manyTags.length; i += 1) {
+      expect(r.desc).not.toContain(`超长标签名称${i}`);
+    }
   });
 });

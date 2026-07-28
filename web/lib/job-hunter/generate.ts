@@ -3,7 +3,7 @@ import type OpenAI from "openai";
 import { getClient, getModel } from "@/lib/openai";
 
 import { buildSystemPrompt, buildUserMessage, REPAIR_CLAUSE } from "./prompt";
-import type { TailorMode } from "./tailorMode";
+import type { TailorSpec } from "./tailorMode";
 import {
   JOB_HUNTER_JSON_SCHEMA,
   SchemaValidationError,
@@ -28,11 +28,11 @@ async function callModel(
   client: OpenAI,
   resumeText: string,
   jdText: string,
-  mode: TailorMode,
+  spec: TailorSpec,
   repair: boolean,
 ): Promise<JobHunterResult> {
   const input: Array<{ role: ChatRole; content: string }> = [
-    { role: "system", content: buildSystemPrompt(mode) },
+    { role: "system", content: buildSystemPrompt(spec) },
   ];
 
   if (repair) {
@@ -77,14 +77,14 @@ async function callModel(
 export async function generateTailoredResume(
   resumeText: string,
   jdText: string,
-  mode: TailorMode,
+  spec: TailorSpec,
 ): Promise<JobHunterResult> {
   const client = getClient(TIMEOUT_MS);
   try {
-    return await callModel(client, resumeText, jdText, mode, false);
+    return await callModel(client, resumeText, jdText, spec, false);
   } catch (err) {
     if (err instanceof SchemaValidationError || isZodError(err)) {
-      return await callModel(client, resumeText, jdText, mode, true);
+      return await callModel(client, resumeText, jdText, spec, true);
     }
     throw err;
   }

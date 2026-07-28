@@ -12,6 +12,7 @@ import {
 import { fileToHtml, isDocx } from "@/lib/job-hunter/docxToHtml";
 import { buildResumeHtml } from "@/lib/job-hunter/resumeHtml";
 import type { JobHunterResult } from "@/lib/job-hunter/schema";
+import { DEFAULT_TAILOR_MODE, type TailorMode } from "@/lib/job-hunter/tailorMode";
 
 const LOADING_HINTS = [
   "正在解读简历与 JD……",
@@ -40,6 +41,42 @@ type DownloadKind = ResumeExportKind;
 
 const ACCEPT = ".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+// 四档尺度由弱到强,互斥。文案要让人一眼看清「哪些事实会被动」。
+const TAILOR_MODE_OPTIONS: Array<{
+  value: TailorMode;
+  label: string;
+  desc: string;
+  warn?: boolean;
+}> = [
+  {
+    value: "strict",
+    label: "只重排措辞（最保守）",
+    desc: "只调整顺序和说法，几乎不动你的原句，不改任何事实。",
+  },
+  {
+    value: "adapt",
+    label: "按 JD 改写工作内容（不激进）",
+    desc:
+      "雇主、工作地点、起止时间、职位名称一律不动；在这些真实岗位内，AI 会在你原有内容的基础上按 JD 改写工作内容——" +
+      "换成 JD 的技术栈和说法、重排要点、突出相关成果，但不会凭空加你没做过的事，也不会把成果挪到别家公司。",
+  },
+  {
+    value: "light",
+    label: "轻度激进：可补充你没做过的工作内容",
+    desc:
+      "雇主、工作地点、起止时间依然一律不动；但在这些真实岗位内，AI 会为了匹配 JD 补上你其实没做过的职责、" +
+      "技术和成果（会贴合那家公司的业务和你当时的职级，尽量可信）。⚠️ 这部分内容不真实，面试时要能自圆其说。",
+    warn: true,
+  },
+  {
+    value: "embellish",
+    label: "激进匹配：连雇主 / 职位 / 经历都可能编造",
+    desc:
+      "⚠️ AI 可能编造经历、数字、雇主、职位等以最大化匹配 JD；这些内容未必真实，使用前请自行核对并承担风险。",
+    warn: true,
+  },
+];
+
 export default function TailorTab() {
   const [resumeMode, setResumeMode] = useState<SourceMode>("file");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
@@ -51,9 +88,10 @@ export default function TailorTab() {
   const [jdFile, setJdFile] = useState<File | null>(null);
   const [jdText, setJdText] = useState("");
 
-  const [allowEmbellish, setAllowEmbellish] = useState(false);
-  // 默认档:雇主/地点/时间/职位名不动,只在原有内容基础上按 JD 改写工作内容。
-  const [adaptContent, setAdaptContent] = useState(true);
+  // 改写尺度(四档互斥,见 TAILOR_MODE_OPTIONS);默认「不激进」。
+  const [tailorMode, setTailorMode] = useState<TailorMode>(DEFAULT_TAILOR_MODE);
+  // 轻度激进的子选项:是否允许把职位名往 JD 方向调(默认不动)。
+  const [allowRetitle, setAllowRetitle] = useState(false);
   // 默认保留原格式:上传 .docx 时不套固定模板,在原版式上按 JD 改写。
   // (线上也开着:项目已启用 Vercel Fluid,函数上限 300s;整份改写实测约 139s,放得下。)
   const [preserveFormat, setPreserveFormat] = useState(true);
@@ -274,8 +312,8 @@ export default function TailorTab() {
         fd.append("resumeHtml", sourceHtml);
         if (jdMode === "file" && jdFile) fd.append("jdFile", jdFile);
         else fd.append("jdText", jdText);
-        fd.append("allowEmbellish", allowEmbellish ? "true" : "false");
-        fd.append("adaptContent", adaptContent ? "true" : "false");
+        fd.append("tailorMode", tailorMode);
+        if (tailorMode === "light") fd.append("allowRetitle", allowRetitle ? "true" : "false");
 
         const res = await fetch("/api/job-hunter/generate-preserve", {
           method: "POST",
@@ -298,8 +336,8 @@ export default function TailorTab() {
       else fd.append("resumeText", resumeText);
       if (jdMode === "file" && jdFile) fd.append("jdFile", jdFile);
       else fd.append("jdText", jdText);
-      fd.append("allowEmbellish", allowEmbellish ? "true" : "false");
-      fd.append("adaptContent", adaptContent ? "true" : "false");
+      fd.append("tailorMode", tailorMode);
+      if (tailorMode === "light") fd.append("allowRetitle", allowRetitle ? "true" : "false");
 
       const res = await fetch("/api/job-hunter/generate", { method: "POST", body: fd });
       const json = (await res.json().catch(() => null)) as ApiResponse | null;
@@ -456,53 +494,75 @@ export default function TailorTab() {
         accept={ACCEPT}
       />
 
-      {/* 不激进匹配(默认开):锁住雇主/地点/时间,只按 JD 改写工作内容 */}
+      {/* 内容尺度:四档由弱到强,互斥,所以是单选而不是几个复选框 */}
       <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <label className="flex items-start gap-3">
-          <input
-            type="checkbox"
-            checked={adaptContent}
-            disabled={allowEmbellish}
-            onChange={(e) => setAdaptContent(e.target.checked)}
-            className="mt-1 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500 disabled:opacity-50"
-          />
-          <span>
-            <span className="text-sm font-medium text-slate-800">
-              按 JD 改写工作内容（不激进匹配 · 默认开启）
-            </span>
-            <span className="mt-1 block text-xs leading-relaxed text-slate-500">
-              <b>雇主、工作地点、起止时间、职位名称一律不动</b>；在这些真实岗位内，AI 会<b>在你原有内容的基础上</b>按 JD
-              改写工作内容——换成 JD 的技术栈和说法、重排要点、突出相关成果，但不会凭空加你没做过的事，也不会把成果挪到别家公司。
-              关闭则只做重排和措辞优化，几乎不动原句。
-            </span>
-            {allowEmbellish && (
-              <span className="mt-1 block text-xs leading-relaxed text-amber-600">
-                已开启下方的「激进匹配」，本档被它覆盖。
-              </span>
-            )}
-          </span>
-        </label>
-      </div>
+        <p className="text-sm font-semibold text-slate-800">③ AI 改写的尺度</p>
+        <div className="mt-3 space-y-2">
+          {TAILOR_MODE_OPTIONS.map((opt) => (
+            // 注意:子选项必须放在 radio 的 <label> **外面**。
+            // 嵌在里面的话,点子选项会被外层 label 当成点 radio(自己踩过这个坑)。
+            <div
+              key={opt.value}
+              className={`rounded-xl border p-3 transition ${
+                tailorMode === opt.value
+                  ? "border-cyan-300 bg-cyan-50/50"
+                  : "border-slate-200 hover:bg-slate-50"
+              }`}
+            >
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="radio"
+                  name="tailorMode"
+                  value={opt.value}
+                  checked={tailorMode === opt.value}
+                  onChange={() => setTailorMode(opt.value)}
+                  className="mt-1 h-4 w-4 border-slate-300 text-cyan-600 focus:ring-cyan-500"
+                />
+                <span>
+                  <span className="text-sm font-medium text-slate-800">
+                    {opt.label}
+                    {opt.value === DEFAULT_TAILOR_MODE && (
+                      <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-normal text-slate-500">
+                        默认
+                      </span>
+                    )}
+                  </span>
+                  <span
+                    className={`mt-1 block text-xs leading-relaxed ${
+                      opt.warn ? "text-amber-600" : "text-slate-500"
+                    }`}
+                  >
+                    {opt.desc}
+                  </span>
+                </span>
+              </label>
 
-      {/* 演绎模式开关 */}
-      <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <label className="flex items-start gap-3">
-          <input
-            type="checkbox"
-            checked={allowEmbellish}
-            onChange={(e) => setAllowEmbellish(e.target.checked)}
-            className="mt-1 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
-          />
-          <span>
-            <span className="text-sm font-medium text-slate-800">
-              允许 AI 演绎 / 补充经历（激进匹配）
-            </span>
-            <span className="mt-1 block text-xs leading-relaxed text-amber-600">
-              ⚠️ 打开后 AI 可能编造经历、数字、雇主等以最大化匹配 JD；这些内容未必真实，使用前请自行核对并承担风险。
-              关闭时只会基于你原简历的真实内容做重组和强化。
-            </span>
-          </span>
-        </label>
+              {/* 轻度激进的子选项:职位名要不要跟着 JD 挪。
+                  原简历写 Java Backend 而 JD 偏前端时,职位名硬扛着反而更假。 */}
+              {opt.value === "light" && tailorMode === "light" && (
+                <label className="mt-2 ml-7 flex cursor-pointer items-start gap-2 rounded-lg border border-amber-200 bg-white p-2.5">
+                  <input
+                    type="checkbox"
+                    name="allowRetitle"
+                    checked={allowRetitle}
+                    onChange={(e) => setAllowRetitle(e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <span>
+                    <span className="text-xs font-medium text-slate-800">也允许调整职位名称</span>
+                    <span className="mt-0.5 block text-xs leading-relaxed text-slate-500">
+                      原简历是「Java Backend」而 JD 偏前端 / 全栈时，职位名硬扛着不改反而更假。打开后 AI
+                      可以把职位名往 JD 的方向挪一点（如
+                      <b> Senior Software Engineer, Backend → …, Full Stack</b>）—— 但
+                      <b>同一家公司、同一段日期、同一个职级</b>，不会借机升职或换成 Manager / Tech Lead
+                      这类头衔。不打开则职位名一个字都不动。
+                    </span>
+                  </span>
+                </label>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
 
       {error && (

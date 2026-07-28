@@ -69,6 +69,8 @@ type Item = {
   error?: string;
   // 发布超时/未确认：rednote 可能其实已发布成功 → 重试前需二次确认，避免重复公开。
   ambiguous?: boolean;
+  /** 发布后回报的落地情况：真正写进笔记的话题、被丢掉的标签、是否声明了原创（都改不了了） */
+  published?: { tags: string[]; missingTags: string[]; original: boolean };
 };
 
 const STATUS_META: Record<Status, { label: string; cls: string }> = {
@@ -115,6 +117,8 @@ export default function BatchPublish() {
   const [linksText, setLinksText] = useState("");
   // 总开关：打开后整批走「设计卡片」（本地渲染的图文卡），关闭则是原来的长文文字卡。
   const [useCards, setUseCards] = useState(false);
+  // 整批是否声明原创。只能在发布那一刻写进 business_binds，发完补不了。
+  const [declareOriginal, setDeclareOriginal] = useState(true);
   const [cardStyle, setCardStyle] = useState<StyleId | "auto">("auto");
   const [cardPalette, setCardPalette] = useState<PaletteId | "auto">("auto");
   const [items, setItems] = useState<Item[]>([]);
@@ -365,6 +369,7 @@ export default function BatchPublish() {
           height: cards?.height,
           confirm: true,
           privacy: 0,
+          original: declareOriginal,
           sourceUrl: item.url,
           skipIfPublished: true,
         }
@@ -376,6 +381,7 @@ export default function BatchPublish() {
           charsPerCard: item.charsPerCard,
           coverImage: coverImage || undefined,
           privacy: 0,
+          original: declareOriginal,
           sourceUrl: item.url,
           skipIfPublished: true,
         };
@@ -404,6 +410,9 @@ export default function BatchPublish() {
           skipped?: boolean;
           shareLink?: string | null;
           dedupRecorded?: boolean;
+          tags?: string[];
+          missingTags?: string[];
+          original?: boolean;
           error?: string;
         }
       | null;
@@ -431,6 +440,12 @@ export default function BatchPublish() {
       status: "done",
       shareLink: json.shareLink ?? null,
       ambiguous: false,
+      // 话题与原创发布后就定死了，把实际落地情况留在卡片上（不是错误，单独一行提示）
+      published: {
+        tags: json.tags ?? [],
+        missingTags: json.missingTags ?? [],
+        original: json.original === true,
+      },
       // 发布成功但去重库没写进去：提醒用户，重复粘贴该链接可能会再次发布。
       error:
         json.dedupRecorded === false
@@ -601,6 +616,7 @@ export default function BatchPublish() {
         error: undefined,
         shareLink: undefined,
         ambiguous: false,
+        published: undefined,
         deckId: undefined,
         outline: undefined,
         overflow: undefined,
@@ -712,6 +728,21 @@ export default function BatchPublish() {
             ? "开：每条拆成 3~10 张本地渲染的设计卡（1440×1920），完整正文放在笔记正文里。不走小红书 AI 配图，因此不会碰到 906 风控；代价是每条多约 25 秒拆卡 + 3 秒渲染 + 逐张上传。风格选「自动选」时每条会按自己的内容各选各的。"
             : "关：沿用原来的长文文字卡 + AI 封面。"}
         </p>
+
+        {/* 声明原创：整批统一。发布那一刻写进笔记，发完补不了。 */}
+        <label className="mt-3 inline-flex cursor-pointer items-center gap-2">
+          <input
+            type="checkbox"
+            checked={declareOriginal}
+            onChange={(e) => setDeclareOriginal(e.target.checked)}
+            disabled={running}
+            className="h-4 w-4 accent-xhs disabled:cursor-not-allowed"
+          />
+          <span className="text-sm text-gray-800">整批声明原创</span>
+          <span className="text-[11px] text-gray-400">
+            发布时写入，事后无法补声明；标签会自动查成可点击话题，查不到的会被丢弃。
+          </span>
+        </label>
       </div>
 
       <textarea
@@ -813,6 +844,17 @@ export default function BatchPublish() {
                         第 {item.overflow.join("、")} 张文字偏长，已自动缩到最小字号
                       </p>
                     ) : null}
+                    {item.published && (
+                      <p className="mt-1 text-[11px] text-gray-400">
+                        {item.published.tags.length
+                          ? `已带 ${item.published.tags.length} 个话题`
+                          : "未带话题"}
+                        {item.published.original ? " · 已声明原创" : ""}
+                        {item.published.missingTags.length
+                          ? ` · 无同名话题被丢弃：${item.published.missingTags.join("、")}`
+                          : ""}
+                      </p>
+                    )}
                     {item.error && <p className="mt-1 text-xs text-red-500">{item.error}</p>}
                     {item.shareLink && (
                       <a

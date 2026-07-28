@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  「每小时自动发一篇」的 launchd 定时代理（模板）。
+  安装：拷到 ~/Library/LaunchAgents/ 再 launchctl load -w（见 scripts/launchd/README.md）。
+
+  行为：登录时(RunAtLoad) + 之后每 600 秒(10 分钟)唤醒一次。每次只是“检查”：
+        当天排期没排就现排 24 个选题；到点(整点已过)且距上一篇 ≥ AUTO_POST_MIN_GAP_MIN 分钟
+        才真发一篇。总开关 AUTO_POST_ENABLED 默认关 → 装上也不会乱发。
+
+  为什么是 10 分钟而不是 1 小时：关机错过的整点要靠“多跑几轮”逐篇补回来。
+  10 分钟一轮 + 单轮最多 1 篇 + 间隔节流 = 补跑速度有上限，不会一口气把积压全推出去触发风控。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.autoxhs.auto-post</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/andyxiongzheng/AndyXiongZheng LLC/Autoxhs/web/scripts/auto-post.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>600</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/andyxiongzheng/Library/Logs/autoxhs-auto-post.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/andyxiongzheng/Library/Logs/autoxhs-auto-post.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+</dict>
+</plist>

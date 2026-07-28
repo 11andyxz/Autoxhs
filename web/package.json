@@ -15,7 +15,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "engage:auto": "tsx scripts/engageAuto.ts",
-    "engage:auto:dry": "tsx scripts/engageAuto.ts --dry-run"
+    "engage:auto:dry": "tsx scripts/engageAuto.ts --dry-run",
+    "post:auto": "tsx scripts/autoPost.ts",
+    "post:auto:dry": "tsx scripts/autoPost.ts --dry-run"
   },
   "dependencies": {
     "@react-pdf/renderer": "^4.5.1",

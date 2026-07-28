@@ -52,6 +52,14 @@ export default function XiaohongshuPage() {
   const [awaitingPostConfirmation, setAwaitingPostConfirmation] = useState(false);
   // 可见性：0=公开，1=仅自己可见。发布前为意向，发布后即时作用于该笔记（可逆）。
   const [visibility, setVisibility] = useState<0 | 1>(0);
+  // 声明原创：只在发布那一刻写进 business_binds（没有独立接口，发完改不了）。
+  const [declareOriginal, setDeclareOriginal] = useState(true);
+  // 话题校验：发布前看看哪些标签能变成可点击话题（匹配不到的会在发布时被丢掉）
+  const [topicCheck, setTopicCheck] = useState<{
+    matched: string[];
+    missing: string[];
+  } | null>(null);
+  const [checkingTopics, setCheckingTopics] = useState(false);
   const [publishedNoteId, setPublishedNoteId] = useState<string | null>(null);
   const [publishedShareLink, setPublishedShareLink] = useState<string | null>(null);
   const [settingPrivacy, setSettingPrivacy] = useState(false);
@@ -227,12 +235,54 @@ export default function XiaohongshuPage() {
       // 新内容 = 新的一篇,清掉上一篇已发布笔记的可见性上下文 + AI 配图候选 + 已生成的卡片
       setPublishedNoteId(null);
       setPublishedShareLink(null);
+      setTopicCheck(null);
       clearCover();
       setDeckKey((k) => k + 1);
     } catch {
       setError("网络连接失败,请稍后重试。");
     } finally {
       setLoading(false);
+    }
+  }
+
+  /**
+   * 校验标签能否变成可点击话题。小红书上没有同名话题的标签会在发布时被丢掉
+   * （只写文字不写 hash_tag 的「假话题」点不动，没有意义），发之前先看一眼。
+   */
+  async function handleCheckTopics() {
+    const tags = result?.tags ?? [];
+    if (tags.length === 0 || checkingTopics) return;
+    setCheckingTopics(true);
+    try {
+      const res = await fetch("/api/xiaohongshu/topics", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | {
+            success: boolean;
+            matched?: Array<{ id: string; name: string }>;
+            missing?: string[];
+            error?: string;
+          }
+        | null;
+      if (!json?.success) {
+        showToast(json?.error ?? "话题校验失败。");
+        return;
+      }
+      const matched = (json.matched ?? []).map((m) => m.name);
+      const missing = json.missing ?? [];
+      setTopicCheck({ matched, missing });
+      showToast(
+        missing.length === 0
+          ? `${matched.length} 个标签全部匹配到话题。`
+          : `${matched.length} 个匹配成功,${missing.length} 个没有同名话题。`,
+      );
+    } catch {
+      showToast("网络连接失败,请稍后重试。");
+    } finally {
+      setCheckingTopics(false);
     }
   }
 
@@ -435,6 +485,7 @@ export default function XiaohongshuPage() {
           coverImage: coverImage ?? undefined,
           coverFileId: coverFileId ?? undefined,
           privacy: visibility,
+          original: declareOriginal,
           // 若本篇是「从链接导入」来的，带上来源链接：发布成功后记入去重库
           sourceUrl: urlInput.trim() || undefined,
         }),
@@ -448,6 +499,9 @@ export default function XiaohongshuPage() {
             imageCount?: number;
             noteId?: string | null;
             shareLink?: string | null;
+            tags?: string[];
+            missingTags?: string[];
+            original?: boolean;
             error?: string;
           }
         | null;
@@ -463,9 +517,17 @@ export default function XiaohongshuPage() {
         setPublishedShareLink(json.shareLink ?? null);
         // 已在发布时按所选可见性写入 privacy_info.type，无需发后再改（避免竞态）
         const visLabel = visibility === 1 ? "仅自己可见" : "公开";
+        // 话题与原创都是发布那一刻写进 body 的，发完改不了 —— 如实回报落地情况
+        const topicNote = json.tags?.length ? ` · ${json.tags.length} 个话题` : " · 无话题";
+        const originalNote = json.original ? " · 已声明原创" : "";
+        const missingNote = json.missingTags?.length
+          ? `未匹配到话题、已丢弃：${json.missingTags.join("、")}。`
+          : "";
         setPublishFeedback({
           tone: "success",
-          message: `发布成功（${visLabel}）：已生成 ${count} 张长文图片并提交到当前登录的小红书账号。`,
+          message:
+            `发布成功（${visLabel}${topicNote}${originalNote}）：` +
+            `已生成 ${count} 张长文图片并提交到当前登录的小红书账号。${missingNote}`,
         });
       } else {
         setPublishFeedback({
@@ -513,6 +575,7 @@ export default function XiaohongshuPage() {
       setVisibility(0);
       setPublishedNoteId(null);
       setPublishedShareLink(null);
+      setTopicCheck(null);
       clearCover();
       setCoverPrompt("");
       setDeckKey((k) => k + 1);
@@ -754,24 +817,64 @@ export default function XiaohongshuPage() {
             <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
               <div className="flex items-center justify-between">
                 <h2 className="text-base font-semibold text-gray-900">相关标签</h2>
-                <button
-                  type="button"
-                  onClick={() => handleCopy(tagsLine, "已复制标签")}
-                  className="text-xs text-gray-500 transition hover:text-xhs"
-                >
-                  复制全部标签
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleCheckTopics}
+                    disabled={checkingTopics}
+                    className="text-xs text-gray-500 transition hover:text-xhs disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {checkingTopics ? "校验中…" : "校验话题"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleCopy(tagsLine, "已复制标签")}
+                    className="text-xs text-gray-500 transition hover:text-xhs"
+                  >
+                    复制全部标签
+                  </button>
+                </div>
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
-                {result.tags.map((tag, i) => (
-                  <span
-                    key={`${tag}-${i}`}
-                    className="rounded-full bg-rose-50 px-3 py-1 text-xs text-xhs"
-                  >
-                    {tag}
-                  </span>
-                ))}
+                {result.tags.map((tag, i) => {
+                  // 校验过之后：匹配到话题的标绿，没有同名话题的标灰并说明会被丢弃
+                  const name = tag.replace(/^#+/, "").trim();
+                  const missed = topicCheck?.missing.some(
+                    (m) => m.toLowerCase() === name.toLowerCase(),
+                  );
+                  const matched = topicCheck?.matched.some(
+                    (m) => m.toLowerCase() === name.toLowerCase(),
+                  );
+                  return (
+                    <span
+                      key={`${tag}-${i}`}
+                      title={
+                        missed
+                          ? "小红书上没有同名话题,发布时会被丢弃"
+                          : matched
+                            ? "已匹配到话题,发布后可点击"
+                            : undefined
+                      }
+                      className={`rounded-full px-3 py-1 text-xs ${
+                        missed
+                          ? "bg-gray-100 text-gray-400 line-through"
+                          : matched
+                            ? "bg-emerald-50 text-emerald-700"
+                            : "bg-rose-50 text-xhs"
+                      }`}
+                    >
+                      {tag}
+                    </span>
+                  );
+                })}
               </div>
+              <p className="mt-2 text-[11px] text-gray-400">
+                {topicCheck
+                  ? topicCheck.missing.length === 0
+                    ? "全部标签都能变成可点击话题。"
+                    : `${topicCheck.missing.length} 个标签在小红书上没有同名话题,发布时会被丢弃(不会写成点不动的假话题)。`
+                  : "发布时会自动查成真话题(可点击);查不到的标签会被丢弃。点「校验话题」可提前确认。"}
+              </p>
             </section>
 
             {/* 最终发布文案 */}
@@ -819,6 +922,23 @@ export default function XiaohongshuPage() {
                 )}
               </div>
 
+              {/* 声明原创：只能在发布那一刻写进笔记（没有独立接口，发完改不了） */}
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <label className="inline-flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={declareOriginal}
+                    onChange={(e) => setDeclareOriginal(e.target.checked)}
+                    disabled={publishingAction !== null}
+                    className="h-4 w-4 accent-xhs disabled:cursor-not-allowed"
+                  />
+                  <span className="text-sm font-medium text-gray-700">声明原创</span>
+                </label>
+                <span className="text-[11px] text-gray-400">
+                  只在发布那一刻写入,发布后无法再补声明。
+                </span>
+              </div>
+
               {/* 配图方式：文字卡（正文逐字入图，原有行为）/ 设计卡片（本地渲染的信息卡） */}
               <div className="mt-3 flex flex-wrap items-center gap-3">
                 <span className="text-sm font-medium text-gray-700">配图方式</span>
@@ -855,6 +975,7 @@ export default function XiaohongshuPage() {
                   body={cleanBody}
                   tags={result?.tags ?? []}
                   visibility={visibility}
+                  original={declareOriginal}
                   sourceUrl={urlInput.trim() || undefined}
                   watermark="@北美熊哥聊求职"
                   onPublished={({ noteId, shareLink }) => {

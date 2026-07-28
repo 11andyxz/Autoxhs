@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { CTA_LINE } from "@/lib/schema";
 import { getDoneNoteIds, markPublished, parseNoteId } from "@/lib/xiaohongshu/notesDb";
+import { normalizeTagNames } from "@/lib/xiaohongshu/topics";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,6 +21,7 @@ type PublishRequest = {
   privacy?: number; // 0=公开, 1=仅自己可见
   sourceUrl?: string; // 来源小红书链接：发布成功后据此把 note_id 记入去重库
   skipIfPublished?: boolean; // 批量用：发布前先查去重库，已发布过则跳过、不重复公开（幂等保护）
+  original?: boolean; // 声明原创，不传按 true
 };
 
 // 每张图约多少字（分页粒度）。实测一张图约 380~450 字填满，默认偏密以贴近人工长文；夹紧防溢出。
@@ -42,7 +44,17 @@ type RednoteAutoResponse = {
   detail?: unknown;
   code?: string | number;
   response?: unknown;
+  /** rednote 回报的发布选项落地情况（标签解析结果 / 是否声明原创） */
+  options?: {
+    tags?: unknown;
+    missing_tags?: unknown;
+    original?: unknown;
+  };
 };
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+}
 
 function extractText(value: unknown): string | null {
   if (typeof value === "string" && value.trim()) return value.trim();
@@ -89,10 +101,13 @@ export async function POST(req: NextRequest) {
 
   const title = (request.title ?? "").trim();
   const body = (request.body ?? "").trim();
-  const tags = (Array.isArray(request.tags) ? request.tags : [])
-    .filter((tag): tag is string => typeof tag === "string")
-    .map((tag) => tag.trim())
-    .filter(Boolean);
+  // 标签名交给 rednote 去解析成真话题（它会双写 desc + hash_tag）；这里只做去 # / 去重。
+  const tags = normalizeTagNames(
+    (Array.isArray(request.tags) ? request.tags : []).filter(
+      (tag): tag is string => typeof tag === "string",
+    ),
+  );
+  const original = request.original !== false;
   if (!title || !body) {
     return NextResponse.json({ success: false, error: "请先生成并保留标题和正文。" }, { status: 400 });
   }
@@ -147,8 +162,12 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         title,
         body,
-        // desc(caption) = CTA + 标签：把固定 CTA 放在标签前，让 caption 里也带上引导语
-        tags: [CTA_LINE, ...tags],
+        // tags 现在是**标签名**：rednote 会逐个查成真话题（id+link），双写 desc 与 hash_tag，
+        // 查不到的名字不写进 desc、只在 options.missing_tags 里回报。
+        tags,
+        // desc(caption) 的正文部分 = 固定 CTA；话题会被拼在它后面，引导语仍在标签之前。
+        desc_text: CTA_LINE,
+        original,
         cover_image: coverImage || undefined,
         cover_fileid: coverFileId || undefined,
         privacy,
@@ -214,6 +233,10 @@ export async function POST(req: NextRequest) {
       shareLink: typeof result.share_link === "string" ? result.share_link : null,
       // 是否已写入去重库：发布成功但未记录（如 DB 临时不可用）时为 false，客户端据此提醒重发风险。
       dedupRecorded,
+      // 真正写进笔记的话题 / 没匹配到话题被丢掉的标签名 / 是否声明了原创
+      tags: stringList(result.options?.tags),
+      missingTags: stringList(result.options?.missing_tags),
+      original: result.options?.original === true,
     });
   } catch (error) {
     const isAbort = (error as Error)?.name === "AbortError";

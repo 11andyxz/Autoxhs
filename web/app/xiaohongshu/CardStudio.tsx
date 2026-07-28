@@ -42,6 +42,8 @@ type Props = {
   tags: string[];
   /** 0=公开 1=仅自己可见，与页面上的可见性开关共用 */
   visibility: 0 | 1;
+  /** 声明原创，与页面上的开关共用（发布那一刻写进 business_binds，发完改不了） */
+  original: boolean;
   /** 「从链接导入」时的来源链接，发布成功后记入去重库 */
   sourceUrl?: string;
   watermark: string;
@@ -62,6 +64,7 @@ export default function CardStudio({
   body,
   tags,
   visibility,
+  original,
   sourceUrl,
   watermark,
   onPublished,
@@ -264,6 +267,7 @@ export default function CardStudio({
           width: size?.width,
           height: size?.height,
           privacy: visibility,
+          original,
           confirm,
           sourceUrl: sourceUrl?.trim() || undefined,
         }),
@@ -278,10 +282,20 @@ export default function CardStudio({
             noteId?: string | null;
             shareLink?: string | null;
             dedupRecorded?: boolean;
+            tags?: string[];
+            missingTags?: string[];
+            original?: boolean;
             error?: string;
           }
         | null;
       if (!json?.success) throw new Error(json?.error ?? "发布请求失败。");
+
+      // 话题/原创都在发布那一刻定死，如实回报：几个话题真的写进去了、哪些标签被丢了
+      const topicNote = json.tags?.length ? ` · ${json.tags.length} 个话题` : " · 无话题";
+      const originalNote = json.original ? " · 已声明原创" : "";
+      const missingNote = json.missingTags?.length
+        ? `未匹配到话题、已丢弃：${json.missingTags.join("、")}。`
+        : "";
 
       if (json.published) {
         onPublished({ noteId: json.noteId ?? null, shareLink: json.shareLink ?? null });
@@ -290,15 +304,18 @@ export default function CardStudio({
           sourceUrl?.trim() && json.dedupRecorded === false ? "（去重库未记录，重发有风险）" : "";
         setFeedback({
           tone: "success",
-          message: `发布成功（${visLabel}）：${json.imageCount ?? ids.length} 张设计卡已提交。${dedupWarn}`,
+          message:
+            `发布成功（${visLabel}${topicNote}${originalNote}）：` +
+            `${json.imageCount ?? ids.length} 张设计卡已提交。${dedupWarn}${missingNote}`,
         });
       } else {
         setFeedback({
           tone: "success",
           message:
             `预演完成：将发布 ${json.imageCount ?? ids.length} 张图 · ` +
-            `${visibility === 1 ? "仅自己可见" : "公开"} · caption 开头「${json.descPreview?.slice(0, 40) ?? ""}…」。` +
-            `图已上传，正式发布不会重复上传。`,
+            `${visibility === 1 ? "仅自己可见" : "公开"}${topicNote}${originalNote} · ` +
+            `caption 开头「${json.descPreview?.slice(0, 40) ?? ""}…」。` +
+            `${missingNote}图已上传，正式发布不会重复上传。`,
         });
       }
     } catch (err) {
