@@ -246,8 +246,11 @@ export async function expireOldSlots(beforeDate: string): Promise<number> {
  * ⚠️ 收成 **missed（不再重试）**，不是 failed。卡住的原因很可能是「笔记已经发出去了，
  * 只是记账那一步失败」—— 重试就会重复发一篇。宁可漏一个整点，也不要重复公开。
  * 日志里会写明是哪一行，需要的话人工判断后手动改回 pending。
+ *
+ * 阈值要大于「一篇最慢能跑多久」：查证/复核各带 3 次重试，最坏情况一篇能跑 40 分钟以上，
+ * 阈值太小会在人家还在跑的时候就把行收走（不会重复发，但会白跑一篇）。
  */
-export async function releaseStaleClaims(staleMinutes = 30): Promise<number> {
+export async function releaseStaleClaims(staleMinutes = 60): Promise<number> {
   await ensureAutoPostSchema();
   const p = getPool();
   const [res] = await p.query<ResultSetHeader>(

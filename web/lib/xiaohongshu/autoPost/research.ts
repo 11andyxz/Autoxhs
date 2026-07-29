@@ -98,8 +98,8 @@ function toStrings(raw: unknown, max = 12): string[] {
     .slice(0, max);
 }
 
-/** 用 web_search 跑一次调用并返回文本（strict json_schema 与工具混用时偶有拒绝，故只要求「输出 JSON」）。 */
-async function searchAndAnswer(prompt: string, timeoutMs: number): Promise<string> {
+/** 一次带 web_search 的调用。maxRetries 交给外层控制，这里只管发一次。 */
+async function searchOnce(prompt: string, timeoutMs: number): Promise<string> {
   const client = getClient(timeoutMs, 0);
   const response = await client.responses.create({
     model: getModel(),
@@ -110,6 +110,26 @@ async function searchAndAnswer(prompt: string, timeoutMs: number): Promise<strin
   const text = (response as { output_text?: string }).output_text ?? "";
   if (!text.trim()) throw new Error("联网查证返回为空");
   return text;
+}
+
+/**
+ * 用 web_search 跑一次调用并返回文本（strict json_schema 与工具混用时偶有拒绝，故只要求「输出 JSON」）。
+ *
+ * 带重试：这一步动辄跑几分钟、要开十几个官方页，`Request timed out.` / `Connection error.`
+ * 属于常态。不重试的话，一次网络抖动就让整篇作废（实测一天连废 3 篇）。
+ * 注意不能用 SDK 自带的 maxRetries —— 它会把超时时间翻倍地叠加，这里自己控制节奏。
+ */
+async function searchAndAnswer(prompt: string, timeoutMs: number): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await searchOnce(prompt, timeoutMs);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 10_000));
+    }
+  }
+  throw lastErr;
 }
 
 /**

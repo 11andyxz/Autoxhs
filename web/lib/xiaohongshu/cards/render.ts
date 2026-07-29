@@ -26,6 +26,49 @@ export type RenderedCard = {
 
 const NAV_TIMEOUT_MS = 60_000;
 const FIT_TIMEOUT_MS = 20_000;
+/**
+ * Chrome 启动超时。puppeteer 默认只等 30 秒，无人值守时不够用 ——
+ * 实测机器刚从睡眠醒来、或本机已有十几个 Chrome 进程（AdsPower 那套）时，
+ * 冷启动经常超过 30 秒，报「Timed out ... waiting for the WS endpoint URL」。
+ */
+const LAUNCH_TIMEOUT_MS = 120_000;
+const LAUNCH_ATTEMPTS = 3;
+
+const LAUNCH_ARGS = [
+  "--disable-gpu",
+  "--no-sandbox",
+  "--font-render-hinting=none",
+  // 下面几个都是为了砍掉冷启动开销：首启向导、默认浏览器检查、扩展、后台限流
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--disable-extensions",
+  "--disable-dev-shm-usage",
+  "--disable-background-timer-throttling",
+];
+
+/**
+ * 起一个 Chrome，失败就重试（启动失败几乎都是抢资源的瞬时问题，隔几秒就好）。
+ * 定时任务里这一步失败会让整篇作废，重试比重跑一遍流水线便宜太多。
+ */
+async function launchWithRetry(executablePath: string) {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= LAUNCH_ATTEMPTS; attempt += 1) {
+    try {
+      return await puppeteer.launch({
+        headless: true,
+        executablePath,
+        args: LAUNCH_ARGS,
+        timeout: LAUNCH_TIMEOUT_MS,
+      });
+    } catch (err) {
+      lastErr = err;
+      if (attempt < LAUNCH_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, attempt * 5000));
+      }
+    }
+  }
+  throw lastErr;
+}
 
 /**
  * 渲染卡片。only 传下标时只截那一张（用于「重生成这张」，约 1~2 秒）。
@@ -50,11 +93,7 @@ export async function renderCards(
   );
   if (!executablePath) throw new ChromeNotFoundError();
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath,
-    args: ["--disable-gpu", "--no-sandbox", "--font-render-hinting=none"],
-  });
+  const browser = await launchWithRetry(executablePath);
   try {
     const page = await browser.newPage();
     await page.setViewport({

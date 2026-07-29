@@ -24,8 +24,12 @@ import { loadEnvConfig } from "@next/env";
 loadEnvConfig(process.cwd(), false);
 
 const LOCK_FILE = path.join(os.tmpdir(), "autoxhs-auto-post.lock");
-/** 一篇的流水线（查证+写稿+复核+渲染+上传+发布）几分钟就够，超过 40 分钟视为上一轮死了 */
-const LOCK_STALE_MS = 40 * 60 * 1000;
+/**
+ * 一篇的流水线（查证+写稿+复核+渲染+上传+发布）正常 6~8 分钟，
+ * 但查证与复核各带 3 次重试，最坏情况能拖到 40 分钟以上 —— 阈值取 60 分钟，
+ * 且要与 db.ts 的 releaseStaleClaims 保持一致，避免「锁还在、行已被收走」。
+ */
+const LOCK_STALE_MS = 60 * 60 * 1000;
 
 function log(msg: string): void {
   console.log(`[${new Date().toISOString()}] ${msg}`);
