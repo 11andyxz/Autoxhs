@@ -454,6 +454,7 @@ export default function InterviewPage() {
           <div className="space-y-6">
             <BankPicker banks={banks} />
             <CramPicker />
+            <CodingPicker />
             <VocabManager />
           </div>
         )}
@@ -2397,6 +2398,67 @@ function CramPicker() {
               </div>
             </a>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const CODING_LABEL: Record<string, string> = {
+  "java-lambda": "Java Lambda",
+  mysql: "MySQL",
+  mongodb: "MongoDB",
+  design: "程序设计",
+  algorithm: "算法",
+};
+const CODING_ORDER = ["java-lambda", "mysql", "mongodb", "design", "algorithm"];
+
+/** 复习中心的「Coding 手感训练」卡片:经典题的参考代码逐字跟打(灰字答案),按遗忘曲线安排再敲。 */
+function CodingPicker() {
+  const [counts, setCounts] = useState<Array<{ category: string; total: number; due: number }> | null>(null);
+  useEffect(() => {
+    fetch("/api/job-hunter/interview/coding/problems?only=counts")
+      .then((r) => r.json())
+      .then((j) => setCounts(j?.success ? (j.counts as Array<{ category: string; total: number; due: number }>) : []))
+      .catch(() => setCounts([]));
+  }, []);
+  const total = (counts ?? []).reduce((n, c) => n + c.total, 0);
+  const due = (counts ?? []).reduce((n, c) => n + c.due, 0);
+  return (
+    <div className="rounded-2xl border border-indigo-200 bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-800">⌨️ Coding 手感训练</p>
+          <p className="mt-0.5 text-xs text-slate-400">
+            经典题(Java Lambda / MySQL / MongoDB / 程序设计，偶尔算法题)的参考答案以灰字铺好，题干中英双语，你一个字一个字跟着敲，练到不用想就写得出来。
+          </p>
+        </div>
+        <a
+          href="/job-hunter/interview/coding"
+          className="shrink-0 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700"
+        >
+          去敲代码 →
+        </a>
+      </div>
+      {counts === null ? (
+        <p className="mt-3 text-sm text-slate-400">正在加载……</p>
+      ) : total === 0 ? (
+        <p className="mt-3 text-xs text-slate-400">题库还是空的。进去点「导入经典题库」就能马上开练。</p>
+      ) : (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {counts
+            .filter((c) => c.total > 0)
+            .slice()
+            .sort((a, b) => CODING_ORDER.indexOf(a.category) - CODING_ORDER.indexOf(b.category))
+            .map((c) => (
+              <span key={c.category} className="rounded-full border border-slate-200 px-2.5 py-1 text-xs text-slate-600">
+                {CODING_LABEL[c.category] ?? c.category} {c.total}
+                {c.due > 0 && <span className="ml-1 text-rose-500">· {c.due} 待敲</span>}
+              </span>
+            ))}
+          {due > 0 && (
+            <span className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-600">今天 {due} 道待敲</span>
+          )}
         </div>
       )}
     </div>

@@ -3,6 +3,8 @@ import { getClient, getModel } from "@/lib/openai";
 import {
   BANK_SYSTEM,
   COACH_SYSTEM,
+  CODING_SYSTEM,
+  CODING_TRACE_SYSTEM,
   CRAM_ASK_SYSTEM,
   CRAM_CARDS_SYSTEM,
   CUSTOM_ANSWER_SYSTEM,
@@ -25,6 +27,8 @@ import {
 import {
   BANK_JSON_SCHEMA,
   COACH_JSON_SCHEMA,
+  CODING_JSON_SCHEMA,
+  CODING_TRACE_JSON_SCHEMA,
   CRAM_CARDS_JSON_SCHEMA,
   CUSTOM_ANSWER_JSON_SCHEMA,
   EXPLAIN_EXTRAS_JSON_SCHEMA,
@@ -38,6 +42,8 @@ import {
   SchemaValidationError,
   normalizeBank,
   normalizeCoach,
+  normalizeCodingProblems,
+  normalizeCodingTrace,
   normalizeCramCards,
   normalizeCustomAnswer,
   normalizeExplainExtras,
@@ -47,6 +53,8 @@ import {
   normalizeSkills,
   type BankResult,
   type Coach,
+  type CodingProblemGen,
+  type CodingTrace,
   type CramCards,
   type CustomAnswer,
   type ExplainExtras,
@@ -231,6 +239,56 @@ export function answerCustomQuestion(args: {
     "custom_answer",
     normalizeCustomAnswer,
     { timeoutMs: 52_000, maxRetries: 0 }, // 初次+修复共用此预算,给路由后续 DB 调用留头(maxDuration 60)
+  );
+}
+
+/** Coding 跟打:出一批经典题(Java Lambda / MySQL / MongoDB / 偶尔算法) */
+export function generateCodingProblems(args: {
+  categories: string[];
+  count: number;
+  difficulty: string;
+  focus: string;
+  existingTitles: string[];
+}): Promise<{ problems: CodingProblemGen[] }> {
+  const content = dataBlock([
+    { label: "REQUESTED CATEGORIES", body: args.categories.join(", ") },
+    { label: "REQUESTED COUNT (generate exactly this many)", body: String(args.count) },
+    { label: "DIFFICULTY PREFERENCE", body: args.difficulty },
+    { label: "FOCUS / EXTRA TOPICS (optional)", body: args.focus },
+    { label: "ALREADY IN THE LIBRARY (do NOT repeat these titles or their content)", body: args.existingTitles.join("\n") },
+  ]);
+  // 一次出多题属于「重输出」调用:给足单次超时并关掉 SDK 自动重试(超时后重跑会让等待翻倍)。
+  return callJson(
+    CODING_SYSTEM,
+    content,
+    CODING_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "coding_problems",
+    normalizeCodingProblems,
+    { timeoutMs: 150_000, maxRetries: 0 },
+  );
+}
+
+/** 跟打题「断点」:把参考代码按求值顺序拆成一步步,标出每步的返回类型和示例值。 */
+export function traceCodingSolution(args: {
+  title: string;
+  prompt: string;
+  setup: string;
+  lang: string;
+  solution: string;
+}): Promise<CodingTrace> {
+  const content = dataBlock([
+    { label: "PROBLEM", body: `${args.title}\n${args.prompt}` },
+    { label: "SETUP / CONTEXT", body: args.setup },
+    { label: "LANGUAGE", body: args.lang },
+    { label: "SOLUTION (snippets must be copied verbatim from here)", body: args.solution },
+  ]);
+  return callJson(
+    CODING_TRACE_SYSTEM,
+    content,
+    CODING_TRACE_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "coding_trace",
+    normalizeCodingTrace,
+    { timeoutMs: 52_000, maxRetries: 0 }, // 初次+修复共用此预算,给路由的 DB 调用留头(maxDuration 60)
   );
 }
 

@@ -118,7 +118,7 @@ async function main(): Promise<number> {
     for (const o of result.outcomes) {
       if (!o.ok) continue;
       log(
-        `结果 [${o.slot}:00]「${o.title}」${o.cards} 张 · 话题 ${o.tags?.length ?? 0} 个` +
+        `结果 [${o.slot}:00]「${o.title}」${o.angle ? `· ${o.angle} ` : ""}${o.cards} 张 · 话题 ${o.tags?.length ?? 0} 个` +
           (o.missingTags?.length ? `（丢弃 ${o.missingTags.join("、")}）` : "") +
           (o.shareLink ? ` · ${o.shareLink}` : ""),
       );

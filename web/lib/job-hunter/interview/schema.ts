@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { normalizeCode } from "./typing";
+
 /**
  * 专项面试训练(interview-prep)的结构化输出定义。
  * 四次模型调用各有一套 zod + JSON Schema:技能拆解 / 出题 / 评分 / 补强。
@@ -593,6 +595,70 @@ export function normalizeCramCards(raw: unknown): CramCards {
   return { diagrams };
 }
 
+/* ---------------- 跟打题「断点」:逐步拆解每个片段返回什么(类型 + 示例值) ---------------- */
+
+export const CODING_TRACE_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    sampleInput: {
+      type: "string",
+      description: "一小份示例输入数据(2~6 行,尽量短),让下面每一步的示例值有据可依。纯文本,可用简写。",
+    },
+    steps: {
+      type: "array",
+      description: "按「求值顺序」逐步拆解,4~10 步:从最内层的表达式一路算到最终结果。",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          snippet: {
+            type: "string",
+            description:
+              "这一步对应的代码片段,必须逐字来自参考代码(原样复制,不要改空格/大小写),这样才能在代码里高亮出来。",
+          },
+          type: {
+            type: "string",
+            description:
+              "这一步的返回类型。Java 写完整泛型(如 Stream<User>、Collector<User, ?, Map<String, Long>>、Function<User, String>);SQL/Mongo 写中间结果的形状(如 结果集(dept, salary) / 文档 {_id, total})。",
+          },
+          value: {
+            type: "string",
+            description: "按示例输入算出的这一步的值(短,一行以内;集合类只举 2~3 个元素,可用 … 省略)。",
+          },
+          note: { type: "string", description: "一句中文说明:这一步在干什么 / 为什么是这个类型。" },
+        },
+        required: ["snippet", "type", "value", "note"],
+      },
+    },
+  },
+  required: ["sampleInput", "steps"],
+} as const;
+
+export type CodingTraceStep = { snippet: string; type: string; value: string; note: string };
+export type CodingTrace = { sampleInput: string; steps: CodingTraceStep[] };
+
+const MAX_TRACE_STEPS = 12;
+
+export function normalizeCodingTrace(raw: unknown): CodingTrace {
+  const o = (raw ?? {}) as { sampleInput?: unknown; steps?: unknown };
+  const steps = (Array.isArray(o.steps) ? o.steps : [])
+    .map((s) => s as { snippet?: unknown; type?: unknown; value?: unknown; note?: unknown })
+    .map((s) => ({
+      snippet: typeof s.snippet === "string" ? s.snippet.replace(/\r\n?/g, "\n").trim().slice(0, 400) : "",
+      type: t(typeof s.type === "string" ? s.type : "", 200),
+      value: t(typeof s.value === "string" ? s.value : "", 300),
+      note: t(typeof s.note === "string" ? s.note : "", 300),
+    }))
+    .filter((s) => s.snippet && s.type)
+    .slice(0, MAX_TRACE_STEPS);
+  if (!steps.length) throw new SchemaValidationError("没有拆解出有效的步骤");
+  return {
+    sampleInput: typeof o.sampleInput === "string" ? o.sampleInput.trim().slice(0, 1000) : "",
+    steps,
+  };
+}
+
 /* ---------------- AI 校对润色:改语法 + 事实核查纠错,返回改后文本 + 纠正清单 ---------------- */
 
 export const REFINE_JSON_SCHEMA = {
@@ -620,6 +686,107 @@ export function normalizeRefine(raw: unknown): RefineResult {
     .map((n) => t(n, 300))
     .slice(0, 12);
   return { refined, notes };
+}
+
+/* ---------------- Coding 跟打题:AI 出一批经典题(Java Lambda / MySQL / MongoDB / 算法) ---------------- */
+
+export const CODING_CATEGORY_VALUES = ["java-lambda", "mysql", "mongodb", "design", "algorithm"] as const;
+export const CODING_LANG_VALUES = ["java", "sql", "javascript"] as const;
+
+export const CODING_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    problems: {
+      type: "array",
+      description: "本次生成的题目;数量见 REQUESTED COUNT,不要重复已有题目",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          category: {
+            type: "string",
+            enum: CODING_CATEGORY_VALUES as unknown as string[],
+            description: "题目分类",
+          },
+          lang: {
+            type: "string",
+            enum: CODING_LANG_VALUES as unknown as string[],
+            description: "参考代码的语言:java / sql / javascript(mongo shell)",
+          },
+          title: { type: "string", description: "中文短标题,点名考的技术点,不与已有题目重复" },
+          prompt: { type: "string", description: "中文题干:1~2 句说清要做什么" },
+          promptEn: { type: "string", description: "同一道题的英文题干(面试口径的英文表述,不是逐字翻译腔)" },
+          setup: { type: "string", description: "给定上下文:建表语句 / 集合结构 / 类签名 / 已有变量;可为空串" },
+          solution: {
+            type: "string",
+            description: "参考代码本体(要被逐字敲出来):4~22 行、每行 ≤80 字符、4 空格缩进、纯 ASCII、无代码围栏",
+          },
+          explanation: { type: "string", description: "中文要点:1~2 句讲关键点或经典追问/坑" },
+          difficulty: { type: "integer", description: "难度 1 简单 / 2 中等 / 3 偏难" },
+        },
+        required: ["category", "lang", "title", "prompt", "promptEn", "setup", "solution", "explanation", "difficulty"],
+      },
+    },
+  },
+  required: ["problems"],
+} as const;
+
+export type CodingProblemGen = {
+  category: (typeof CODING_CATEGORY_VALUES)[number];
+  lang: (typeof CODING_LANG_VALUES)[number];
+  title: string;
+  prompt: string;
+  promptEn: string;
+  setup: string;
+  solution: string;
+  explanation: string;
+  difficulty: number;
+};
+
+const MAX_CODING_PROBLEMS = 12;
+
+export function normalizeCodingProblems(raw: unknown): { problems: CodingProblemGen[] } {
+  const o = (raw ?? {}) as { problems?: unknown };
+  const seen = new Set<string>();
+  const problems = (Array.isArray(o.problems) ? o.problems : [])
+    .map((p) => p as Record<string, unknown>)
+    .map((p) => {
+      const category = (CODING_CATEGORY_VALUES as readonly string[]).includes(p.category as string)
+        ? (p.category as CodingProblemGen["category"])
+        : "algorithm";
+      const lang = (CODING_LANG_VALUES as readonly string[]).includes(p.lang as string)
+        ? (p.lang as CodingProblemGen["lang"])
+        : category === "mysql"
+          ? "sql"
+          : category === "mongodb"
+            ? "javascript"
+            : "java";
+      return {
+        category,
+        lang,
+        title: t(typeof p.title === "string" ? p.title : "", 120),
+        prompt: t(typeof p.prompt === "string" ? p.prompt : "", 1500),
+        promptEn: t(typeof p.promptEn === "string" ? p.promptEn : "", 1500),
+        setup: t(typeof p.setup === "string" ? p.setup : "", 1500),
+        // 跟打的目标文本必须先归一化(去围栏 / 展开 Tab / 中文标点换回 ASCII),否则有些字符根本敲不出来。
+        solution: normalizeCode(typeof p.solution === "string" ? p.solution : ""),
+        explanation: t(typeof p.explanation === "string" ? p.explanation : "", 1000),
+        difficulty: Number.isFinite(Number(p.difficulty))
+          ? Math.max(1, Math.min(3, Math.round(Number(p.difficulty))))
+          : 2,
+      };
+    })
+    .filter((p) => {
+      if (!p.title || !p.prompt || !p.solution) return false;
+      const key = `${p.category}|${p.title.toLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, MAX_CODING_PROBLEMS);
+  if (!problems.length) throw new SchemaValidationError("没有生成有效的题目");
+  return { problems };
 }
 
 /* ---------------- 自定义题:用户给一道面试题,AI 生成参考答案 + 分类 ---------------- */

@@ -40,6 +40,12 @@ export type OutlineParams = {
   cardCount?: number | "auto";
   /** 右下角水印，通常是账号名 */
   watermark?: string | null;
+  /**
+   * 追加给模型的额外要求（拼进【要求】）。
+   * 定时发布用它把「本篇的讲法 / 封面 badge / 别写成警告腔」传下来 —— 拆卡只看得到标题和正文，
+   * 不说清楚它就会自己另写一个警示味的封面。
+   */
+  hint?: string;
 };
 
 const SYSTEM_PROMPT = `你是小红书图文卡片的内容策划。把用户给的一篇笔记，拆成一叠可以直接发布的图片卡。
@@ -91,6 +97,8 @@ function buildUserInput(params: OutlineParams): string {
   } else {
     asks.push(`卡片数按信息量自己定，${MIN_CARDS}~${MAX_CARDS} 张之间；内容撑不满就少几张，不要注水`);
   }
+  const hint = params.hint?.trim();
+  if (hint) asks.push(hint);
   parts.push(`【要求】${asks.join("；")}`);
   return parts.join("\n\n");
 }

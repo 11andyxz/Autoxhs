@@ -55,6 +55,16 @@ const SR_STATE_CLASS: Record<SrState, string> = {
 
 const KIND_LABEL: Record<CramCardKind, string> = { word: "单词卡", block: "知识块", svg: "记忆图卡" };
 
+/** 「换卡自动念题」开关记在本地(默认开) */
+const AUTO_READ_KEY = "cram:autoRead";
+
+/** 题面的短版本号:文字改了 → 版本号变 → 绕开浏览器缓存重新取音频(djb2) */
+function textVersion(text: string): string {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
 function isDocx(file: File): boolean {
   return file.name.toLowerCase().endsWith(".docx") || file.type.includes("wordprocessingml");
 }
@@ -794,6 +804,55 @@ function CramReview({
     [cards],
   );
 
+  /* ---- 面试官念题:换卡自动朗读题面(音频在服务端按文本缓存,同一题只合成一次) ---- */
+  const [autoRead, setAutoRead] = useState(true);
+  const [blocked, setBlocked] = useState(false); // 浏览器拦了自动播放(还没交互过)
+  const readerRef = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => {
+    setAutoRead(localStorage.getItem(AUTO_READ_KEY) !== "0");
+  }, []);
+  useEffect(() => {
+    const a = readerRef.current;
+    return () => a?.pause();
+  }, []);
+
+  const cur = queue.length > 0 ? queue[idx] : null;
+  const curId = cur?.id ?? null;
+  const curFront = cur?.front ?? "";
+  const nextId = queue[idx + 1]?.id ?? null;
+
+  const readCard = useCallback((id: number, front: string) => {
+    // v 只是给浏览器缓存做版本号:卡片文字改了 → v 变 → 不会读到旧音。
+    const url = `/api/job-hunter/interview/cram/speak?id=${id}&v=${textVersion(front)}`;
+    let a = readerRef.current;
+    if (!a) {
+      a = new Audio();
+      a.preload = "auto";
+      readerRef.current = a;
+    }
+    a.pause();
+    if (a.src !== location.origin + url) a.src = url;
+    a.currentTime = 0;
+    setBlocked(false);
+    a.play().catch(() => setBlocked(true)); // 自动播放被拦:显示手动播放按钮
+  }, []);
+
+  // 换到新卡就念题(只念正面;svg 卡没有题面,跳过)。
+  useEffect(() => {
+    if (!autoRead || !curId || !curFront) return;
+    readCard(curId, curFront);
+  }, [autoRead, curId, curFront, readCard]);
+
+  // 顺手把下一张的音频预热进浏览器缓存,轮到它时零等待。
+  useEffect(() => {
+    if (!autoRead || !nextId) return;
+    const next = queue[idx + 1];
+    if (!next?.front) return;
+    const url = `/api/job-hunter/interview/cram/speak?id=${nextId}&v=${textVersion(next.front)}`;
+    const t = setTimeout(() => void fetch(url).catch(() => {}), 800);
+    return () => clearTimeout(t);
+  }, [autoRead, nextId, idx, queue]);
+
   function start() {
     const q = cards.filter((c) => c.isDue);
     if (!q.length) {
@@ -807,7 +866,6 @@ function CramReview({
     setMsg(null);
   }
 
-  const cur = queue.length > 0 ? queue[idx] : null;
   const needsReveal = cur ? (cur.kind === "word" ? true : cur.kind === "block" ? !!cur.front : false) : false;
   const showBack = revealed || !needsReveal;
 
@@ -832,9 +890,28 @@ function CramReview({
 
   return (
     <div ref={rootRef} className="rounded-2xl border border-emerald-200 bg-gradient-to-b from-emerald-50/70 to-white p-5 shadow-sm">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <p className="text-sm font-semibold text-emerald-900">🧠 遗忘曲线复习</p>
-        <span className="text-xs text-slate-400">共 {counts.total} 张</span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => {
+              const next = !autoRead;
+              setAutoRead(next);
+              localStorage.setItem(AUTO_READ_KEY, next ? "1" : "0");
+              if (!next) readerRef.current?.pause();
+              else if (curId && curFront) readCard(curId, curFront);
+            }}
+            title="换卡时自动用面试官的声音念题(音频已缓存，不会重复调用 API)"
+            className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition ${
+              autoRead
+                ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                : "border border-slate-200 text-slate-500 hover:border-emerald-300"
+            }`}
+          >
+            {autoRead ? "🔊 自动念题" : "🔇 自动念题"}
+          </button>
+          <span className="text-xs text-slate-400">共 {counts.total} 张</span>
+        </div>
       </div>
       <div className="mt-3 grid grid-cols-4 gap-2 text-center">
         <Stat label="今日到期" value={counts.due} tone="rose" />
@@ -848,8 +925,21 @@ function CramReview({
       {cur ? (
         <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
           <div className="mb-1 flex items-center justify-between">
-            <span className="text-xs text-slate-400">
+            <span className="flex items-center gap-2 text-xs text-slate-400">
               第 {idx + 1} / {queue.length} 张
+              {cur.front && (
+                <button
+                  onClick={() => readCard(cur.id, cur.front)}
+                  title="再念一遍题面"
+                  className={`rounded-md border px-1.5 py-0.5 text-xs transition ${
+                    blocked
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                      : "border-slate-200 text-slate-500 hover:border-emerald-300 hover:text-emerald-700"
+                  }`}
+                >
+                  🔊{blocked ? " 点这里念题" : ""}
+                </button>
+              )}
             </span>
             <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SR_STATE_CLASS[cur.state]}`}>
               {KIND_LABEL[cur.kind]} · {SR_STATE_LABEL[cur.state]}

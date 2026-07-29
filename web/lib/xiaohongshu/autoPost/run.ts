@@ -40,6 +40,7 @@ import {
   releaseStaleClaims,
   type PlanSlot,
 } from "./db";
+import { angleInstruction, angleOutlineHint, pickAngle, pickTitle, type Angle } from "./angles";
 import { ensureDailyPlan } from "./plan";
 import { researchTopic, verifyBody, type ResearchResult } from "./research";
 import { buildSourceLines } from "./sources";
@@ -102,6 +103,8 @@ export type SlotOutcome = {
   slot: number;
   topic: string;
   ok: boolean;
+  /** 本篇用的讲法与视觉（如 "误解纠正 · bold/neon"） */
+  angle?: string;
   title?: string;
   noteId?: string | null;
   shareLink?: string | null;
@@ -123,8 +126,8 @@ export type TickResult = {
   stats?: { total: number; done: number; pending: number; failed: number };
 };
 
-/** 把查证结果拼成给改写模型的「参考资料」。 */
-function buildSourceText(topic: string, research: ResearchResult): string {
+/** 把查证结果拼成给改写模型的「参考资料」（带上本篇的讲法，见 angles.ts）。 */
+function buildSourceText(topic: string, research: ResearchResult, angle: Angle): string {
   const lines = [
     `主题：${topic}`,
     "",
@@ -139,7 +142,9 @@ function buildSourceText(topic: string, research: ResearchResult): string {
     "",
     `资料时效：${research.asOf || "近期"}`,
     "",
-    "请据此写一篇小红书笔记：讲清规则、点出时间节点与踩坑代价。不要写来源署名（系统会自动加），不要写结尾引导语。",
+    angleInstruction(angle),
+    "",
+    "请据此写一篇小红书笔记，讲清规则与关键时间节点。不要写来源署名（系统会自动加），不要写结尾引导语。",
   );
   return lines.join("\n");
 }
@@ -153,8 +158,10 @@ export async function runOneSlot(
   log: Logger,
 ): Promise<SlotOutcome> {
   const base: SlotOutcome = { slot: slot.slot, topic: slot.topic, ok: false };
+  // 这个整点用哪种讲法 + 哪套视觉：按日期与整点轮换，避免 24 篇一个腔调一个长相
+  const angle = pickAngle(slot.planDate, slot.slot);
 
-  log(`[${slot.slot}:00] 主题「${slot.topic}」→ 联网查证官方口径…`);
+  log(`[${slot.slot}:00] 主题「${slot.topic}」· 讲法「${angle.label}」→ 联网查证官方口径…`);
   const research = await researchTopic(slot.topic, cfg.theme);
   log(
     `[${slot.slot}:00] 查到 ${research.facts.length} 条事实、${research.sources.length} 个官方来源` +
@@ -162,8 +169,9 @@ export async function runOneSlot(
   );
 
   log(`[${slot.slot}:00] 写文案…`);
-  const draft = await rewriteCopy(buildSourceText(slot.topic, research));
-  const title = draft.titles[0]?.text?.trim() || slot.topic;
+  const draft = await rewriteCopy(buildSourceText(slot.topic, research, angle));
+  // 不再永远取第一个 —— 改写提示词偏好痛点/避坑型标题，一直取 [0] 就是「每篇都像避坑文」的直接原因
+  const title = pickTitle(draft.titles, angle) || slot.topic;
 
   log(`[${slot.slot}:00] 联网复核事实…`);
   const verified = await verifyBody(draft.body, research, CTA_LINE);
@@ -175,16 +183,20 @@ export async function runOneSlot(
   // 不要自己拼到正文末尾：caption 一超字数，署名会跟正文一起被截掉（踩过）。
   const sourceLines = buildSourceLines(research.sources, MAX_SOURCE_LINES);
 
-  log(`[${slot.slot}:00] 拆设计卡…`);
+  log(`[${slot.slot}:00] 拆设计卡（${angle.style} / ${angle.palette}）…`);
   const outline = await buildOutline({
     title,
     // 卡片用不带署名的正文（署名进 caption 就够了，不必占一张卡）
     body: verified.body,
     tags: draft.tags,
-    style: "auto",
-    palette: "auto",
+    // 显式指定，不用 "auto"：auto 会按内容气质选，而这个题材永远被判成「避坑」→ 永远是 bold 黄底。
+    // buildOutline 会把这两个值硬覆盖到结果上，模型忽略要求也不影响。
+    style: angle.style,
+    palette: angle.palette,
     cardCount: "auto",
     watermark: cfg.watermark,
+    // 封面标题与 badge 也得跟着讲法走，否则拆卡会另写一个「先别…」+「避坑」的封面
+    hint: angleOutlineHint(angle),
   });
 
   const deckId = newDeckId();
@@ -224,6 +236,7 @@ export async function runOneSlot(
   return {
     ...base,
     ok: true,
+    angle: `${angle.label} · ${angle.style}/${angle.palette}`,
     title,
     noteId: result.noteId,
     shareLink: result.shareLink,
