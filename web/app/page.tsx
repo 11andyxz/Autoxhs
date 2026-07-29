@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: "Autoxhs 内部小工具集合。",
 };
 
-type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky" | "amber" | "fuchsia" | "indigo" | "teal" | "orange";
+type Accent = "rose" | "emerald" | "cyan" | "violet" | "sky" | "amber" | "fuchsia" | "indigo" | "teal" | "orange" | "blue";
 
 const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string }> = {
   rose: {
@@ -59,6 +59,11 @@ const ACCENTS: Record<Accent, { tile: string; hoverBorder: string; arrow: string
     hoverBorder: "hover:border-orange-300",
     arrow: "text-orange-600",
   },
+  blue: {
+    tile: "bg-blue-50 text-blue-600",
+    hoverBorder: "hover:border-blue-300",
+    arrow: "text-blue-600",
+  },
 };
 
 const TOOLS: Array<{
@@ -108,6 +113,14 @@ const TOOLS: Array<{
     desc: "按遗忘曲线复习你的简历面试题库(按人名区分)与单词本:选一份题库作答、AI 打分并给讲解,每题自动排下次复习;划词可查音标/翻译/发音并加入单词本。题库在「求职投递一条龙」里生成,进度都存数据库。",
     icon: "🧠",
     accent: "fuchsia",
+  },
+  {
+    href: "/ai-interview",
+    name: "AI 辅助面试",
+    en: "Live Interview Copilot",
+    desc: "面试进行中的实时外挂:同时听「面试官的声音 + 你的麦克风」并转写,一检测到对方在提问,就按你的简历/JD 生成能直接照着说的答案(可要更细/换个说法/反问问题);算法题一键截屏读题给解法。全程本机运行,结束后自动复盘并可导出记录。",
+    icon: "🎧",
+    accent: "blue",
   },
   {
     href: "/employee",

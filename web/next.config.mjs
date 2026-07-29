@@ -13,6 +13,8 @@ const nextConfig = {
   // 打包器看不出这层依赖，得显式告诉它一起带上，否则 Vercel 上这个接口会 404。
   outputFileTracingIncludes: {
     "/api/job-hunter/default-resume": ["./assets/default-resume/**"],
+    // 「AI 辅助面试」也会读这份默认简历(解析成纯文本当答案的事实依据)。
+    "/api/ai-interview/resume-text": ["./assets/default-resume/**"],
   },
 };
 

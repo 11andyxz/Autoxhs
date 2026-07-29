@@ -202,13 +202,27 @@ export async function generateImageFromPrompt(
 const DEFAULT_TRANSCRIBE_MODEL = "whisper-1"; // 通用稳定;可用 OPENAI_TRANSCRIBE_MODEL 覆盖(如 gpt-4o-transcribe)
 type Uploadable = Awaited<ReturnType<typeof toFile>>;
 
-/** 把一段录音转成文字。language 传 ISO-639-1(如 'en'/'zh')可提升准确度,不传则自动识别。 */
-export async function transcribeAudio(file: Uploadable, language?: string): Promise<string> {
+/** 转写提示词上限:Whisper 的 prompt 约 224 token,给 600 字符足够且不会被截得莫名其妙。 */
+const MAX_TRANSCRIBE_PROMPT = 600;
+
+/**
+ * 把一段录音转成文字。language 传 ISO-639-1(如 'en'/'zh')可提升准确度,不传则自动识别。
+ * hint 可给一小段「可能出现的专有名词」(公司名、技术栈),显著改善技术术语的拼写
+ * (面试实时转写会用到:Kafka / Kubernetes 这类词不给提示容易被听成别的)。
+ */
+export async function transcribeAudio(
+  file: Uploadable,
+  language?: string,
+  hint?: string,
+  model?: string,
+): Promise<string> {
   const client = getClient();
+  const prompt = hint?.trim().slice(0, MAX_TRANSCRIBE_PROMPT);
   const res = await client.audio.transcriptions.create({
     file,
-    model: process.env.OPENAI_TRANSCRIBE_MODEL || DEFAULT_TRANSCRIBE_MODEL,
+    model: model || process.env.OPENAI_TRANSCRIBE_MODEL || DEFAULT_TRANSCRIBE_MODEL,
     ...(language ? { language } : {}),
+    ...(prompt ? { prompt } : {}),
   });
   return (res.text ?? "").trim();
 }
