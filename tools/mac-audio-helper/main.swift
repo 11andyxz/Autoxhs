@@ -18,6 +18,7 @@
 // 编译运行见同目录 run.sh。
 
 import AVFoundation
+import CoreGraphics
 import CoreImage
 import CoreMedia
 import CryptoKit
@@ -34,6 +35,29 @@ let FRAME_MAX_WIDTH = 1_600
 /// 画面刷新间隔(秒):只是「保持最新一帧」,不是录像
 let FRAME_INTERVAL = 0.5
 let DEFAULT_PORT: UInt16 = 8756
+
+// MARK: - 日志
+
+/**
+ 打成 .app 由 LaunchServices 启动时,stderr 没有终端接着,失败原因(尤其是权限被拒)
+ 必须自己写进文件,页面才能把它显示出来。所以所有输出都走这里:stderr + ~/.autoxhs/helper.log。
+ */
+let logFileURL = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".autoxhs/helper.log")
+
+func logLine(_ text: String) {
+    let line = text.hasSuffix("\n") ? text : text + "\n"
+    FileHandle.standardError.write(line.data(using: .utf8)!)
+    let dir = logFileURL.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    if let handle = try? FileHandle(forWritingTo: logFileURL) {
+        handle.seekToEndOfFile()
+        handle.write(line.data(using: .utf8)!)
+        try? handle.close()
+    } else {
+        try? line.data(using: .utf8)!.write(to: logFileURL)
+    }
+}
 
 // MARK: - 共享状态
 
@@ -93,6 +117,27 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
     private let videoQueue = DispatchQueue(label: "sc.video")
 
     func start() async throws {
+        // ScreenCaptureKit 自己**不会**弹授权框,没权限就直接返回「已拒绝」。
+        // 所以先用 CoreGraphics 主动申请:第一次会弹出系统对话框,并把本 App
+        // 加进「系统设置 → 隐私与安全性 → 屏幕录制」列表。授权后需要重开一次进程才生效。
+        if !CGPreflightScreenCaptureAccess() {
+            logLine("[helper] 还没有屏幕录制权限,正在弹出系统授权对话框…")
+            let granted = CGRequestScreenCaptureAccess()
+            if !granted {
+                logLine(
+                    """
+
+                    [helper] 需要你点一下授权(只需一次):
+                      · 屏幕上应该弹出了「\"Autoxhs Helper\" 想要录制这台电脑的屏幕和音频」→ 点「允许」
+                      · 没看到弹窗的话:打开「系统设置 → 隐私与安全性 → 屏幕录制」,
+                        把列表里的 **Autoxhs Helper** 打开(没有就点 + 添加
+                        tools/mac-audio-helper/Autoxhs Helper.app)
+                      · 然后回页面**再点一次「▶ 启动辅助程序」**即可 —— 权限记在这个 App 自己名下,
+                        以后不管从哪里启动都算它的,不用再管终端/编辑器。
+                    """)
+                exit(2)
+            }
+        }
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
         guard let display = content.displays.first else {
@@ -124,9 +169,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
         try await stream.startCapture()
         self.stream = stream
-        FileHandle.standardError.write(
-            "[helper] 采集已启动:\(cfg.width)x\(cfg.height) @\(1 / FRAME_INTERVAL)fps,音频 \(SAMPLE_RATE)Hz/\(CHANNELS)ch\n"
-                .data(using: .utf8)!)
+        logLine("[helper] 采集已启动:\(cfg.width)x\(cfg.height) @\(1 / FRAME_INTERVAL)fps,音频 \(SAMPLE_RATE)Hz/\(CHANNELS)ch\n"
+                )
     }
 
     func stop() async {
@@ -148,8 +192,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        FileHandle.standardError.write(
-            "[helper] 采集中断:\(error.localizedDescription)\n".data(using: .utf8)!)
+        logLine("[helper] 采集中断:\(error.localizedDescription)\n")
         exit(1)
     }
 
@@ -357,13 +400,12 @@ func startServer(port: UInt16, onReady: @escaping () -> Void) throws -> NWListen
         case .ready:
             onReady()
         case .failed(let error):
-            FileHandle.standardError.write(
-                """
+            logLine("""
                 [helper] 端口 \(port) 起不来:\(error.localizedDescription)
                 → 多半是已经有一个辅助程序在跑了。查:pgrep -fl autoxhs-helper
                   想换端口:AUTOXHS_HELPER_PORT=8757 bash run.sh
 
-                """.data(using: .utf8)!)
+                """)
             exit(1)
         default:
             break
@@ -411,7 +453,7 @@ func startFakeSource(wavPath: String, framePath: String?) {
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in frameHub.set(jpeg) }
     }
     guard let wav = FileManager.default.contents(atPath: wavPath), wav.count > 44 else {
-        FileHandle.standardError.write("[helper] 自测:读不到 WAV \(wavPath)\n".data(using: .utf8)!)
+        logLine("[helper] 自测:读不到 WAV \(wavPath)\n")
         return
     }
     // 跳过 44 字节标准 WAV 头,后面按 Int16LE 单声道 48k 处理(生成时就按这个规格转好)
@@ -419,8 +461,7 @@ func startFakeSource(wavPath: String, framePath: String?) {
     let bytesPerTick = SAMPLE_RATE / 10 * 2  // 100ms
     var offset = 0
     permissionOK = true
-    FileHandle.standardError.write(
-        "[helper] 自测模式:用 \(wavPath) 当系统声音(\(pcm.count / 2 / SAMPLE_RATE)s)\n".data(using: .utf8)!)
+    logLine("[helper] 自测模式:用 \(wavPath) 当系统声音(\(pcm.count / 2 / SAMPLE_RATE)s)\n")
     Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
         guard audioHub.count > 0 else { return }
         if offset >= pcm.count {
@@ -440,12 +481,11 @@ let capture = Capture()
 
 // 已经有一个在跑就直接退出,别再抢端口、更别覆盖它的握手文件。
 if let running = existingInstancePid() {
-    FileHandle.standardError.write(
-        """
+    logLine("""
         [helper] 已经有一个辅助程序在跑了(pid \(running)),不用再开一个。
         → 要重启它:pkill -f autoxhs-helper,然后重新跑本脚本。
 
-        """.data(using: .utf8)!)
+        """)
     exit(0)
 }
 
@@ -456,13 +496,12 @@ do {
             _ = try writeInfoFile(port: port)
             ownsInfoFile = true
         } catch {
-            FileHandle.standardError.write(
-                "[helper] 写握手文件失败:\(error.localizedDescription)\n".data(using: .utf8)!)
+            logLine("[helper] 写握手文件失败:\(error.localizedDescription)\n")
             exit(1)
         }
     }
 } catch {
-    FileHandle.standardError.write("[helper] 启动失败:\(error.localizedDescription)\n".data(using: .utf8)!)
+    logLine("[helper] 启动失败:\(error.localizedDescription)\n")
     exit(1)
 }
 
@@ -481,8 +520,7 @@ if let fakeWav {
     startFakeSource(
         wavPath: fakeWav,
         framePath: ProcessInfo.processInfo.environment["AUTOXHS_HELPER_FAKE_FRAME"])
-    FileHandle.standardError.write(
-        "[helper] 就绪(自测模式):http://127.0.0.1:\(port)\n".data(using: .utf8)!)
+    logLine("[helper] 就绪(自测模式):http://127.0.0.1:\(port)\n")
     RunLoop.main.run()
     exit(0)
 }
@@ -490,15 +528,23 @@ if let fakeWav {
 Task {
     do {
         try await capture.start()
-        FileHandle.standardError.write(
-            "[helper] 就绪:http://127.0.0.1:\(port)(token 已写入 ~/.autoxhs/helper.json)\n按 Ctrl-C 退出。\n"
-                .data(using: .utf8)!)
+        logLine("[helper] 就绪:http://127.0.0.1:\(port)(token 已写入 ~/.autoxhs/helper.json)\n按 Ctrl-C 退出。\n"
+                )
     } catch {
-        FileHandle.standardError.write(
-            """
-            [helper] 拿不到屏幕采集权限或采集失败:\(error.localizedDescription)
-            → 打开「系统设置 → 隐私与安全性 → 屏幕录制」,把运行这个程序的终端 App 勾上,然后重开终端再跑一次。
-            """.data(using: .utf8)!)
+        logLine("""
+            [helper] 拿不到屏幕采集权限:\(error.localizedDescription)
+
+            怎么给权限(只需做一次,和用哪个终端/编辑器无关):
+              1. 打开「系统设置 → 隐私与安全性 → 屏幕录制」
+                 (命令:open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+              2. 把列表里的 **Autoxhs Helper** 打开;没有的话点 + 添加
+                 tools/mac-audio-helper/Autoxhs Helper.app
+              3. 回页面再点一次「▶ 启动辅助程序」
+
+            不想折腾权限的话,用虚拟声卡那条路:brew install blackhole-2ch(装完重启一次),
+            然后页面上「③ 怎么听到面试官」选「虚拟声卡 / 指定输入设备」——那条路不需要任何权限。
+
+            """)
         exit(1)
     }
 }

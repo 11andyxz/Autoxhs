@@ -1,3 +1,4 @@
+import { looksLikeEcho, spanOf } from "./echo";
 import { lastInterviewerText } from "./transcript";
 import type { Turn } from "./schema";
 
@@ -292,6 +293,23 @@ function tailInterviewerText(turns: Turn[], maxJoin = 2): string {
   return picked.map((t) => t.text).join(" ").trim() || lastInterviewerText(turns);
 }
 
+/**
+ * 从最后一句往前看:面试官那一轮之后,我有没有真的开口回答?
+ * 不算数的:①扬声器回声(和面试官同时、内容相同) ②「嗯 / 对 / okay」这类附和。
+ */
+function userAlreadyAnswering(turns: Turn[]): boolean {
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const t = turns[i];
+    if (t.role === "interviewer") return false; // 走到面试官那一句了,说明我还没开口
+    if (t.role !== "me") continue; // assistant(建议答案)不算
+    if (ACK.test(clean(t.text))) continue;
+    if (looksLikeEcho(t, turns)) continue;
+    // 和面试官这句话时间上大幅重叠、又不像回声(内容不同)→ 是插话,给它算作在答
+    if (wordCount(clean(t.text)) >= 2) return true;
+  }
+  return false;
+}
+
 function classify(text: string): QuestionKind {
   const t = text.toLowerCase();
   if (hits(t, CODING)) return "coding";
@@ -310,9 +328,11 @@ function classify(text: string): QuestionKind {
 export function detectQuestion(turns: Turn[], prevQuestion = ""): Detected {
   if (!turns.length) return NONE;
 
-  // 最后说话的人是我 → 我正在答,不该抢话。
-  const lastTurn = turns[turns.length - 1];
-  if (lastTurn.role !== "interviewer") return NONE;
+  // 我已经在答了 → 不抢话。
+  // 注意不能简单地看「最后一句是不是面试官」:外放(不戴耳机)时面试官的声音会被麦克风
+  // 录一遍,尾巴永远是「我」,那样就再也不会自动生成答案了(实测过)。所以这里要
+  // 排掉「回声」和「嗯/对」这类附和,只有真的开口答了才让路。
+  if (userAlreadyAnswering(turns)) return NONE;
 
   const raw = tailInterviewerText(turns);
   const text = clean(raw);

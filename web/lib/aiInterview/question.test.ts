@@ -138,3 +138,33 @@ describe("detectQuestion", () => {
     expect(d.question).toContain("Kubernetes");
   });
 });
+
+describe("detectQuestion · 外放(不戴耳机)场景", () => {
+  const QUESTION = "How do you keep a Kafka consumer idempotent when the same event is delivered twice?";
+
+  it("面试官的话被扬声器回灌进麦克风 → 照样要生成答案(不能被自己的回声挡住)", () => {
+    const d = detectQuestion([
+      { role: "interviewer", text: QUESTION, at: 10_000 },
+      // 回声:同一时刻、同样内容,被录成了「我」
+      { role: "me", text: "keep a Kafka consumer idempotent when the same event is delivered", at: 10_500 },
+    ]);
+    expect(d.shouldAnswer).toBe(true);
+    expect(d.question).toContain("Kafka consumer idempotent");
+  });
+
+  it("我真的开口答了 → 让路,不抢话", () => {
+    const d = detectQuestion([
+      { role: "interviewer", text: QUESTION, at: 10_000 },
+      { role: "me", text: "Sure, I give every event a stable business key and dedupe on it.", at: 18_000 },
+    ]);
+    expect(d.shouldAnswer).toBe(false);
+  });
+
+  it("「嗯 / okay」这类附和不算在答", () => {
+    const d = detectQuestion([
+      { role: "interviewer", text: QUESTION, at: 10_000 },
+      { role: "me", text: "Okay.", at: 16_000 },
+    ]);
+    expect(d.shouldAnswer).toBe(true);
+  });
+});

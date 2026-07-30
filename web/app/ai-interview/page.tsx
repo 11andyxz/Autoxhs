@@ -10,6 +10,7 @@ import {
   type InterviewerSource,
   type Segment,
 } from "@/lib/aiInterview/audio";
+import { looksLikeEcho } from "@/lib/aiInterview/echo";
 import { detectQuestion, type Detected, type QuestionKind } from "@/lib/aiInterview/question";
 import {
   LIVE_TRANSCRIPT_TURNS,
@@ -139,6 +140,9 @@ export default function AiInterviewPage() {
   const [history, setHistory] = useState<SessionMeta[]>([]);
   const [pairing, setPairing] = useState<{ code: string; urls: string[] } | null>(null);
   const [viewers, setViewers] = useState(0);
+  const [echoDropped, setEchoDropped] = useState(0);
+  const [helperBusy, setHelperBusy] = useState(false);
+  const [helperLog, setHelperLog] = useState("");
   const [viewing, setViewing] = useState<{ title: string; turns: Turn[]; summary: string } | null>(
     null,
   );
@@ -311,6 +315,56 @@ export default function AiInterviewPage() {
     void probeHelper();
   }, [probeHelper]);
 
+  /** 一键启动/停止辅助程序(它和这个页面在同一台机器上,权限继承启动 dev server 的那个终端) */
+  const toggleHelper = useCallback(
+    async (action: "start" | "stop") => {
+      setHelperBusy(true);
+      setHelperLog("");
+      setError("");
+      try {
+        await fetch("/api/ai-interview/helper", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        // 启动是异步的(要编译/申请权限),轮询到就绪或超时
+        for (let i = 0; i < 16; i += 1) {
+          await new Promise((r) => window.setTimeout(r, 600));
+          const res = await fetch("/api/ai-interview/helper");
+          const data = (await res.json()) as {
+            available?: boolean;
+            port?: number;
+            token?: string;
+            logTail?: string;
+          };
+          const ok = !!(data.available && data.port && data.token);
+          if (action === "start" && ok) {
+            setHelperInfo({ port: data.port!, token: data.token! });
+            return;
+          }
+          if (action === "stop" && !ok) {
+            setHelperInfo(null);
+            return;
+          }
+          if (i === 15) {
+            setHelperInfo(ok ? { port: data.port!, token: data.token! } : null);
+            if (action === "start" && !ok) {
+              setHelperLog(data.logTail || "");
+              setError(
+                "辅助程序没起来。多半是「屏幕录制」权限:到「系统设置 → 隐私与安全性 → 屏幕录制」放行启动 dev server 的那个终端,重开终端重跑 npm run dev。",
+              );
+            }
+          }
+        }
+      } catch {
+        setError("启动辅助程序失败,请在终端里跑 bash tools/mac-audio-helper/run.sh。");
+      } finally {
+        setHelperBusy(false);
+      }
+    },
+    [],
+  );
+
   const refreshDevices = useCallback(async () => {
     try {
       setDevices(await listAudioInputs());
@@ -470,6 +524,12 @@ export default function AiInterviewPage() {
         const text = (data.text || "").trim();
         if (!text) return;
         const role = segment.channel === "interviewer" ? "interviewer" : "me";
+        // 外放(不戴耳机)时,面试官的声音会被麦克风再录一遍。同一时刻、同样内容 → 判为回声丢掉,
+        // 否则字幕重复,而且尾巴永远是「我」,自动回答会被自己的回声挡住。
+        if (role === "me" && looksLikeEcho({ role, text, at: segment.startedAt }, turnsRef.current)) {
+          setEchoDropped((n) => n + 1);
+          return;
+        }
         setTurns((prev) => {
           const next = insertTurn(prev, { role, text, at: segment.startedAt });
           turnsRef.current = next;
@@ -542,6 +602,7 @@ export default function AiInterviewPage() {
     capRef.current = capture;
     setTurns([]);
     turnsRef.current = [];
+    setEchoDropped(0);
     setAnswer("");
     setDetected(null);
     lastAnsweredRef.current = "";
@@ -891,6 +952,9 @@ export default function AiInterviewPage() {
               refreshDevices,
               helperInfo,
               probeHelper,
+              toggleHelper,
+              helperBusy,
+              helperLog,
               useMic,
               setUseMic,
               autoAnswer,
@@ -906,6 +970,7 @@ export default function AiInterviewPage() {
               levels={levels}
               pending={pending}
               stats={stats}
+              echoDropped={echoDropped}
               autoAnswer={autoAnswer}
               setAutoAnswer={setAutoAnswer}
               onStop={stop}
@@ -1079,6 +1144,9 @@ type SetupProps = {
   refreshDevices: () => Promise<void>;
   helperInfo: { port: number; token: string } | null;
   probeHelper: () => Promise<void>;
+  toggleHelper: (action: "start" | "stop") => Promise<void>;
+  helperBusy: boolean;
+  helperLog: string;
   useMic: boolean;
   setUseMic: (v: boolean) => void;
   autoAnswer: boolean;
@@ -1242,12 +1310,20 @@ function SetupPanel(p: SetupProps) {
               这里选它作为输入。截屏解题会在你按下时另外申请一次共享。
             </div>
           </button>
-          <button
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => {
               p.setSourceKind("helper");
               void p.probeHelper();
             }}
-            className={`w-full rounded-xl border p-4 text-left transition ${
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                p.setSourceKind("helper");
+                void p.probeHelper();
+              }
+            }}
+            className={`w-full cursor-pointer rounded-xl border p-4 text-left transition ${
               p.sourceKind === "helper"
                 ? "border-blue-400 bg-blue-50"
                 : "border-slate-200 hover:border-slate-300"
@@ -1268,18 +1344,67 @@ function SetupPanel(p: SetupProps) {
             <div className="mt-1 text-xs leading-relaxed text-slate-500">
               不用共享标签页、也不用装虚拟声卡:一个本机小程序直接抓「这台电脑在播什么」和屏幕画面。
               面试官要求你共享整个屏幕、你还要切到 IDE 时用这条 —— 它一直看得见屏幕,截屏解题不用再弹共享选择器。
-              {!p.helperInfo && (
-                <>
-                  <br />
-                  先在终端里跑:
-                  <code className="mx-1 rounded bg-slate-100 px-1 py-0.5">
-                    bash tools/mac-audio-helper/run.sh
-                  </code>
-                  (首次要在「系统设置 → 隐私与安全性 → 屏幕录制」里放行运行它的那个终端)
-                </>
-              )}
             </div>
-          </button>
+
+            {/* 一键启动/停止:不用开终端敲命令 */}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {p.helperInfo ? (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void p.toggleHelper("stop");
+                  }}
+                  disabled={p.helperBusy}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400 disabled:opacity-50"
+                >
+                  {p.helperBusy ? "处理中…" : "停止辅助程序"}
+                </button>
+              ) : (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void p.toggleHelper("start");
+                  }}
+                  disabled={p.helperBusy}
+                  className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {p.helperBusy ? "启动中…(首次要编译,约 20 秒)" : "▶ 启动辅助程序"}
+                </button>
+              )}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void p.probeHelper();
+                }}
+                className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-500 hover:border-slate-300"
+              >
+                重新检测
+              </button>
+              <span className="text-[11px] text-slate-400">
+                面试结束点「停止」即可,不用去终端
+              </span>
+            </div>
+            {p.helperLog && (
+              <div className="mt-2">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void fetch("/api/ai-interview/helper", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ action: "open-settings" }),
+                    });
+                  }}
+                  className="mb-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 hover:border-amber-400"
+                >
+                  打开「屏幕录制」设置 → 勾上 Autoxhs Helper
+                </button>
+                <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-900/90 p-2 text-[10px] leading-relaxed text-slate-200">
+                  {p.helperLog}
+                </pre>
+              </div>
+            )}
+          </div>
           {p.sourceKind === "device" && (
             <Field label="输入设备">
               <div className="flex gap-2">
@@ -1360,6 +1485,7 @@ function LiveBar(p: {
   levels: Record<Channel, number>;
   pending: number;
   stats: { asked: number; said: number };
+  echoDropped: number;
   autoAnswer: boolean;
   setAutoAnswer: (v: boolean) => void;
   onStop: () => void;
@@ -1380,6 +1506,7 @@ function LiveBar(p: {
       <span className="text-xs text-slate-400">
         提问 {p.stats.asked} · 我说 {p.stats.said}
         {p.pending > 0 && ` · 转写中 ${p.pending}`}
+        {p.echoDropped > 0 && ` · 滤掉回声 ${p.echoDropped}`}
       </span>
       <label className="flex items-center gap-2 text-xs text-slate-500">
         <input
