@@ -331,7 +331,19 @@ final class HttpConnection {
     }
 }
 
-func startServer(port: UInt16) throws -> NWListener {
+/// 握手文件是否由本进程写的 —— 只有自己写的才允许删。
+/// (跑了第二个实例时,绝不能把还在正常服务的那个实例的文件删掉。)
+var ownsInfoFile = false
+let infoPathC = strdup(
+    FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".autoxhs/helper.json").path)
+
+/**
+ 起监听。**必须等到真的 ready 才写握手文件**:
+ 端口被占用时 NWListener 是异步进 .failed 的,早写文件会把上一个正常实例的 token 覆盖掉,
+ 结果那个实例还在服务、页面却拿着错的 token(实测踩过:/health 返回 tokenOk:false、/frame 403)。
+ */
+func startServer(port: UInt16, onReady: @escaping () -> Void) throws -> NWListener {
     let params = NWParameters.tcp
     params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .init(rawValue: port)!)
     let listener = try NWListener(using: params)
@@ -340,8 +352,36 @@ func startServer(port: UInt16) throws -> NWListener {
         registry.add(c) // 先登记再启动:回调期间必须有强引用活着
         c.start()
     }
+    listener.stateUpdateHandler = { state in
+        switch state {
+        case .ready:
+            onReady()
+        case .failed(let error):
+            FileHandle.standardError.write(
+                """
+                [helper] 端口 \(port) 起不来:\(error.localizedDescription)
+                → 多半是已经有一个辅助程序在跑了。查:pgrep -fl autoxhs-helper
+                  想换端口:AUTOXHS_HELPER_PORT=8757 bash run.sh
+
+                """.data(using: .utf8)!)
+            exit(1)
+        default:
+            break
+        }
+    }
     listener.start(queue: .global())
     return listener
+}
+
+/// 已经有一个活着的实例了吗?(读握手文件里的 pid 探一下)
+func existingInstancePid() -> Int32? {
+    guard let data = FileManager.default.contents(atPath: String(cString: infoPathC!)),
+        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let pid = obj["pid"] as? Int
+    else { return nil }
+    let p = Int32(pid)
+    if p == ProcessInfo.processInfo.processIdentifier { return nil }
+    return kill(p, 0) == 0 ? p : nil
 }
 
 // MARK: - 启动
@@ -397,28 +437,45 @@ func startFakeSource(wavPath: String, framePath: String?) {
 let port = UInt16(ProcessInfo.processInfo.environment["AUTOXHS_HELPER_PORT"] ?? "") ?? DEFAULT_PORT
 let fakeWav = ProcessInfo.processInfo.environment["AUTOXHS_HELPER_FAKE_WAV"]
 let capture = Capture()
-let infoURL: URL
+
+// 已经有一个在跑就直接退出,别再抢端口、更别覆盖它的握手文件。
+if let running = existingInstancePid() {
+    FileHandle.standardError.write(
+        """
+        [helper] 已经有一个辅助程序在跑了(pid \(running)),不用再开一个。
+        → 要重启它:pkill -f autoxhs-helper,然后重新跑本脚本。
+
+        """.data(using: .utf8)!)
+    exit(0)
+}
 
 do {
-    infoURL = try writeInfoFile(port: port)
-    _ = try startServer(port: port)
+    // 端口 ready 之后才写握手文件(见 startServer 的注释)
+    _ = try startServer(port: port) {
+        do {
+            _ = try writeInfoFile(port: port)
+            ownsInfoFile = true
+        } catch {
+            FileHandle.standardError.write(
+                "[helper] 写握手文件失败:\(error.localizedDescription)\n".data(using: .utf8)!)
+            exit(1)
+        }
+    }
 } catch {
     FileHandle.standardError.write("[helper] 启动失败:\(error.localizedDescription)\n".data(using: .utf8)!)
     exit(1)
 }
 
-let cleanupOnce = {
-    try? FileManager.default.removeItem(at: infoURL)
-}
 for sig in [SIGINT, SIGTERM] {
     signal(sig) { _ in
-        try? FileManager.default.removeItem(
-            at: FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".autoxhs/helper.json"))
-        exit(0)
+        // unlink 是 signal-safe 的;只删自己写的那份
+        if ownsInfoFile, let p = infoPathC { unlink(p) }
+        _exit(0)
     }
 }
-atexit { cleanupOnce() }
+atexit {
+    if ownsInfoFile, let p = infoPathC { unlink(p) }
+}
 
 if let fakeWav {
     startFakeSource(
