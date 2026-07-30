@@ -12,10 +12,14 @@ import {
 } from "@/lib/aiInterview/audio";
 import { looksLikeEcho } from "@/lib/aiInterview/echo";
 import { detectQuestion, type Detected, type QuestionKind } from "@/lib/aiInterview/question";
+import { splitLayered } from "@/lib/aiInterview/layered";
 import {
+  LANGS,
+  LANG_LABELS,
   LIVE_TRANSCRIPT_TURNS,
   MODES,
   MODE_LABELS,
+  transcribeLang,
   type AnswerKind,
   type Lang,
   type LiveState,
@@ -141,6 +145,8 @@ export default function AiInterviewPage() {
   const [pairing, setPairing] = useState<{ code: string; urls: string[] } | null>(null);
   const [viewers, setViewers] = useState(0);
   const [echoDropped, setEchoDropped] = useState(0);
+  /** 采集是否掉线(辅助程序被系统掐断 / 共享被停);副屏和顶栏都要看得见 */
+  const [sourceDown, setSourceDown] = useState(false);
   const [helperBusy, setHelperBusy] = useState(false);
   const [helperLog, setHelperLog] = useState("");
   const [viewing, setViewing] = useState<{ title: string; turns: Turn[]; summary: string } | null>(
@@ -512,7 +518,7 @@ export default function AiInterviewPage() {
       const cfg = cfgRef.current;
       const form = new FormData();
       form.append("audio", segment.blob, `seg.${segment.ext}`);
-      form.append("language", cfg.lang);
+      form.append("language", transcribeLang(cfg.lang));
       form.append("hint", buildHint(cfg.resume, cfg.jd, cfg.company));
 
       inflightRef.current += 1;
@@ -556,7 +562,33 @@ export default function AiInterviewPage() {
       onSegment: (segment) => void transcribe(segment),
       onLevel: (channel, level) => setLevels((prev) => ({ ...prev, [channel]: level })),
       onError: (_channel, message) => setError(message),
-      onEnded: () => setNotice("共享或设备已停止 —— 若面试还在继续,请结束本场后重新开始。"),
+      // 哪一路断了要分清:麦克风掉线只影响「复盘时看我自己说了什么」,
+      // 报成「采集停止、去重启辅助程序」是误导(实测踩过:辅助程序明明健康)。
+      onEnded: (channel) => {
+        if (channel === "me") {
+          setNotice("麦克风断开了,正在重新接上…(不影响听面试官,只影响复盘时看你自己说了什么)");
+          void (async () => {
+            try {
+              await capRef.current?.startMic();
+              setNotice("");
+            } catch {
+              setNotice(
+                "麦克风没能重新接上(可能被别的 App 占用)。听面试官和生成答案都不受影响;要恢复记录你自己的话,结束本场后重开一次。",
+              );
+            }
+          })();
+          return;
+        }
+        setSourceDown(true);
+        setNotice("面试官声道已停止且没能自动恢复 —— 请在「本机系统声音」里重新启动辅助程序,或结束本场重来。");
+      },
+      onSourceState: (channel, up) => {
+        if (channel !== "interviewer") return; // 麦克风的状态不该影响副屏那个「采集中断」灯
+        setSourceDown(!up);
+        setNotice(
+          up ? "" : "采集被系统中断(息屏/换显示器等),正在自动重连…期间听不到对方说话。",
+        );
+      },
       onHeartbeat,
     });
 
@@ -603,6 +635,7 @@ export default function AiInterviewPage() {
     setTurns([]);
     turnsRef.current = [];
     setEchoDropped(0);
+    setSourceDown(false);
     setAnswer("");
     setDetected(null);
     lastAnsweredRef.current = "";
@@ -855,6 +888,7 @@ export default function AiInterviewPage() {
       label: answerSource === "screen" ? "截屏解题" : ANSWER_LABEL[answerKind],
       answer,
       streaming,
+      sourceDown,
       transcript: turns.slice(-LIVE_TRANSCRIPT_TURNS),
     };
     const since = performance.now() - pubLastRef.current;
@@ -879,6 +913,7 @@ export default function AiInterviewPage() {
     phase,
     question,
     sendSnapshot,
+    sourceDown,
     streaming,
     turns,
   ]);
@@ -971,6 +1006,7 @@ export default function AiInterviewPage() {
               pending={pending}
               stats={stats}
               echoDropped={echoDropped}
+              sourceDown={sourceDown}
               autoAnswer={autoAnswer}
               setAutoAnswer={setAutoAnswer}
               onStop={stop}
@@ -1180,18 +1216,19 @@ function SetupPanel(p: SetupProps) {
           </Field>
           <div className="space-y-4">
             <Field label="回答语言">
-              <div className="flex gap-2">
-                {(["en", "zh"] as Lang[]).map((l) => (
+              <div className="grid gap-2">
+                {LANGS.map((l) => (
                   <button
                     key={l}
                     onClick={() => p.setLang(l)}
-                    className={`flex-1 rounded-lg border px-3 py-2 text-sm transition ${
+                    className={`rounded-lg border px-3 py-2 text-left text-sm transition ${
                       p.lang === l
                         ? "border-blue-400 bg-blue-50 text-blue-700"
                         : "border-slate-200 text-slate-600 hover:border-slate-300"
                     }`}
                   >
-                    {l === "en" ? "English" : "中文"}
+                    <span className="font-medium">{LANG_LABELS[l].name}</span>
+                    <span className="ml-2 text-xs text-slate-400">{LANG_LABELS[l].desc}</span>
                   </button>
                 ))}
               </div>
@@ -1486,6 +1523,7 @@ function LiveBar(p: {
   pending: number;
   stats: { asked: number; said: number };
   echoDropped: number;
+  sourceDown: boolean;
   autoAnswer: boolean;
   setAutoAnswer: (v: boolean) => void;
   onStop: () => void;
@@ -1496,9 +1534,11 @@ function LiveBar(p: {
     <div className="sticky top-0 z-10 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-slate-200 bg-white/95 px-4 py-3 shadow-sm backdrop-blur">
       <span className="flex items-center gap-2 text-sm font-semibold text-slate-800">
         <span
-          className={`h-2 w-2 rounded-full ${live ? "animate-pulse bg-rose-500" : "bg-slate-300"}`}
+          className={`h-2 w-2 rounded-full ${
+            live ? (p.sourceDown ? "animate-pulse bg-amber-500" : "animate-pulse bg-rose-500") : "bg-slate-300"
+          }`}
         />
-        {live ? "进行中" : "已结束"}
+        {live ? (p.sourceDown ? "采集中断 · 重连中" : "进行中") : "已结束"}
       </span>
       <span className="font-mono text-sm text-slate-600">{fmtClock(p.elapsed)}</span>
       <Meter label="面试官" level={p.levels.interviewer} on={live} />
@@ -1611,6 +1651,7 @@ function AnswerPanel(p: {
   onStopStream: () => void;
 }) {
   const live = p.phase === "live";
+  const layered = splitLayered(p.answer);
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -1639,15 +1680,43 @@ function AnswerPanel(p: {
         </div>
       )}
 
-      <div className="min-h-[220px] whitespace-pre-wrap text-[15px] leading-7 text-slate-900 lg:min-h-[380px]">
-        {p.answer || (
+      <div className="min-h-[220px] lg:min-h-[380px]">
+        {!p.answer && (
           <span className="text-sm text-slate-400">
             {live
               ? "等对方提问 —— 检测到问题会自动出现在这里(也可以按 ⌥A 立刻要一份)。"
               : "这场已结束。"}
           </span>
         )}
-        {p.streaming && <span className="ml-0.5 animate-pulse text-slate-400">▍</span>}
+        {/* 「英文 + 中文速读」时模型输出三段;其余情况(或模型没按格式)原样显示 */}
+        {p.answer && layered.plain && (
+          <div className="whitespace-pre-wrap text-[15px] leading-7 text-slate-900">
+            {layered.plain}
+            {p.streaming && <span className="ml-0.5 animate-pulse text-slate-400">▍</span>}
+          </div>
+        )}
+        {p.answer && !layered.plain && (
+          <div className="space-y-3">
+            {layered.gist && (
+              <div className="rounded-xl bg-slate-100 px-3 py-2 text-[15px] font-medium leading-7 text-slate-700">
+                <div className="mb-0.5 text-[11px] uppercase tracking-wide text-slate-400">速读</div>
+                {/* 速读是「每行一个维度」的分行要点,换行必须保留 */}
+                <div className="whitespace-pre-wrap">{layered.gist}</div>
+              </div>
+            )}
+            {layered.speak && (
+              <div className="whitespace-pre-wrap text-[17px] leading-8 text-slate-900">
+                {layered.speak}
+                {p.streaming && <span className="ml-0.5 animate-pulse text-slate-400">▍</span>}
+              </div>
+            )}
+            {layered.extra && (
+              <div className="text-xs leading-relaxed text-slate-400">
+                还可以补:{layered.extra}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {live && (

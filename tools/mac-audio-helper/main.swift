@@ -45,8 +45,15 @@ let DEFAULT_PORT: UInt16 = 8756
 let logFileURL = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent(".autoxhs/helper.log")
 
+private let logStamp: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm:ss"
+    return f
+}()
+
 func logLine(_ text: String) {
-    let line = text.hasSuffix("\n") ? text : text + "\n"
+    // 带时间戳:排查「多久断一次」时,没有时间戳只能靠外面另开一个进程打时间(踩过)
+    let line = "[\(logStamp.string(from: Date()))] " + (text.hasSuffix("\n") ? text : text + "\n")
     FileHandle.standardError.write(line.data(using: .utf8)!)
     let dir = logFileURL.deletingLastPathComponent()
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -107,6 +114,10 @@ let frameHub = FrameHub()
 let token = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
     .map { String(format: "%02x", $0) }.joined()
 var permissionOK = false
+/// 系统音走 Core Audio tap(和屏幕采集无关,别人截图打不断);建不起来时回落到 SCK 音轨
+let systemTap = SystemAudioTap()
+/// 对外报的采样率:tap 起来了就用 tap 的真实值
+var effectiveSampleRate: Int { systemTap.running ? Int(systemTap.sampleRate) : SAMPLE_RATE }
 
 // MARK: - 采集
 
@@ -151,7 +162,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
             display: display, excludingApplications: [], exceptingWindows: [])
 
         let cfg = SCStreamConfiguration()
-        cfg.capturesAudio = true
+        // tap 已经在管系统音了,SCK 就只负责画面 —— 这样 SCK 被系统掐断也只影响截屏,不影响听
+        cfg.capturesAudio = !systemTap.running
         cfg.sampleRate = SAMPLE_RATE
         cfg.channelCount = CHANNELS
         // 不要把「本程序自己发出的声音」录进去(它本来也不发声,保险起见)
@@ -164,13 +176,20 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
         cfg.queueDepth = 3
         cfg.showsCursor = true
 
+        if let old = self.stream {
+            try? await old.stopCapture()
+            self.stream = nil
+        }
         let stream = SCStream(filter: filter, configuration: cfg, delegate: self)
-        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        if !systemTap.running {
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        }
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
         try await stream.startCapture()
         self.stream = stream
-        logLine("[helper] 采集已启动:\(cfg.width)x\(cfg.height) @\(1 / FRAME_INTERVAL)fps,音频 \(SAMPLE_RATE)Hz/\(CHANNELS)ch\n"
-                )
+        logLine(
+            "[helper] 画面采集已启动:\(cfg.width)x\(cfg.height) @\(1 / FRAME_INTERVAL)fps"
+                + (systemTap.running ? "(音频走 Core Audio tap,不受此流影响)" : ",音频走 SCK 音轨 \(SAMPLE_RATE)Hz"))
     }
 
     func stop() async {
@@ -191,8 +210,56 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
         }
     }
 
+    /**
+     系统把采集掐断了(息屏/锁屏、换显示器、系统「正在录屏」提示里点了停止、显示配置变化…)。
+     **绝对不能就此退出**:面试进行到一半耳朵没了,页面还以为一切正常(实测踩过)。
+     这里自己爬起来重连,一直试到成功。
+     */
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        logLine("[helper] 采集中断:\(error.localizedDescription)\n")
+        // 记全量错误信息:localizedDescription 只是一句笼统的中文,真正能定位的是 domain+code
+        // (SCStreamError 的 -3817=用户停止 / -3821=显示器列表变化 等)。
+        let ns = error as NSError
+        logLine(
+            "[helper] 采集中断:\(error.localizedDescription) [domain=\(ns.domain) code=\(ns.code) info=\(ns.userInfo.keys.sorted().joined(separator: ","))] → 自动重启采集…"
+        )
+        self.stream = nil
+        let stoppedAt = Date()
+        Task { await self.restartUntilBack(stoppedAt: stoppedAt) }
+    }
+
+    /**
+     断流期间没有任何样本产生。页面那边是按**样本时钟**推进时间的,所以如果什么都不补,
+     缺口两侧的音频会被直接拼在一起:字幕时间戳整体偏移,而且断点前后的两句话可能被
+     当成同一段送去转写。这里按缺口时长补等长静音,时间轴保持诚实,VAD 也会正常断句。
+     */
+    private func pushSilence(ms: Int) {
+        guard ms > 0, audioHub.count > 0 else { return }
+        var left = min(ms, 30_000) * (SAMPLE_RATE / 1000) * 2  // 上限 30s,别一次塞太大
+        let chunk = SAMPLE_RATE / 10 * 2  // 100ms 一块
+        while left > 0 {
+            let n = min(chunk, left)
+            audioHub.push(Data(count: n))
+            left -= n
+        }
+    }
+
+    private func restartUntilBack(stoppedAt: Date) async {
+        for attempt in 1...600 {  // 每次最多等 5 秒,够撑很久;面试期间必须自己回来
+            let delay = min(5.0, 0.5 * Double(attempt))
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            do {
+                try await start()
+                let gapMs = Int(Date().timeIntervalSince(stoppedAt) * 1000)
+                pushSilence(ms: gapMs)
+                logLine("[helper] 采集已恢复(第 \(attempt) 次尝试,补了 \(gapMs)ms 静音对齐时间轴)")
+                return
+            } catch {
+                if attempt == 1 || attempt % 10 == 0 {
+                    logLine("[helper] 重启采集失败(第 \(attempt) 次):\(error.localizedDescription)")
+                }
+            }
+        }
+        logLine("[helper] 反复重启失败,退出。")
         exit(1)
     }
 
@@ -310,7 +377,8 @@ final class HttpConnection {
 
         if path == "/health" {
             let body = """
-                {"ok":true,"sampleRate":\(SAMPLE_RATE),"channels":\(CHANNELS),\
+                {"ok":true,"sampleRate":\(effectiveSampleRate),"channels":\(CHANNELS),\
+                "audioBackend":"\(systemTap.running ? "coreaudio-tap" : "screencapturekit")",\
                 "permission":\(permissionOK),"needsToken":true,"tokenOk":\(ok)}
                 """
             return send(status: "200 OK", type: "application/json", body: Data(body.utf8))
@@ -523,6 +591,18 @@ if let fakeWav {
     logLine("[helper] 就绪(自测模式):http://127.0.0.1:\(port)\n")
     RunLoop.main.run()
     exit(0)
+}
+
+// 先接系统音(tap 与屏幕采集互不相干);失败就回落到 SCK 音轨
+do {
+    try systemTap.start()
+} catch {
+    logLine(
+        """
+        [helper] Core Audio tap 没起来:\(error.localizedDescription)
+        → 回落到 ScreenCaptureKit 音轨(能用,但别的 App 截图时会被系统掐断约 1 秒)。
+          想彻底不受干扰:到「系统设置 → 隐私与安全性 → 仅系统录音」把 Autoxhs Helper 打开,再重启本程序。
+        """)
 }
 
 Task {

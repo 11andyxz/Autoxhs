@@ -2,13 +2,25 @@ import { toFile } from "openai";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { LIMITS } from "@/lib/aiInterview/schema";
-import { looksLikeHallucination } from "@/lib/aiInterview/transcript";
+import { echoesPrompt, looksLikeHallucination } from "@/lib/aiInterview/transcript";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
 import { transcribeAudio } from "@/lib/openai";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+
+/**
+ * 这个功能用的转写模型。默认 gpt-transcribe —— 2026-07-29 用同一段音频实测对比:
+ *   模型                    5.35s 语音     3s 近似静音的噪声
+ *   whisper-1               ~900ms        每次都吐「Thank you for watching.」
+ *   gpt-4o-mini-transcribe  ~600ms        **把 prompt 原样吐回来**(而且把 idempotent 听成 item potent)
+ *   gpt-4o-transcribe       ~690ms        也会漏出 prompt 片段
+ *   gpt-transcribe          ~840ms        **三次全空 → 零幻觉**,技术术语拼写正确
+ * 速度和 whisper-1 基本持平,但噪声上不再凭空造句 —— 实时面试里这一点比几十毫秒重要得多。
+ * 可用 AI_INTERVIEW_TRANSCRIBE_MODEL 覆盖。
+ */
+const TRANSCRIBE_MODEL = process.env.AI_INTERVIEW_TRANSCRIBE_MODEL || "gpt-transcribe";
 
 // 只允许 ISO-639-1 两位语言码,避免把任意串塞给 API。
 const LANG_RE = /^[a-z]{2}$/;
@@ -53,10 +65,12 @@ export async function POST(req: NextRequest) {
       file,
       language,
       hint,
-      process.env.AI_INTERVIEW_TRANSCRIBE_MODEL,
+      TRANSCRIBE_MODEL,
     );
     // 安静片段上的字幕垃圾(网址 / "Thanks for watching")当没听到,别进字幕也别去触发回答。
-    if (looksLikeHallucination(text)) {
+    // 有些转写模型在静音片段上会**把 prompt 原样吐回来**(实测 gpt-4o-mini-transcribe 每次都这样),
+    // 那会把简历/JD 里的术语当成面试官说的话写进字幕。这条守卫和模型无关,换模型也不会漏。
+    if (echoesPrompt(text, hint) || looksLikeHallucination(text, language)) {
       return NextResponse.json({ success: true, text: "" });
     }
     return NextResponse.json({ success: true, text });

@@ -20,8 +20,33 @@ export const MODE_LABELS: Record<Mode, { name: string; desc: string }> = {
   meeting: { name: "普通会议", desc: "会议/电话沟通,简洁的中立回答" },
 };
 
-export const LANGS = ["zh", "en"] as const;
+/**
+ * 回答语言:
+ *  - en    纯英文(干净,英文面试直接照读)
+ *  - en-zh 英文面试 + 中文速读:上面一行中文骨架(术语保持英文)让你一眼读懂,下面英文照着说
+ *  - zh    中文面试(答案就是要说的话,技术术语仍保持英文)
+ */
+export const LANGS = ["en", "en-zh", "zh"] as const;
 export type Lang = (typeof LANGS)[number];
+
+export const LANG_LABELS: Record<Lang, { name: string; desc: string }> = {
+  en: { name: "English", desc: "纯英文,直接照读" },
+  "en-zh": { name: "英文 + 中文速读", desc: "中文抓逻辑,英文照着说" },
+  zh: { name: "中文", desc: "中文面试;术语保留英文" },
+};
+
+/**
+ * 转写接口要的 ISO-639-1 两位码。en-zh 的**音频是英文**,别把 "en-zh" 直接传过去
+ * (那样正则校验不过,会退化成自动识别,反而更容易听错)。
+ */
+export function transcribeLang(lang: Lang): "en" | "zh" {
+  return lang === "zh" ? "zh" : "en";
+}
+
+/** 这个语言设定是不是「中文速读 + 英文照说」的双层输出 */
+export function isLayered(lang: Lang): boolean {
+  return lang === "en-zh";
+}
 
 export const STYLES = ["short", "detailed"] as const;
 /** short:一两句能马上说出口;detailed:结构完整但仍是口语。 */
@@ -206,6 +231,8 @@ export type LiveState = {
   label: string;
   answer: string;
   streaming: boolean;
+  /** 采集是否中断了(辅助程序被系统掐断 / 共享被停) —— 副屏要看得见,别以为一切正常 */
+  sourceDown: boolean;
   /** 最近几句字幕(倒数在后) */
   transcript: Turn[];
 };
@@ -223,6 +250,7 @@ export const EMPTY_LIVE_STATE: LiveState = {
   label: "",
   answer: "",
   streaming: false,
+  sourceDown: false,
   transcript: [],
 };
 
@@ -249,6 +277,7 @@ export function parseLiveState(v: unknown): Omit<LiveState, "v" | "at"> {
     label: clip(b.label, 32),
     answer: clip(b.answer, LIMITS.prevAnswer),
     streaming: b.streaming === true,
+    sourceDown: b.sourceDown === true,
     transcript: parseTurns(b.transcript, LIVE_TRANSCRIPT_TURNS),
   };
 }

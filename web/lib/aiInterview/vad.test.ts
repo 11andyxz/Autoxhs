@@ -79,12 +79,14 @@ describe("stepVad", () => {
   });
 
   it("停顿后隔十几秒的下一个问题也要听得见", () => {
+    // 静音用 0.0005:实测系统音的数字静音是 0.00003,麦克风底噪 0.002~0.01,
+    // 中间那种「0.001」是合成信号才有的怪值(比自适应底噪高、又比门槛低),不拿它当静音。
     const { events } = run([
-      ...rep(0.001, 15),
+      ...rep(0.0005, 15),
       ...speech(40),
       ...rep(0.0005, 200), // 中间静音十几秒(面试官在等你回答)
       ...speech(40),
-      ...rep(0.001, 15),
+      ...rep(0.0005, 15),
     ]);
     expect(events).toEqual(["start", "stop", "start", "stop"]);
   });
@@ -94,6 +96,22 @@ describe("stepVad", () => {
     const jitter = Array.from({ length: 30 }, (_, i) => (i % 2 === 0 ? 0.25 : 0.004));
     const { events } = run([...rep(0.001, 15), ...jitter, ...rep(0.001, 15)]);
     expect(events).toEqual(["start", "stop"]);
+  });
+
+  /* ---------- 回归:2026-07-29 实测「Zoom 电平的语音一段都切不出来」 ---------- */
+
+  it("很轻的音源(Zoom 经系统音,峰值只有 0.048)也要能切出段", () => {
+    // 把 SPEECH 整体衰减到 6%,模拟实测的 Zoom 电平(p50 0.0016 / 峰值 0.048)。
+    // absFloor 曾经是 0.006(照 Chrome 标签页音频的 0.28~0.38 调的),
+    // 结果这种电平下 0 段 —— 面试官问了什么完全看不见。
+    const quiet = speech(60).map((v) => v * 0.06);
+    const { events } = run([...rep(0.00003, 15), ...quiet, ...rep(0.00003, 15)]);
+    expect(events).toEqual(["start", "stop"]);
+  });
+
+  it("绝对下限不能高到盖住自适应底噪(不然轻音源直接哑掉)", () => {
+    // 这条是给未来改参数的人看的:absFloor 只是兜底,别当主门槛
+    expect(DEFAULT_VAD.absFloor).toBeLessThanOrEqual(0.002);
   });
 
   it("人声不参与噪声底:说完一句后门槛不该被抬高", () => {

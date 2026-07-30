@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { splitLayered } from "@/lib/aiInterview/layered";
 import { EMPTY_LIVE_STATE, MODE_LABELS, type LiveState } from "@/lib/aiInterview/schema";
 
 /**
@@ -106,13 +107,24 @@ export default function LiveViewPage() {
     if (box && stickRef.current) box.scrollTop = box.scrollHeight;
   }, [state.answer]);
 
+  const layered = splitLayered(state.answer);
   // 只有「Mac 那边正在面试」时,长时间没新帧才算异常;没开始时本来就没人推,别误报。
   const stale = state.live && receivedAt > 0 && now - receivedAt > STALE_MS;
   const elapsed = state.live && receivedAt ? state.elapsedMs + (now - receivedAt) : state.elapsedMs;
   const font = SIZES[sizeIdx];
 
   return (
-    <main className="flex min-h-screen flex-col bg-slate-950 text-slate-100">
+    <main
+      className="flex min-h-screen flex-col bg-slate-950 text-slate-100"
+      // 避开灵动岛/刘海与底部横条:横屏时灵动岛在左边,会压住「建议这样说」和答案的第一列(实测)。
+      // 竖屏、没有灵动岛的机型上这些值是 0,布局不受影响。
+      style={{
+        paddingLeft: "env(safe-area-inset-left)",
+        paddingRight: "env(safe-area-inset-right)",
+        paddingTop: "env(safe-area-inset-top)",
+        paddingBottom: "env(safe-area-inset-bottom)",
+      }}
+    >
       {/* 顶栏 */}
       <header className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-slate-800 px-4 py-2 text-xs text-slate-400">
         <span className="flex items-center gap-1.5">
@@ -132,7 +144,9 @@ export default function LiveViewPage() {
               : stale
                 ? "Mac 端已暂停"
                 : state.live
-                  ? "进行中"
+                  ? state.sourceDown
+                    ? "⚠️ 采集中断,重连中"
+                    : "进行中"
                   : "未开始"}
         </span>
         <span className="font-mono">{fmtClock(elapsed)}</span>
@@ -203,10 +217,26 @@ export default function LiveViewPage() {
                 const el = e.currentTarget;
                 stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
               }}
-              className="flex-1 overflow-y-auto whitespace-pre-wrap pb-4 font-medium leading-[1.6] text-white"
+              className="flex-1 overflow-y-auto pb-4 font-medium leading-[1.6] text-white"
               style={{ fontSize: `${font}px` }}
             >
-              {state.answer || (
+              {/* 中文速读放在最上面:扫一眼抓逻辑,再看下面的英文照着说 */}
+              {layered.gist && (
+                <p
+                  className="mb-3 whitespace-pre-wrap rounded-lg bg-slate-800/70 px-3 py-2 leading-relaxed text-sky-200"
+                  style={{ fontSize: `${Math.round(font * 0.72)}px` }}
+                >
+                  {layered.gist}
+                </p>
+              )}
+              {layered.speak && <p className="whitespace-pre-wrap">{layered.speak}</p>}
+              {layered.extra && (
+                <p className="mt-3 text-slate-500" style={{ fontSize: `${Math.round(font * 0.5)}px` }}>
+                  还可以补:{layered.extra}
+                </p>
+              )}
+              {layered.plain && <p className="whitespace-pre-wrap">{layered.plain}</p>}
+              {!state.answer && (
                 <span className="text-base font-normal text-slate-500">
                   对方一提问,这里就会出现可以直接照着说的话。
                 </span>

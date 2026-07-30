@@ -18,7 +18,14 @@
  */
 
 export type VadConfig = {
-  /** 绝对静音门槛:再安静的环境也不认为低于这个值是人声 */
+  /**
+   * 绝对下限:只是兜底,防止在数字静音上被极小的浮点噪声触发。
+   * **千万别把它调高当主门槛用** —— 真正干活的是自适应底噪(noiseFloor × ratio)。
+   * 实测各路音源的语音电平差两个数量级:Chrome 标签页音频峰值 0.28~0.38,
+   * 而 Zoom 经系统音出来只有 0.048(p50 仅 0.0016),数字静音是 0.00003。
+   * 这个值曾经写成 0.006(照 Chrome 调的),结果 Zoom 那条路整句话**一段都切不出来**
+   * (实测:125 个块只有 9% 过线 → 0 段),面试官问了什么完全看不见。
+   */
   absFloor: number;
   /** 门槛 = max(absFloor, 噪声底 * ratio) */
   ratio: number;
@@ -42,7 +49,7 @@ export type VadConfig = {
 };
 
 export const DEFAULT_VAD: VadConfig = {
-  absFloor: 0.006,
+  absFloor: 0.0012,
   ratio: 3,
   hysteresis: 0.65,
   onsetMs: 140,

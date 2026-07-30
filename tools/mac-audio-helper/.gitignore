@@ -1,5 +1,4 @@
 autoxhs-helper
 Autoxhs Helper.app/
 helper.log
-helper.out
-helper.err
+.build-sha

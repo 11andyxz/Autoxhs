@@ -44,8 +44,10 @@ export type CaptureHandlers = {
   onSegment: (segment: Segment) => void;
   onLevel: (channel: Channel, level: number) => void;
   onError: (channel: Channel, message: string) => void;
-  /** 用户点了「停止共享」或设备被拔掉 */
+  /** 用户点了「停止共享」或设备被拔掉(不可恢复) */
   onEnded: (channel: Channel) => void;
+  /** 采集掉线 / 恢复(辅助程序被系统掐断后会自动重连,期间 up=false) */
+  onSourceState?: (channel: Channel, up: boolean) => void;
   /**
    * 不受标签页节流影响的心跳(~200ms 一次,由音频线程驱动)。
    * 页面把「等对方说完再回答」这类延时判断挂在这里,而不是 setTimeout。
@@ -485,6 +487,8 @@ export class LiveCapture {
   /** 走辅助程序时:画面从它的 /frame 拿,不需要再申请屏幕共享 */
   private helper: { port: number; token: string } | null = null;
   private helperAbort: AbortController | null = null;
+  /** stop() 之后不再重连 */
+  private stopping = false;
   private timer: number | null = null;
   private t0 = 0;
   private lastBeat = 0;
@@ -623,23 +627,55 @@ export class LiveCapture {
     });
     if (!res.ok || !res.body) throw new Error("辅助程序的音频流打不开。");
 
-    // 后台一直读,直到 stop() 取消
-    void (async () => {
-      const reader = res.body!.getReader();
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value?.length) pipeline.push(value);
-        }
-        if (!controller.signal.aborted) this.handlers.onEnded("interviewer");
-      } catch {
-        if (!controller.signal.aborted) {
-          this.handlers.onError("interviewer", "和辅助程序的连接断了,请确认它还在运行。");
-          this.handlers.onEnded("interviewer");
-        }
+    // 后台一直读,直到 stop() 取消;中途断了自己重连(辅助程序被系统掐断后会重启并换 token)
+    void this.pumpHelper(res, pipeline, controller);
+  }
+
+  /**
+   * 一直读辅助程序的 PCM 流;流断了就自己重连。
+   *
+   * 为什么必须重连:macOS 会因为息屏/换显示器/系统那个「正在录屏」提示等原因掐断 SCStream,
+   * 辅助程序重启采集后**会换一个新 token**,所以重连要重新问一次 /api/ai-interview/helper。
+   * 实测过一次「面试中途耳朵没了、页面还显示进行中」——这条路不能只弹提示就算完。
+   */
+  private async pumpHelper(
+    res: Response,
+    pipeline: PcmPipeline,
+    controller: AbortController,
+  ): Promise<void> {
+    const reader = res.body!.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value?.length) pipeline.push(value);
       }
-    })();
+    } catch {
+      /* 断了,下面统一处理 */
+    }
+    if (controller.signal.aborted || this.stopping) return;
+
+    this.handlers.onSourceState?.("interviewer", false);
+    // 重连:辅助程序可能正在自我重启,端口/token 都要重新问
+    for (let attempt = 1; attempt <= 60; attempt += 1) {
+      if (this.stopping) return;
+      await new Promise((r) => window.setTimeout(r, Math.min(3_000, 500 * attempt)));
+      try {
+        const info = (await fetch("/api/ai-interview/helper").then((r) => r.json())) as {
+          available?: boolean;
+          port?: number;
+          token?: string;
+        };
+        if (!info.available || !info.port || !info.token) continue;
+        await this.startFromHelper(info.port, info.token);
+        this.handlers.onSourceState?.("interviewer", true);
+        return;
+      } catch {
+        /* 再试 */
+      }
+    }
+    this.handlers.onError("interviewer", "和辅助程序断开且重连失败,请在页面上重新启动辅助程序。");
+    this.handlers.onEnded("interviewer");
   }
 
   /** 辅助程序那条路不需要 AudioContext,但会话时钟(t0)还是要有 */
@@ -740,6 +776,7 @@ export class LiveCapture {
   }
 
   stop(): void {
+    this.stopping = true;
     if (this.timer !== null) {
       window.clearInterval(this.timer);
       this.timer = null;

@@ -106,10 +106,71 @@ const HALLUCINATION_PATTERNS: RegExp[] = [
   /^(?:请不吝点赞|感谢观看|谢谢观看|请订阅|订阅我的频道|明镜与点点栏目).*$/,
 ];
 
-export function looksLikeHallucination(text: string): boolean {
+/** 只有标点/空白/点点点(听到的其实是静音或环境噪声) */
+const PUNCT_ONLY = /^[\s.,、。·…!?!?~\-—_"'“”()()\[\]:;:;]+$/;
+
+/**
+ * 同一小段重复刷屏:whisper 在噪声上最典型的幻觉形态,
+ * 实测出现过「無垢無缺無缺無缺…」这种整屏重复(2026-07-29 真实面试录到)。
+ */
+function isRepeatedJunk(t: string): boolean {
+  const compact = t.replace(/\s+/g, "");
+  if (compact.length < 12) return false;
+  // ① 整条就是某个小片段的重复(从头对齐)
+  for (let unit = 1; unit <= 6; unit += 1) {
+    const times = Math.floor(compact.length / unit);
+    if (times < 5) continue;
+    if (compact.slice(0, unit).repeat(times) === compact.slice(0, unit * times)) return true;
+  }
+  // ② 用字太少:重复片段不一定从第一个字开始(实测那条是「無垢」+「無缺」×N),
+  //    但这种刷屏的共同点是「很长、却只用了几个字」。正常句子的用字比例远高于此。
+  const distinct = new Set(compact).size;
+  if (distinct / compact.length < 0.25) return true;
+  return false;
+}
+
+/** 中日韩字符占比 */
+function cjkRatio(t: string): number {
+  const letters = t.replace(/[\s\d\p{P}\p{S}]/gu, "");
+  if (!letters.length) return 0;
+  const cjk = (letters.match(/[\u3000-\u9fff\uf900-\ufaff]/g) || []).length;
+  return cjk / letters.length;
+}
+
+/**
+ * 判断一条转写是不是幻觉/垃圾。language 传本场设定的语言(如 "en"):
+ * 明确设了英文却吐出成片中日韩字符,基本可以断定是噪声幻觉 —— 实测面试中出现过
+ * 「Redeployment, Communications, Campaign…」这类词汇沙拉和整屏重复的日文汉字。
+ */
+export function looksLikeHallucination(text: string, language?: string): boolean {
   const t = text.trim();
   if (!t) return false;
-  return HALLUCINATION_PATTERNS.some((re) => re.test(t));
+  if (HALLUCINATION_PATTERNS.some((re) => re.test(t))) return true;
+  if (PUNCT_ONLY.test(t)) return true;
+  if (isRepeatedJunk(t)) return true;
+  if (language === "en" && cjkRatio(t) > 0.3) return true;
+  return false;
+}
+
+/**
+ * 转写结果是不是「把我们给的 prompt 提示词原样吐回来了」。
+ *
+ * 实测:静音片段喂给 gpt-4o-mini-transcribe / gpt-4o-transcribe 时,它会把 prompt 里的
+ * 术语列表当成识别结果返回(「Kafka, Kubernetes, Spring Boot, JVM…」)。这些词来自简历/JD,
+ * 看起来非常像面试官真说了什么,会污染字幕并触发生成答案。和具体模型无关,统一挡在这里。
+ */
+export function echoesPrompt(text: string, hint?: string): boolean {
+  const t = text.trim();
+  if (!t || !hint?.trim()) return false;
+  const norm = (v: string) =>
+    v.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, " ").trim().split(/\s+/).filter(Boolean);
+  const words = norm(t);
+  if (!words.length) return false;
+  const bag = new Set(norm(hint));
+  if (!bag.size) return false;
+  const hit = words.filter((w) => bag.has(w)).length;
+  // 整句几乎全是提示词里的词 → 是回声而不是人说的话(正常句子会有动词、冠词等提示词里没有的词)
+  return hit / words.length >= 0.8;
 }
 
 /** 最后一句面试官说的话(找不到返回空串) */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  echoesPrompt,
   formatWindow,
   insertTurn,
   lastInterviewerText,
@@ -108,6 +109,22 @@ describe("looksLikeHallucination", () => {
     expect(looksLikeHallucination("感谢观看")).toBe(true);
   });
 
+  it("认出噪声上的重复刷屏(真实面试里录到过整屏「無缺無缺…」)", () => {
+    expect(looksLikeHallucination("無垢無缺無缺無缺無缺無缺無缺無缺無缺無缺無缺無缺")).toBe(true);
+    expect(looksLikeHallucination("哈哈哈哈哈哈哈哈哈哈哈哈哈哈")).toBe(true);
+  });
+
+  it("只有标点/点点点的当没听到", () => {
+    expect(looksLikeHallucination(". . . . . . .")).toBe(true);
+    expect(looksLikeHallucination("——…")).toBe(true);
+  });
+
+  it("设了英文却吐出成片中日韩字符 → 判为幻觉", () => {
+    expect(looksLikeHallucination("無垢無缺 これは", "en")).toBe(true);
+    // 中文场次不适用这条(中文答案里夹英文术语很正常)
+    expect(looksLikeHallucination("介绍一下你的项目", "zh")).toBe(false);
+  });
+
   it("不误伤正常回答(哪怕里面提到网址或订阅)", () => {
     expect(
       looksLikeHallucination("We push metrics to https://grafana.internal and alert on p99."),
@@ -115,6 +132,34 @@ describe("looksLikeHallucination", () => {
     expect(looksLikeHallucination("I built the subscribe flow for the billing service.")).toBe(false);
     expect(looksLikeHallucination("Tell me about yourself")).toBe(false);
     expect(looksLikeHallucination("")).toBe(false);
+    // 英文场次里正常的英文句子不能被 CJK 规则误杀
+    expect(
+      looksLikeHallucination("Can you explain how the Java memory model guarantees visibility?", "en"),
+    ).toBe(false);
+    // 英文场次里夹一两个中文词也不算(比例不够)
+    expect(looksLikeHallucination("We call it 灰度 release in our team", "en")).toBe(false);
+  });
+});
+
+describe("echoesPrompt", () => {
+  const hint = "Kafka, Kubernetes, Spring Boot, JVM, volatile, ConcurrentHashMap, Visa, Stripe";
+
+  it("识别出「把提示词原样吐回来」(实测 gpt-4o-mini-transcribe 在静音上每次都这样)", () => {
+    expect(echoesPrompt("Kafka, Kubernetes, Spring Boot, JVM, volatile, ConcurrentHashMap", hint)).toBe(true);
+    expect(echoesPrompt("volatile", hint)).toBe(true);
+    expect(echoesPrompt("Stripe Visa Kafka", hint)).toBe(true);
+  });
+
+  it("正常问题里出现这些术语不算回声(有动词/冠词等提示词外的词)", () => {
+    expect(
+      echoesPrompt("How do you keep a Kafka consumer idempotent when the same event is delivered twice?", hint),
+    ).toBe(false);
+    expect(echoesPrompt("Tell me about your Kubernetes migration at Visa.", hint)).toBe(false);
+  });
+
+  it("没有提示词 / 空文本时不判", () => {
+    expect(echoesPrompt("Kafka", "")).toBe(false);
+    expect(echoesPrompt("", hint)).toBe(false);
   });
 });
 
