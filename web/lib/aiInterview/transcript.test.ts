@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { formatWindow, insertTurn, lastInterviewerText, toMarkdown, windowFor } from "./transcript";
+import {
+  formatWindow,
+  insertTurn,
+  lastInterviewerText,
+  looksLikeHallucination,
+  toMarkdown,
+  windowFor,
+} from "./transcript";
 import type { Turn } from "./schema";
 
 const T = (role: Turn["role"], text: string, at: number): Turn => ({ role, text, at });
@@ -87,6 +94,27 @@ describe("lastInterviewerText", () => {
   });
   it("没有面试官说话时返回空串", () => {
     expect(lastInterviewerText([T("me", "B", 1)])).toBe("");
+  });
+});
+
+describe("looksLikeHallucination", () => {
+  it("认出安静片段上的字幕垃圾", () => {
+    // 实测麦克风通道在没人说话时反复吐这条
+    expect(looksLikeHallucination("https://www.linkedin.com.au")).toBe(true);
+    expect(looksLikeHallucination("www.github.com")).toBe(true);
+    expect(looksLikeHallucination("Thanks for watching!")).toBe(true);
+    expect(looksLikeHallucination("Please subscribe")).toBe(true);
+    expect(looksLikeHallucination("字幕由 Amara.org 社区提供")).toBe(true);
+    expect(looksLikeHallucination("感谢观看")).toBe(true);
+  });
+
+  it("不误伤正常回答(哪怕里面提到网址或订阅)", () => {
+    expect(
+      looksLikeHallucination("We push metrics to https://grafana.internal and alert on p99."),
+    ).toBe(false);
+    expect(looksLikeHallucination("I built the subscribe flow for the billing service.")).toBe(false);
+    expect(looksLikeHallucination("Tell me about yourself")).toBe(false);
+    expect(looksLikeHallucination("")).toBe(false);
   });
 });
 

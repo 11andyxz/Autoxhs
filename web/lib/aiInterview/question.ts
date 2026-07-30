@@ -45,9 +45,11 @@ const FILLERS =
   /\b(?:um+|uh+|erm+|hmm+|like,|you know,|i mean,|sort of|kind of,|so yeah|okay so|alright so)\b/gi;
 const CN_FILLERS = /(?:那个那个|就是就是|嗯+、?|啊+、|呃+、?|然后呢?就是)/g;
 
-// 英文疑问开头 / 命令式提问("tell me about" 也是提问)
+// 真疑问词开头:口语里以这些词起头的句子几乎一定是在问你,即使转写没带问号。
+const WH_STARTS = /^(?:what|why|how|when|where|which|who|whose|whom)\b/i;
+// 助动词 / 命令式提问("tell me about" 也是提问),信号比疑问词弱一档
 const EN_QUESTION_STARTS =
-  /^(?:what|why|how|when|where|which|who|whose|can|could|would|will|do|does|did|are|is|was|were|have|has|had|should|shall|may|might|tell|walk|describe|explain|talk|give|share|suppose|imagine|let's|lets|say|assume|any)\b/i;
+  /^(?:can|could|would|will|do|does|did|are|is|was|were|have|has|had|should|shall|may|might|tell|walk|describe|explain|talk|give|share|suppose|imagine|let's|lets|say|assume|any)\b/i;
 const EN_QUESTION_PHRASES = [
   "tell me about",
   "walk me through",
@@ -260,18 +262,34 @@ function wordCount(text: string): number {
   return cn > 0 ? Math.max(en, Math.round(cn / 1.6)) : en;
 }
 
-/** 面试官最后连着说的几句(VAD 已按停顿切段,这里再看语义上要不要一起看)。 */
+/** 说一段话大概要多久(粗估:中文约 200ms/字,英文约 55ms/字符) */
+function estimateSpokenMs(text: string): number {
+  const cn = (text.match(/[一-鿿]/g) || []).length;
+  return cn * 200 + (text.length - cn) * 55;
+}
+
+/**
+ * 面试官最后连着说的几句(VAD 已按停顿切段,这里再看语义上要不要一起看)。
+ *
+ * **只合并时间上真的挨着的段**:一句问题常被切成两三段(中间只隔几百毫秒),那要合起来看;
+ * 但上一道题和这一道题之间隔着几十秒,绝不能粘在一起 —— 实测粘过一次,发给模型的问题变成
+ * 「Hi Andy, thanks for making the time today.(第 6 秒) How do you keep a Kafka consumer…(第 79 秒)」。
+ */
+const JOIN_GAP_MS = 4_000;
+
 function tailInterviewerText(turns: Turn[], maxJoin = 2): string {
-  const picked: string[] = [];
+  const picked: Turn[] = [];
   for (let i = turns.length - 1; i >= 0 && picked.length < maxJoin; i -= 1) {
     const t = turns[i];
-    if (t.role === "interviewer") {
-      picked.unshift(t.text);
-      continue;
+    if (t.role !== "interviewer") break; // 遇到「我」说的话就停:那之后是新一轮
+    const next = picked[0];
+    if (next) {
+      const gap = next.at - (t.at + estimateSpokenMs(t.text));
+      if (gap > JOIN_GAP_MS) break; // 隔太久 = 另一个问题,别粘
     }
-    break; // 遇到「我」说的话就停:那之后是新一轮
+    picked.unshift(t);
   }
-  return picked.join(" ").trim() || lastInterviewerText(turns);
+  return picked.map((t) => t.text).join(" ").trim() || lastInterviewerText(turns);
 }
 
 function classify(text: string): QuestionKind {
@@ -307,8 +325,12 @@ export function detectQuestion(turns: Turn[], prevQuestion = ""): Detected {
 
   // 用整数分累加(0~100)再折成 0~1:浮点相加会出现 0.44999… 这种刚好卡在门槛下的意外。
   let points = 0;
+  const lead = stripLead(lower);
   if (/[?？]\s*$/.test(text)) points += 50;
-  if (EN_QUESTION_STARTS.test(stripLead(lower))) points += 30;
+  // 疑问词开头单独就够触发:实测「and why not just use Redis for that.」这种追问,
+  // 转写常常不带问号、又只有七八个词,按 30 分算会低于门槛,答案就不生成了。
+  if (WH_STARTS.test(lead)) points += 45;
+  else if (EN_QUESTION_STARTS.test(lead)) points += 30;
   if (hits(lower, EN_QUESTION_PHRASES)) points += 40;
   // 中文口语基本不带问号,短语本身就是最强的信号。
   if (hits(text, CN_QUESTION_PHRASES)) points += 50;

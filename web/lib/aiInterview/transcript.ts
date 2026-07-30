@@ -90,6 +90,28 @@ export function formatWindow(turns: Turn[], maxChars: number = LIMITS.windowChar
   return lines.reverse().join("\n");
 }
 
+/**
+ * Whisper 在「几乎没人说话」的片段上会凭空吐字幕垃圾:网址、"Thanks for watching"、
+ * 「字幕由…提供」之类(实测麦克风通道在安静时反复吐 https://www.linkedin.com.au)。
+ * 整条文本命中这些形状就当没听到 —— 否则它们会进字幕、还会被当成提问去生成答案。
+ */
+const HALLUCINATION_PATTERNS: RegExp[] = [
+  /^(?:https?:\/\/|www\.)\S+$/i,
+  /^(?:thanks?|thank you)(?: (?:you|so much))? for watching[.!]?$/i,
+  /^(?:please )?(?:subscribe|like and subscribe)(?: to my channel)?[.!]?$/i,
+  /^see you (?:next time|in the next video)[.!]?$/i,
+  /^subtitles? (?:by|provided by)\b.*$/i,
+  /^(?:amara\.org|www\.amara\.org)\b.*$/i,
+  /^字幕(?:由|组).*$/,
+  /^(?:请不吝点赞|感谢观看|谢谢观看|请订阅|订阅我的频道|明镜与点点栏目).*$/,
+];
+
+export function looksLikeHallucination(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  return HALLUCINATION_PATTERNS.some((re) => re.test(t));
+}
+
 /** 最后一句面试官说的话(找不到返回空串) */
 export function lastInterviewerText(turns: Turn[]): string {
   for (let i = turns.length - 1; i >= 0; i -= 1) {

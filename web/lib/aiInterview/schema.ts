@@ -40,8 +40,11 @@ export const ANSWER_KINDS = ["answer", "detail", "rephrase", "ask"] as const;
  */
 export type AnswerKind = (typeof ANSWER_KINDS)[number];
 
-/** 面试官声音的来源:共享标签页音频,或某个输入设备(虚拟声卡 / 会议室麦克风)。 */
-export const SOURCE_KINDS = ["display", "device"] as const;
+/**
+ * 面试官声音的来源:共享标签页音频、某个输入设备(虚拟声卡)、或本机辅助程序抓系统声音。
+ * helper 那条路见 tools/mac-audio-helper(桌面版 Zoom / Teams 用它)。
+ */
+export const SOURCE_KINDS = ["display", "device", "helper"] as const;
 export type SourceKind = (typeof SOURCE_KINDS)[number];
 
 /* ============================ 限额 ============================ */
@@ -179,6 +182,76 @@ export type SessionMeta = {
   startedAt: string;
   endedAt: string | null;
 };
+
+/* ============================ 副屏 / 手机查看 ============================ */
+
+/**
+ * 推给副屏(手机 / iPad / 第二显示器)的一帧状态快照。
+ * 走「整份快照」而不是增量:副屏只要渲染最新一帧,两端不需要任何合并/排序逻辑,
+ * 掉一帧也自动被下一帧纠正。
+ */
+export type LiveState = {
+  /** 递增版本号,只在变化时推 */
+  v: number;
+  /** 生成这帧的服务端时间(ms),副屏用它判断是不是卡住了 */
+  at: number;
+  live: boolean;
+  company: string;
+  mode: Mode;
+  elapsedMs: number;
+  question: string;
+  questionKind: string;
+  confidence: number;
+  /** 面板标题:建议这样说 / 说得更细 / 截屏解题 … */
+  label: string;
+  answer: string;
+  streaming: boolean;
+  /** 最近几句字幕(倒数在后) */
+  transcript: Turn[];
+};
+
+export const EMPTY_LIVE_STATE: LiveState = {
+  v: 0,
+  at: 0,
+  live: false,
+  company: "",
+  mode: "tech",
+  elapsedMs: 0,
+  question: "",
+  questionKind: "",
+  confidence: 0,
+  label: "",
+  answer: "",
+  streaming: false,
+  transcript: [],
+};
+
+/** 副屏快照里最多带几句字幕 */
+export const LIVE_TRANSCRIPT_TURNS = 8;
+
+/** 把任意输入整理成一帧合法快照(v / at 由服务端盖) */
+export function parseLiveState(v: unknown): Omit<LiveState, "v" | "at"> {
+  const b = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+  return {
+    live: b.live === true,
+    company: clip(b.company, LIMITS.company),
+    mode: asMode(b.mode),
+    elapsedMs:
+      typeof b.elapsedMs === "number" && Number.isFinite(b.elapsedMs)
+        ? Math.max(0, Math.round(b.elapsedMs))
+        : 0,
+    question: clip(b.question, LIMITS.question),
+    questionKind: clip(b.questionKind, 32),
+    confidence:
+      typeof b.confidence === "number" && Number.isFinite(b.confidence)
+        ? Math.min(1, Math.max(0, b.confidence))
+        : 0,
+    label: clip(b.label, 32),
+    answer: clip(b.answer, LIMITS.prevAnswer),
+    streaming: b.streaming === true,
+    transcript: parseTurns(b.transcript, LIVE_TRANSCRIPT_TURNS),
+  };
+}
 
 export type SessionDetail = SessionMeta & {
   jd: string;

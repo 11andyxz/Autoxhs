@@ -12,12 +12,15 @@ import {
 } from "@/lib/aiInterview/audio";
 import { detectQuestion, type Detected, type QuestionKind } from "@/lib/aiInterview/question";
 import {
+  LIVE_TRANSCRIPT_TURNS,
   MODES,
   MODE_LABELS,
   type AnswerKind,
   type Lang,
+  type LiveState,
   type Mode,
   type SessionMeta,
+  type SourceKind,
   type Style,
   type Turn,
 } from "@/lib/aiInterview/schema";
@@ -60,6 +63,10 @@ const AUTO_DEBOUNCE_MS = 700;
 const AUTOSAVE_MS = 30_000;
 /** 同时最多几个转写请求在飞(再多也不丢,只是排队) */
 const MAX_INFLIGHT = 4;
+/** 推给副屏的节流:生成答案时状态一秒变几十次,150ms 一帧足够跟手 */
+const PUBLISH_MS = 150;
+/** 空闲时也隔一会儿推一帧,让副屏知道这边还活着(走音频心跳,不受标签页节流影响) */
+const PUBLISH_IDLE_MS = 2_500;
 
 function fmtClock(ms: number): string {
   const total = Math.max(0, Math.round(ms / 1000));
@@ -105,10 +112,11 @@ export default function AiInterviewPage() {
   const [resume, setResume] = useState("");
   const [resumeName, setResumeName] = useState("");
   const [resumeLoading, setResumeLoading] = useState(false);
-  const [sourceKind, setSourceKind] = useState<"display" | "device">("display");
+  const [sourceKind, setSourceKind] = useState<SourceKind>("display");
   const [deviceId, setDeviceId] = useState("");
   const [useMic, setUseMic] = useState(true);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [helperInfo, setHelperInfo] = useState<{ port: number; token: string } | null>(null);
   const [autoAnswer, setAutoAnswer] = useState(true);
 
   /* ---- 运行时 ---- */
@@ -129,6 +137,8 @@ export default function AiInterviewPage() {
   const [summary, setSummary] = useState("");
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [history, setHistory] = useState<SessionMeta[]>([]);
+  const [pairing, setPairing] = useState<{ code: string; urls: string[] } | null>(null);
+  const [viewers, setViewers] = useState(0);
   const [viewing, setViewing] = useState<{ title: string; turns: Turn[]; summary: string } | null>(
     null,
   );
@@ -148,6 +158,17 @@ export default function AiInterviewPage() {
   const answerRef = useRef("");
   const sessionIdRef = useRef<number | null>(null);
   const dirtyRef = useRef(false);
+  /* 副屏推流:配对码 + 最新一帧 + 节流用的时间戳 */
+  const pubCodeRef = useRef("");
+  const pubStateRef = useRef<Omit<LiveState, "v" | "at"> | null>(null);
+  const pubLastRef = useRef(0);
+  const pubTimerRef = useRef<number | null>(null);
+  /** 本页面在副屏通道里的身份(同一台机器可能开着好几个页面,只有最新的能写) */
+  const pubIdRef = useRef("");
+  const pubStartedAtRef = useRef(0);
+  /** 被更新的页面接管后就别再推了 */
+  const supersededRef = useRef(false);
+  const helperInfoRef = useRef<{ port: number; token: string } | null>(null);
 
   useEffect(() => {
     cfgRef.current = { mode, lang, style, company, jd, notes, resume, autoAnswer };
@@ -161,6 +182,9 @@ export default function AiInterviewPage() {
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
+  useEffect(() => {
+    helperInfoRef.current = helperInfo;
+  }, [helperInfo]);
 
   /* ============================ 初始化 ============================ */
 
@@ -198,12 +222,94 @@ export default function AiInterviewPage() {
     void loadHistory();
   }, [loadResume, loadHistory]);
 
+  /* ============================ 副屏 / 手机查看 ============================ */
+
+  // 拿配对码 + 手机要打开的局域网地址(这个接口只对本机开放)。
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await fetch("/api/ai-interview/live/info");
+        const data = (await res.json()) as { success?: boolean; code?: string; urls?: string[] };
+        if (!alive || !data.success || !data.code) return;
+        pubCodeRef.current = data.code;
+        // 页面身份只在客户端生成(避免 SSR/水合不一致);打开时间越新越有优先权。
+        pubIdRef.current =
+          globalThis.crypto?.randomUUID?.() ?? `p${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+        pubStartedAtRef.current = Date.now();
+        setPairing({ code: data.code, urls: data.urls || [] });
+      } catch {
+        /* 拿不到就当没有副屏功能,主功能不受影响 */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /** 把最新一帧推给副屏(只读 ref,所以引用稳定,可以给心跳用)。 */
+  const sendSnapshot = useCallback(async () => {
+    const k = pubCodeRef.current;
+    const state = pubStateRef.current;
+    if (!k || !state || supersededRef.current) return;
+    pubLastRef.current = performance.now();
+    try {
+      const res = await fetch("/api/ai-interview/live/publish", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          k,
+          pubId: pubIdRef.current,
+          pubStartedAt: pubStartedAtRef.current,
+          state,
+        }),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        accepted?: boolean;
+        viewers?: number;
+      };
+      if (!data.success) return;
+      if (data.accepted === false) {
+        // 又开了一个更新的页面 → 让位,别再往副屏写(否则手机会在两场之间来回跳)。
+        supersededRef.current = true;
+        setNotice("副屏已被另一个更新的「AI 辅助面试」页面接管 —— 这个页面不再往手机推送。");
+        return;
+      }
+      setViewers(data.viewers ?? 0);
+    } catch {
+      /* 推不动就算了,下一帧再试;绝不能影响主流程 */
+    }
+  }, []);
+
   // 计时器
   useEffect(() => {
     if (phase !== "live") return;
     const id = window.setInterval(() => setElapsed(capRef.current?.elapsed ?? 0), 500);
     return () => window.clearInterval(id);
   }, [phase]);
+
+  /** 本机辅助程序在不在(桌面版 Zoom / Teams 靠它拿系统声音 + 屏幕画面) */
+  const probeHelper = useCallback(async () => {
+    try {
+      const res = await fetch("/api/ai-interview/helper");
+      const data = (await res.json()) as {
+        available?: boolean;
+        port?: number;
+        token?: string;
+      };
+      setHelperInfo(
+        data.available && data.port && data.token
+          ? { port: data.port, token: data.token }
+          : null,
+      );
+    } catch {
+      setHelperInfo(null);
+    }
+  }, []);
+  useEffect(() => {
+    void probeHelper();
+  }, [probeHelper]);
 
   const refreshDevices = useCallback(async () => {
     try {
@@ -326,17 +432,24 @@ export default function AiInterviewPage() {
   }, []);
 
   /** 音频线程驱动的心跳:到点就做提问判定 / 自动回答(不受标签页节流影响)。 */
-  const onHeartbeat = useCallback((now: number) => {
-    const due = autoDueRef.current;
-    if (due === null || now < due) return;
-    autoDueRef.current = null;
-    const found = detectQuestion(turnsRef.current, lastAnsweredRef.current);
-    setDetected(found.question ? found : null);
-    if (!cfgRef.current.autoAnswer) return;
-    if (!found.shouldAnswer) return;
-    if (found.question === lastAnsweredRef.current) return;
-    runAnswerRef.current("answer", found.question, found.kind, found.isFollowUp);
-  }, []);
+  const onHeartbeat = useCallback(
+    (now: number) => {
+      // 顺带给副屏续命:静默期没有任何状态变化,但副屏要能确认这边还在听。
+      if (now - pubLastRef.current >= PUBLISH_IDLE_MS && pubStateRef.current) {
+        void sendSnapshot();
+      }
+      const due = autoDueRef.current;
+      if (due === null || now < due) return;
+      autoDueRef.current = null;
+      const found = detectQuestion(turnsRef.current, lastAnsweredRef.current);
+      setDetected(found.question ? found : null);
+      if (!cfgRef.current.autoAnswer) return;
+      if (!found.shouldAnswer) return;
+      if (found.question === lastAnsweredRef.current) return;
+      runAnswerRef.current("answer", found.question, found.kind, found.isFollowUp);
+    },
+    [sendSnapshot],
+  );
 
   /* ============================ 转写 ============================ */
 
@@ -389,12 +502,22 @@ export default function AiInterviewPage() {
 
     try {
       // 先要屏幕/设备(getDisplayMedia 必须紧跟用户点击),再要麦克风。
-      const source: InterviewerSource =
-        sourceKind === "device"
-          ? { kind: "device", deviceId }
-          : { kind: "display" };
-      if (source.kind === "device" && !deviceId) {
-        throw new Error("请先选择面试官声音所在的输入设备。");
+      let source: InterviewerSource;
+      if (sourceKind === "helper") {
+        // 重新探一次:辅助程序可能刚启动 / 刚被关掉
+        await probeHelper();
+        const info = helperInfoRef.current;
+        if (!info) {
+          throw new Error(
+            "本机辅助程序没在运行。在终端里跑 bash tools/mac-audio-helper/run.sh,首次要在「系统设置 → 隐私与安全性 → 屏幕录制」里放行运行它的终端。",
+          );
+        }
+        source = { kind: "helper", port: info.port, token: info.token };
+      } else if (sourceKind === "device") {
+        if (!deviceId) throw new Error("请先选择面试官声音所在的输入设备。");
+        source = { kind: "device", deviceId };
+      } else {
+        source = { kind: "display" };
       }
       await capture.startInterviewer(source);
       if (useMic) {
@@ -447,6 +570,7 @@ export default function AiInterviewPage() {
     mode,
     notes,
     onHeartbeat,
+    probeHelper,
     refreshDevices,
     sourceKind,
     transcribe,
@@ -652,6 +776,52 @@ export default function AiInterviewPage() {
     return { asked, said };
   }, [turns]);
 
+  /**
+   * 状态一变就攒成一帧推给副屏(节流 PUBLISH_MS)。
+   * 生成答案时每来一个增量都会重跑这个 effect,所以「前沿」那条路径由网络事件驱动,
+   * 即使这个标签页被挡住(定时器被节流)也照样按 150ms 的节奏推。
+   */
+  useEffect(() => {
+    if (!pairing) return;
+    pubStateRef.current = {
+      live: phase === "live",
+      company,
+      mode,
+      elapsedMs: Math.round(capRef.current?.elapsed ?? elapsed),
+      question,
+      questionKind: detected?.kind ?? "",
+      confidence: detected?.confidence ?? 0,
+      label: answerSource === "screen" ? "截屏解题" : ANSWER_LABEL[answerKind],
+      answer,
+      streaming,
+      transcript: turns.slice(-LIVE_TRANSCRIPT_TURNS),
+    };
+    const since = performance.now() - pubLastRef.current;
+    if (since >= PUBLISH_MS) {
+      void sendSnapshot();
+      return;
+    }
+    if (pubTimerRef.current !== null) return;
+    pubTimerRef.current = window.setTimeout(() => {
+      pubTimerRef.current = null;
+      void sendSnapshot();
+    }, PUBLISH_MS - since);
+  }, [
+    answer,
+    answerKind,
+    answerSource,
+    company,
+    detected,
+    elapsed,
+    mode,
+    pairing,
+    phase,
+    question,
+    sendSnapshot,
+    streaming,
+    turns,
+  ]);
+
   /* ============================ 渲染 ============================ */
 
   return (
@@ -692,6 +862,8 @@ export default function AiInterviewPage() {
           </div>
         )}
 
+        <PairingCard pairing={pairing} viewers={viewers} />
+
         {phase === "setup" ? (
           <SetupPanel
             {...{
@@ -717,6 +889,8 @@ export default function AiInterviewPage() {
               setDeviceId,
               devices,
               refreshDevices,
+              helperInfo,
+              probeHelper,
               useMic,
               setUseMic,
               autoAnswer,
@@ -801,6 +975,72 @@ export default function AiInterviewPage() {
 
 /* ============================ 子组件 ============================ */
 
+/**
+ * 「副屏 / 手机查看」:把手机要打开的局域网地址亮出来。
+ * 副屏吃的是同一条 SSE,所以那边的字和这边基本同时出现(不是轮询)。
+ */
+function PairingCard({
+  pairing,
+  viewers,
+}: {
+  pairing: { code: string; urls: string[] } | null;
+  viewers: number;
+}) {
+  const [copied, setCopied] = useState("");
+  if (!pairing) return null;
+
+  const copy = (url: string) => {
+    void navigator.clipboard?.writeText(url);
+    setCopied(url);
+    window.setTimeout(() => setCopied(""), 1_500);
+  };
+
+  return (
+    <details className="mb-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+      <summary className="cursor-pointer text-sm font-medium text-slate-700">
+        副屏 / 手机查看
+        <span className="ml-2 text-xs font-normal text-slate-400">
+          {viewers > 0 ? `已连接 ${viewers} 个` : "未连接"}
+        </span>
+      </summary>
+      <div className="mt-3 space-y-2 text-xs text-slate-500">
+        {pairing.urls.length === 0 ? (
+          <p>
+            没找到局域网地址(可能没连 WiFi / 有线)。手机看答案需要用监听局域网的方式启动:
+            <code className="mx-1 rounded bg-slate-100 px-1 py-0.5">npm run dev:lan</code>
+          </p>
+        ) : (
+          <>
+            <p>
+              手机 / iPad 连同一个 WiFi,浏览器打开下面地址即可实时看到问题和答案(只读)。
+              第二显示器直接在本机新开一个窗口访问也行。
+            </p>
+            {pairing.urls.map((url) => (
+              <div key={url} className="flex items-center gap-2">
+                <code className="flex-1 break-all rounded bg-slate-50 px-2 py-1.5 text-[11px] text-slate-700">
+                  {url}
+                </code>
+                <button
+                  onClick={() => copy(url)}
+                  className="whitespace-nowrap rounded-lg border border-slate-200 px-2 py-1 text-slate-600 hover:border-slate-300"
+                >
+                  {copied === url ? "已复制" : "复制"}
+                </button>
+              </div>
+            ))}
+            <p className="text-slate-400">
+              配对码 <code className="text-slate-600">{pairing.code}</code>
+              (地址里的 k=,重启服务才会变,可以在手机上存书签);打不开就用
+              <code className="mx-1 rounded bg-slate-100 px-1 py-0.5">npm run dev:lan</code>
+              启动,或公司 WiFi 开了设备隔离时改用 Mac 的个人热点。
+            </p>
+          </>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <label className="block">
@@ -831,12 +1071,14 @@ type SetupProps = {
   resumeName: string;
   resumeLoading: boolean;
   loadResume: (file?: File) => Promise<void>;
-  sourceKind: "display" | "device";
-  setSourceKind: (v: "display" | "device") => void;
+  sourceKind: SourceKind;
+  setSourceKind: (v: SourceKind) => void;
   deviceId: string;
   setDeviceId: (v: string) => void;
   devices: MediaDeviceInfo[];
   refreshDevices: () => Promise<void>;
+  helperInfo: { port: number; token: string } | null;
+  probeHelper: () => Promise<void>;
   useMic: boolean;
   setUseMic: (v: boolean) => void;
   autoAnswer: boolean;
@@ -998,6 +1240,44 @@ function SetupPanel(p: SetupProps) {
             <div className="mt-1 text-xs leading-relaxed text-slate-500">
               面试用的是桌面版 Zoom / Teams 时:装 BlackHole 之类的虚拟声卡,把会议声音输出到它,
               这里选它作为输入。截屏解题会在你按下时另外申请一次共享。
+            </div>
+          </button>
+          <button
+            onClick={() => {
+              p.setSourceKind("helper");
+              void p.probeHelper();
+            }}
+            className={`w-full rounded-xl border p-4 text-left transition ${
+              p.sourceKind === "helper"
+                ? "border-blue-400 bg-blue-50"
+                : "border-slate-200 hover:border-slate-300"
+            }`}
+          >
+            <div className="flex items-center gap-2 text-sm font-medium text-slate-800">
+              本机系统声音(辅助程序 · 桌面版 Zoom/Teams)
+              {p.helperInfo ? (
+                <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-normal text-emerald-600">
+                  已就绪
+                </span>
+              ) : (
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-normal text-slate-500">
+                  没在运行
+                </span>
+              )}
+            </div>
+            <div className="mt-1 text-xs leading-relaxed text-slate-500">
+              不用共享标签页、也不用装虚拟声卡:一个本机小程序直接抓「这台电脑在播什么」和屏幕画面。
+              面试官要求你共享整个屏幕、你还要切到 IDE 时用这条 —— 它一直看得见屏幕,截屏解题不用再弹共享选择器。
+              {!p.helperInfo && (
+                <>
+                  <br />
+                  先在终端里跑:
+                  <code className="mx-1 rounded bg-slate-100 px-1 py-0.5">
+                    bash tools/mac-audio-helper/run.sh
+                  </code>
+                  (首次要在「系统设置 → 隐私与安全性 → 屏幕录制」里放行运行它的那个终端)
+                </>
+              )}
             </div>
           </button>
           {p.sourceKind === "device" && (

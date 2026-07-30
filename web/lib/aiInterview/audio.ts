@@ -1,3 +1,10 @@
+import {
+  PcmRing,
+  bytesToInt16,
+  downsampleForTranscribe,
+  encodeWav,
+  rmsOfInt16,
+} from "./pcm";
 import { DEFAULT_VAD, initVad, rmsOf, stepVad, type VadConfig, type VadState } from "./vad";
 
 /**
@@ -231,6 +238,14 @@ class ChannelPipeline {
     } else if (event === "cut") {
       this.endSegment(0, true);
     }
+
+    // 不变量:VAD 认为有人在说话,就必须正在录。
+    // 「start」和「待停录」撞在同一帧时,旧录音器还没走完 onstop(异步),beginSegment 会被
+    // this.recorder 挡掉 —— 于是状态机在说话、却没人录音,这一段就凭空消失了。
+    // 这里补一枪,把这类竞态自愈掉(2026-07-29 实测过整段问题丢失)。
+    if (this.vad.speaking && !this.recorder && this.pendingStopAt === null) {
+      this.beginSegment(now);
+    }
   }
 
   private beginSegment(now: number): void {
@@ -297,7 +312,11 @@ class ChannelPipeline {
   }
 
   private endSegment(deferMs: number, restart: boolean): void {
-    if (!this.recorder) return;
+    if (!this.recorder) {
+      // 没有在录却要求「切一刀继续录」:直接开新的一段(别把 restart 意图丢掉)。
+      if (restart && !this.stopped) this.beginSegment(performance.now());
+      return;
+    }
     this.pendingRestart = restart;
     if (deferMs > 0) this.pendingStopAt = performance.now() + deferMs;
     else this.stopRecorderNow();
@@ -321,15 +340,151 @@ class ChannelPipeline {
   }
 }
 
+/* ============================ 辅助程序(裸 PCM)通道 ============================ */
+
+/** 两种通道的共同外壳,LiveCapture 统一管理 */
+type Pipeline = { readonly channel: Channel; tick(now: number): void; stop(): void };
+
+/** 一次处理多少样本算一帧音量(48k 下约 43ms,和 worklet 那条路口径一致) */
+const PCM_BLOCK = 2_048;
+/** 环形缓冲留多久(秒):要够放「前摇 + 一整段话」 */
+const PCM_RING_SECONDS = 20;
+
+/**
+ * 本机辅助程序那条路的通道:输入是裸 PCM,自己算音量、自己切段、自己打 WAV。
+ * 前摇是精确的(从环形缓冲往前取 PREROLL_MS),不需要 DelayNode 那种近似做法。
+ */
+class PcmPipeline implements Pipeline {
+  private ring: PcmRing;
+  private leftover = new Uint8Array(0);
+  private pending: Int16Array[] = [];
+  private pendingLen = 0;
+  private vad: VadState = initVad();
+  private segStartSample: number | null = null;
+  private stopped = false;
+  private smoothLevel = 0;
+  private levelSentAt = 0;
+  /** 样本时钟起点:这一路的第 0 个样本对应的「会话内毫秒」 */
+  private readonly baseMs: number;
+
+  constructor(
+    readonly channel: Channel,
+    private readonly sampleRate: number,
+    private readonly handlers: CaptureHandlers,
+    t0: number,
+    private readonly beat: (now: number) => void,
+    private readonly cfg: VadConfig = DEFAULT_VAD,
+  ) {
+    this.ring = new PcmRing(sampleRate * PCM_RING_SECONDS);
+    this.baseMs = performance.now() - t0;
+  }
+
+  /** 辅助程序每来一批字节就喂进来 */
+  push(bytes: Uint8Array): void {
+    if (this.stopped) return;
+    const merged =
+      this.leftover.length === 0
+        ? bytes
+        : (() => {
+            const m = new Uint8Array(this.leftover.length + bytes.length);
+            m.set(this.leftover);
+            m.set(bytes, this.leftover.length);
+            return m;
+          })();
+    const { samples, leftover } = bytesToInt16(merged);
+    this.leftover = leftover.slice();
+    if (!samples.length) return;
+
+    this.pending.push(samples);
+    this.pendingLen += samples.length;
+    while (this.pendingLen >= PCM_BLOCK) this.processBlock();
+  }
+
+  /** 取出一整块(可能跨多批)交给 VAD */
+  private processBlock(): void {
+    const block = new Int16Array(PCM_BLOCK);
+    let filled = 0;
+    while (filled < PCM_BLOCK) {
+      const head = this.pending[0];
+      const take = Math.min(head.length, PCM_BLOCK - filled);
+      block.set(head.subarray(0, take), filled);
+      filled += take;
+      if (take === head.length) this.pending.shift();
+      else this.pending[0] = head.subarray(take);
+    }
+    this.pendingLen -= PCM_BLOCK;
+    this.ring.write(block);
+
+    // 时间用「样本时钟」推:不受主线程卡顿影响,也不受标签页节流影响。
+    const now = this.sampleToMs(this.ring.end);
+    const rms = rmsOfInt16(block);
+
+    this.smoothLevel = this.smoothLevel * 0.7 + Math.min(1, rms * 12) * 0.3;
+    const wall = performance.now();
+    if (wall - this.levelSentAt >= 120) {
+      this.levelSentAt = wall;
+      this.handlers.onLevel(this.channel, this.smoothLevel);
+    }
+    this.beat(wall);
+
+    const { state, event } = stepVad(this.vad, rms, now, this.cfg);
+    this.vad = state;
+    if (event === "start") {
+      const preroll = Math.round((PREROLL_MS / 1000) * this.sampleRate);
+      this.segStartSample = Math.max(0, this.ring.end - PCM_BLOCK - preroll);
+    } else if (event === "stop" || event === "cut") {
+      this.flushSegment();
+      if (event === "cut") this.segStartSample = this.ring.end;
+    }
+  }
+
+  private sampleToMs(sample: number): number {
+    return this.baseMs + (sample / this.sampleRate) * 1000;
+  }
+
+  private flushSegment(): void {
+    const from = this.segStartSample;
+    this.segStartSample = null;
+    if (from === null) return;
+    const samples = this.ring.slice(from, this.ring.end);
+    const durMs = (samples.length / this.sampleRate) * 1000;
+    if (durMs < this.cfg.minSegMs) return;
+    // 降到 16k 再打包:转写模型内部就是这个采样率,48k 的 WAV 只是白传 3 倍字节。
+    const down = downsampleForTranscribe(samples, this.sampleRate);
+    const wav = encodeWav(down.samples, down.rate);
+    this.handlers.onSegment({
+      channel: this.channel,
+      blob: new Blob([wav as unknown as BlobPart], { type: "audio/wav" }),
+      ext: "wav",
+      startedAt: Math.max(0, Math.round(this.sampleToMs(from))),
+      endedAt: Math.max(0, Math.round(this.sampleToMs(this.ring.end))),
+    });
+  }
+
+  /** worklet 那条路用不到;这里保留接口以统一管理 */
+  tick(): void {}
+
+  stop(): void {
+    if (this.stopped) return;
+    // 收尾:手上这段也发出去(最后一个问题常常正好在这一刻)
+    this.flushSegment();
+    this.stopped = true;
+  }
+}
+
 /* ============================ 引擎 ============================ */
 
 export type InterviewerSource =
   | { kind: "display" }
-  | { kind: "device"; deviceId: string };
+  | { kind: "device"; deviceId: string }
+  | { kind: "helper"; port: number; token: string };
 
 export class LiveCapture {
   private ctx: AudioContext | null = null;
-  private channels = new Map<Channel, ChannelPipeline>();
+  private channels = new Map<Channel, Pipeline>();
+  /** 走辅助程序时:画面从它的 /frame 拿,不需要再申请屏幕共享 */
+  private helper: { port: number; token: string } | null = null;
+  private helperAbort: AbortController | null = null;
   private timer: number | null = null;
   private t0 = 0;
   private lastBeat = 0;
@@ -389,6 +544,10 @@ export class LiveCapture {
    * 选整个屏幕/窗口在 macOS 上拿不到声音);device 直接听某个输入设备(虚拟声卡)。
    */
   async startInterviewer(source: InterviewerSource): Promise<void> {
+    if (source.kind === "helper") {
+      await this.startFromHelper(source.port, source.token);
+      return;
+    }
     if (source.kind === "device") {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -422,6 +581,72 @@ export class LiveCapture {
     }
   }
 
+  /**
+   * 从本机辅助程序拉「系统声音」:一条 chunked 的裸 PCM 流,边收边喂 PcmPipeline。
+   * 这条路不需要共享标签页,也不需要虚拟声卡 —— 桌面版 Zoom / Teams 走它。
+   */
+  private async startFromHelper(port: number, token: string): Promise<void> {
+    const base = `http://127.0.0.1:${port}`;
+    const health = (await fetch(`${base}/health?t=${encodeURIComponent(token)}`, {
+      signal: AbortSignal.timeout(4_000),
+    }).then((r) => r.json())) as {
+      ok?: boolean;
+      sampleRate?: number;
+      permission?: boolean;
+      tokenOk?: boolean;
+    };
+    if (!health.ok || !health.tokenOk) throw new Error("辅助程序拒绝了连接(配对信息不对)。");
+    if (!health.permission) {
+      throw new Error(
+        "辅助程序还没拿到「屏幕录制」权限:到「系统设置 → 隐私与安全性 → 屏幕录制」勾上运行它的终端,重开终端再跑一次。",
+      );
+    }
+    const sampleRate = health.sampleRate || 48_000;
+
+    // 时钟基准要在建管线之前就位(音频时间戳都相对它)
+    this.audioContextlessInit();
+    const pipeline = new PcmPipeline(
+      "interviewer",
+      sampleRate,
+      this.handlers,
+      this.t0,
+      this.beat,
+    );
+    this.channels.get("interviewer")?.stop();
+    this.channels.set("interviewer", pipeline);
+    this.helper = { port, token };
+
+    const controller = new AbortController();
+    this.helperAbort = controller;
+    const res = await fetch(`${base}/audio?t=${encodeURIComponent(token)}`, {
+      signal: controller.signal,
+    });
+    if (!res.ok || !res.body) throw new Error("辅助程序的音频流打不开。");
+
+    // 后台一直读,直到 stop() 取消
+    void (async () => {
+      const reader = res.body!.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value?.length) pipeline.push(value);
+        }
+        if (!controller.signal.aborted) this.handlers.onEnded("interviewer");
+      } catch {
+        if (!controller.signal.aborted) {
+          this.handlers.onError("interviewer", "和辅助程序的连接断了,请确认它还在运行。");
+          this.handlers.onEnded("interviewer");
+        }
+      }
+    })();
+  }
+
+  /** 辅助程序那条路不需要 AudioContext,但会话时钟(t0)还是要有 */
+  private audioContextlessInit(): void {
+    if (!this.t0) this.t0 = performance.now();
+  }
+
   private async addChannel(channel: Channel, stream: MediaStream): Promise<void> {
     this.channels.get(channel)?.stop();
     const ctx = this.audioContext();
@@ -443,8 +668,9 @@ export class LiveCapture {
     return this.channels.has(channel);
   }
 
-  /** 有没有可截屏的画面(= 走了 display 方式) */
+  /** 有没有可截屏的画面(走 display 共享,或有辅助程序在持续盯着屏幕) */
   get canScreenshot(): boolean {
+    if (this.helper) return true;
     return !!this.displayStream?.getVideoTracks().some((t) => t.readyState === "live");
   }
 
@@ -462,8 +688,24 @@ export class LiveCapture {
     this.video = null;
   }
 
-  /** 抓共享画面的一帧,返回 JPEG data URL(没有画面返回 null)。 */
+  /** 抓当前画面的一帧,返回 JPEG data URL(没有画面返回 null)。 */
   async screenshot(): Promise<string | null> {
+    // 有辅助程序时直接拿它手上那一帧:不用弹共享选择器,你切到 IDE 也照样拿得到。
+    if (this.helper) {
+      const { port, token } = this.helper;
+      const res = await fetch(`http://127.0.0.1:${port}/frame?t=${encodeURIComponent(token)}`, {
+        signal: AbortSignal.timeout(6_000),
+      }).catch(() => null);
+      if (!res?.ok) return null;
+      const blob = await res.blob();
+      return await new Promise<string | null>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+    }
+
     const stream = this.displayStream;
     const track = stream?.getVideoTracks().find((t) => t.readyState === "live");
     if (!stream || !track) return null;
@@ -504,6 +746,10 @@ export class LiveCapture {
     }
     for (const pipeline of this.channels.values()) pipeline.stop();
     this.channels.clear();
+    // 先让 pipeline 收尾最后一段,再断掉和辅助程序的连接。
+    this.helperAbort?.abort();
+    this.helperAbort = null;
+    this.helper = null;
     this.displayStream?.getTracks().forEach((t) => t.stop());
     this.displayStream = null;
     if (this.video) {

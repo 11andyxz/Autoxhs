@@ -2,6 +2,7 @@ import { toFile } from "openai";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { LIMITS } from "@/lib/aiInterview/schema";
+import { looksLikeHallucination } from "@/lib/aiInterview/transcript";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
 import { transcribeAudio } from "@/lib/openai";
 
@@ -54,6 +55,10 @@ export async function POST(req: NextRequest) {
       hint,
       process.env.AI_INTERVIEW_TRANSCRIBE_MODEL,
     );
+    // 安静片段上的字幕垃圾(网址 / "Thanks for watching")当没听到,别进字幕也别去触发回答。
+    if (looksLikeHallucination(text)) {
+      return NextResponse.json({ success: true, text: "" });
+    }
     return NextResponse.json({ success: true, text });
   } catch (err) {
     return fail(err, "ai-interview/transcribe");

@@ -102,4 +102,39 @@ describe("detectQuestion", () => {
   it("空字幕直接返回没有问题", () => {
     expect(detectQuestion([]).shouldAnswer).toBe(false);
   });
+
+  /* ---------- 回归:2026-07-29 实测 ---------- */
+
+  it("转写没带问号的短追问也要触发(疑问词开头就够)", () => {
+    // 实测这句被转成句号结尾、只有 8 个词,以前只有 30 分 → 不生成答案
+    const d = detectQuestion(
+      [{ role: "interviewer", text: "and why not just use Redis for that.", at: 0 }],
+      "How do you keep a Kafka consumer idempotent?",
+    );
+    expect(d.shouldAnswer).toBe(true);
+    expect(d.isFollowUp).toBe(true);
+  });
+
+  it("隔了很久的两句面试官发言不能粘成一个问题", () => {
+    const d = detectQuestion([
+      { role: "interviewer", text: "Hi Andy, thanks for making the time today.", at: 6_100 },
+      {
+        role: "interviewer",
+        text: "How do you keep a Kafka consumer idempotent when the same event gets delivered twice?",
+        at: 79_600,
+      },
+    ]);
+    expect(d.question).not.toContain("thanks for making the time");
+    expect(d.question.startsWith("How do you keep")).toBe(true);
+    expect(d.shouldAnswer).toBe(true);
+  });
+
+  it("紧挨着的两段(同一句被切开)仍然要合起来看", () => {
+    const d = detectQuestion([
+      { role: "interviewer", text: "So walk me through how you", at: 10_000 },
+      { role: "interviewer", text: "handled the migration to Kubernetes", at: 11_800 },
+    ]);
+    expect(d.question).toContain("walk me through");
+    expect(d.question).toContain("Kubernetes");
+  });
 });
