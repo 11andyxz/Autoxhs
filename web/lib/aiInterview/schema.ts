@@ -233,6 +233,40 @@ export type LiveState = {
   streaming: boolean;
   /** 采集是否中断了(辅助程序被系统掐断 / 共享被停) —— 副屏要看得见,别以为一切正常 */
   sourceDown: boolean;
+  /**
+   * 有多少段音频最终没转写成功(重试后仍失败)。
+   * 必须推到副屏:实测过「面试官的问题被自家限流 429 掉」,Mac 上弹了红条,
+   * 但人在看手机,完全不知道自己正在聋着。
+   */
+  sttFailed: number;
+  /**
+   * 「完美答案」的状态。
+   *
+   * 截图解题时,第一版答案是模型直接看题写的;桌面端随后在**后台**把代码丢进沙箱
+   * 跑测试用例(natively 自带 electron/llm/codeVerification),跑完可能给出一版
+   * 纠正后的代码。副屏上那个按钮就是这件事的进度:
+   *   none     不是代码题 / 没在验
+   *   running  正在跑用例(按钮置灰)
+   *   already  第一版本身就全过了(不需要改)
+   *   ready    有纠正版了(按钮高亮,点开看 diff)
+   *
+   * 为什么值得单独一档而不是直接替换答案:面试时把答案悄悄换掉,人是懵的;
+   * 分两步 + diff 高亮,既能看出改了哪儿,过程本身看起来也像在思考。
+   */
+  /**
+   * 桌面端当前的失败原因,空串表示一切正常。
+   *
+   * 为什么必须有这个字段:在它存在之前,答案生成失败、STT 掉线、发布权被抢、重试
+   * 耗尽 —— 全部长得一模一样,就是「屏幕不动了」。用户在面试中间盯着一个静止的
+   * 页面,唯一能做的判断是「它是不是死了」,而这恰恰是最没用的信息。
+   * 桌面端有 lastError,以前只留在 getStatus()(手机看不到)。
+   */
+  error: string;
+  perfectState: "none" | "running" | "already" | "ready" | "skipped";
+  /** 纠正后的完整答案(state=ready 时才有) */
+  perfectAnswer: string;
+  /** 一句话说明哪里错了 / 或「N/N 用例通过」 */
+  perfectNote: string;
   /** 最近几句字幕(倒数在后) */
   transcript: Turn[];
 };
@@ -251,8 +285,16 @@ export const EMPTY_LIVE_STATE: LiveState = {
   answer: "",
   streaming: false,
   sourceDown: false,
+  sttFailed: 0,
+  error: "",
+  perfectState: "none",
+  perfectAnswer: "",
+  perfectNote: "",
   transcript: [],
 };
+
+/** questionKind 的合法取值。空串 = 未分类。 */
+const KNOWN_QUESTION_KINDS = new Set(["", "behavioral", "technical", "coding", "system_design", "followup"]);
 
 /** 副屏快照里最多带几句字幕 */
 export const LIVE_TRANSCRIPT_TURNS = 8;
@@ -269,7 +311,11 @@ export function parseLiveState(v: unknown): Omit<LiveState, "v" | "at"> {
         ? Math.max(0, Math.round(b.elapsedMs))
         : 0,
     question: clip(b.question, LIMITS.question),
-    questionKind: clip(b.questionKind, 32),
+    // 白名单而不是 clip:这个值在手机上被当作对象 key 查表(KIND_LABEL[kind]),
+    // 一个 "__proto__" 之类的字符串取出来的是函数/对象,渲染成 React 子节点会抛。
+    questionKind: KNOWN_QUESTION_KINDS.has(String(b.questionKind ?? ""))
+      ? String(b.questionKind)
+      : "",
     confidence:
       typeof b.confidence === "number" && Number.isFinite(b.confidence)
         ? Math.min(1, Math.max(0, b.confidence))
@@ -278,6 +324,18 @@ export function parseLiveState(v: unknown): Omit<LiveState, "v" | "at"> {
     answer: clip(b.answer, LIMITS.prevAnswer),
     streaming: b.streaming === true,
     sourceDown: b.sourceDown === true,
+    error: clip(b.error, 200),
+    perfectState:
+      b.perfectState === "running" || b.perfectState === "already"
+      || b.perfectState === "ready" || b.perfectState === "skipped"
+        ? b.perfectState
+        : "none",
+    perfectAnswer: clip(b.perfectAnswer, LIMITS.prevAnswer),
+    perfectNote: clip(b.perfectNote, 200),
+    sttFailed:
+      typeof b.sttFailed === "number" && Number.isFinite(b.sttFailed)
+        ? Math.max(0, Math.round(b.sttFailed))
+        : 0,
     transcript: parseTurns(b.transcript, LIVE_TRANSCRIPT_TURNS),
   };
 }

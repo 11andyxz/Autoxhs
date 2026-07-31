@@ -19,6 +19,15 @@ import Foundation
 var tapHeardSomething = false
 var tapCallbacks = 0
 var tapSilenceReported = false
+/**
+ 音频「世代号」。输出设备一变(插拔耳机、切扬声器)就 +1:
+ 已经在推流的 /audio 连接会在下一个数据块时发现世代变了、主动断开,
+ 页面于是重连并**重新读一次 /health**,拿到新的采样率 —— 采样率变了还沿用旧值,
+ 会让页面的样本时钟和 WAV 采样率全错(时间戳漂移、转写变调)。
+ */
+var audioEpoch = 0
+/// 测试用:只强制触发一次「采样率变了」的恢复路径
+var formatChangeForced = false
 
 final class SystemAudioTap {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -179,8 +188,45 @@ final class SystemAudioTap {
                 userInfo: [NSLocalizedDescriptionKey: "启动聚合设备失败(OSStatus \(status))"])
         }
         running = true
+        startFormatWatchdog()
         logLine(
             "[helper] 系统音已接上(Core Audio tap):\(Int(sampleRate))Hz 单声道 —— 不再受屏幕采集干扰")
+    }
+
+    /**
+     定期核对 tap 的采样率(每 3 秒,一次属性读取,开销可忽略)。
+
+     为什么不用 `AudioObjectAddPropertyListenerBlock` 监听默认输出设备:实测**它压根不触发**
+     (切了两次输出设备,一条通知都没来)。而且实测发现全局 tap 自己就扛住了设备切换 ——
+     真正的风险只剩「新设备采样率不同」:页面在连接时读一次 /health 就把采样率定下来了,
+     之后如果实际变了,页面的样本时钟和 WAV 采样率就全错(时间戳漂移 + 转写变调)。
+     所以这里只盯采样率:一变就 +1 世代号(推流连接自己断开 → 页面重连并重读 /health)并重建 tap。
+     轮询比通知可靠,而且能测。
+     */
+    private var formatTimer: DispatchSourceTimer?
+    private func startFormatWatchdog() {
+        formatTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: .global())
+        t.schedule(deadline: .now() + 3, repeating: 3)
+        t.setEventHandler { [weak self] in
+            guard let self, self.running else { return }
+            let forced = ProcessInfo.processInfo.environment["AUTOXHS_FORCE_FORMAT_CHANGE"] == "1"
+                && !formatChangeForced
+            guard let asbd = self.readTapFormat() else { return }
+            let now = asbd.mSampleRate
+            if forced { formatChangeForced = true }
+            guard forced || (now > 0 && abs(now - self.sampleRate) > 1) else { return }
+            logLine(
+                "[helper] tap 采样率变了(\(Int(self.sampleRate))Hz → \(Int(forced ? now : now))Hz\(forced ? " · 测试触发" : ""))"
+                    + " → 重建 tap,并让页面重连以重读采样率")
+            audioEpoch += 1
+            self.stop()
+            do { try self.start() } catch {
+                logLine("[helper] 重建 tap 失败:\(error.localizedDescription)")
+            }
+        }
+        t.resume()
+        formatTimer = t
     }
 
     func stop() {
@@ -198,5 +244,10 @@ final class SystemAudioTap {
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
         running = false
+        formatTimer?.cancel()
+        formatTimer = nil
     }
+
+    /// tap 是否一直收到静音(权限没给时 macOS 照常给流但内容为空)—— 报给 /health,页面能看见
+    var silent: Bool { running && tapSilenceReported }
 }

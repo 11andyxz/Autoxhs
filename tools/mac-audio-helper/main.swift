@@ -1,7 +1,15 @@
 // Autoxhs「AI 辅助面试」的本机辅助程序(macOS)。
 //
-// 干什么:用 ScreenCaptureKit 抓「这台电脑正在播的声音」和「整块屏幕的画面」,通过
-// 127.0.0.1 上的一个小 HTTP 服务交给浏览器里的 Autoxhs 页面。
+// 干什么:抓「这台电脑正在播的声音」和「需要时的一张屏幕截图」,通过 127.0.0.1 上的一个
+// 小 HTTP 服务交给浏览器里的 Autoxhs 页面。
+//
+// 两条**完全独立**的链路(和上游 natively 的做法一致):
+//   系统声音 → CoreAudio Process Tap → PCM → 页面(持续)
+//   屏幕画面 → SCScreenshotManager 按需截一张 → JPEG(**不持续采集**)
+// 为什么不持续采画面:持续的 SCK 流会被系统反复掐断(code -3821,别的进程截个图就会触发),
+// 而且白烧 CPU/GPU。按需截图没有长连接,压根没有可被掐断的东西。
+// SCK 只在 CoreAudio tap 不可用时当**音频兜底**,那时把画面压到 2×2 / 1fps(照上游的做法),
+// 只借它的系统音频能力。
 //
 // 为什么需要它:浏览器在 macOS 上拿不到系统声音(Chrome 只给「标签页音频」),所以
 // 面试用桌面版 Zoom / Teams 时,网页版听不见对方。装虚拟声卡(BlackHole)是一条路;
@@ -89,28 +97,63 @@ final class AudioHub {
     }
 }
 
-/// 最新一帧画面(JPEG)。只留一帧,不累积。
-final class FrameHub {
-    private let queue = DispatchQueue(label: "frame.hub")
-    private var jpeg: Data?
-    private var at: Date?
+/**
+ 屏幕截图:**按需**截一张,不持续采集(和上游 natively 一致)。
+ 用 SCScreenshotManager 一次性取图 —— 没有长连接,也就没有会被系统掐断的东西
+ (持续 SCK 流实测会被别的进程截图触发 code -3821 反复掐断)。
+ 连按 ⌥S 时给 1 秒缓存,避免重复开销。
+ */
+final class ScreenGrabber {
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private let queue = DispatchQueue(label: "screen.grab")
+    private var cached: (jpeg: Data, at: Date)?
 
-    func set(_ data: Data) {
+    func latestCached(maxAge: TimeInterval = 1.0) -> Data? {
         queue.sync {
-            jpeg = data
-            at = Date()
+            guard let c = cached, Date().timeIntervalSince(c.at) < maxAge else { return nil }
+            return c.jpeg
         }
     }
-    func latest() -> (Data, Date)? {
-        queue.sync {
-            guard let jpeg, let at else { return nil }
-            return (jpeg, at)
+
+    func grab() async throws -> Data {
+        if let hit = latestCached() { return hit }
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: true)
+        guard let display = content.displays.first else {
+            throw NSError(
+                domain: "autoxhs", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "没找到可用的显示器"])
         }
+        let filter = SCContentFilter(
+            display: display, excludingApplications: [], exceptingWindows: [])
+        let cfg = SCStreamConfiguration()
+        let scale = min(1.0, Double(FRAME_MAX_WIDTH) / Double(display.width))
+        cfg.width = Int(Double(display.width) * scale)
+        cfg.height = Int(Double(display.height) * scale)
+        cfg.showsCursor = true
+        let cg = try await SCScreenshotManager.captureImage(
+            contentFilter: filter, configuration: cfg)
+        guard
+            let jpeg = ciContext.jpegRepresentation(
+                of: CIImage(cgImage: cg), colorSpace: CGColorSpaceCreateDeviceRGB(),
+                options: [
+                    CIImageRepresentationOption(
+                        rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.8
+                ])
+        else {
+            throw NSError(
+                domain: "autoxhs", code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "截图编码失败"])
+        }
+        queue.sync { cached = (jpeg, Date()) }
+        return jpeg
     }
 }
 
 let audioHub = AudioHub()
-let frameHub = FrameHub()
+let screenGrabber = ScreenGrabber()
+/// 自测模式用的假画面(正常运行时为 nil)
+var fakeFrameJpeg: Data?
 let token = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
     .map { String(format: "%02x", $0) }.joined()
 var permissionOK = false
@@ -161,35 +204,29 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
         let filter = SCContentFilter(
             display: display, excludingApplications: [], exceptingWindows: [])
 
+        // 这条流**只用来兜底拿音频**(tap 不可用时)。画面压到 2×2 / 1fps:
+        // 我们一帧都不要,只借 ScreenCaptureKit 的系统音频能力,省 CPU/GPU(照上游 natively 的做法)。
         let cfg = SCStreamConfiguration()
-        // tap 已经在管系统音了,SCK 就只负责画面 —— 这样 SCK 被系统掐断也只影响截屏,不影响听
-        cfg.capturesAudio = !systemTap.running
+        cfg.capturesAudio = true
         cfg.sampleRate = SAMPLE_RATE
         cfg.channelCount = CHANNELS
-        // 不要把「本程序自己发出的声音」录进去(它本来也不发声,保险起见)
         cfg.excludesCurrentProcessAudio = true
-        let scale = min(1.0, Double(FRAME_MAX_WIDTH) / Double(display.width))
-        cfg.width = Int(Double(display.width) * scale)
-        cfg.height = Int(Double(display.height) * scale)
-        cfg.minimumFrameInterval = CMTime(seconds: FRAME_INTERVAL, preferredTimescale: 600)
+        cfg.width = 2
+        cfg.height = 2
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
         cfg.pixelFormat = kCVPixelFormatType_32BGRA
         cfg.queueDepth = 3
-        cfg.showsCursor = true
+        cfg.showsCursor = false
 
         if let old = self.stream {
             try? await old.stopCapture()
             self.stream = nil
         }
         let stream = SCStream(filter: filter, configuration: cfg, delegate: self)
-        if !systemTap.running {
-            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
-        }
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         try await stream.startCapture()
         self.stream = stream
-        logLine(
-            "[helper] 画面采集已启动:\(cfg.width)x\(cfg.height) @\(1 / FRAME_INTERVAL)fps"
-                + (systemTap.running ? "(音频走 Core Audio tap,不受此流影响)" : ",音频走 SCK 音轨 \(SAMPLE_RATE)Hz"))
+        logLine("[helper] 音频兜底流已启动(ScreenCaptureKit 音轨 \(SAMPLE_RATE)Hz,画面压到 2×2 不用)")
     }
 
     func stop() async {
@@ -203,11 +240,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
         _ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        switch type {
-        case .audio: handleAudio(sampleBuffer)
-        case .screen: handleVideo(sampleBuffer)
-        default: break
-        }
+        // 只处理音频:画面走 SCScreenshotManager 按需截,这条流的 2×2 画面直接丢掉
+        if type == .audio { handleAudio(sampleBuffer) }
     }
 
     /**
@@ -283,19 +317,6 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
         }
     }
 
-    private func handleVideo(_ sampleBuffer: CMSampleBuffer) {
-        guard let px = sampleBuffer.imageBuffer else { return }
-        let image = CIImage(cvPixelBuffer: px)
-        guard
-            let jpeg = ciContext.jpegRepresentation(
-                of: image, colorSpace: CGColorSpaceCreateDeviceRGB(),
-                options: [
-                    CIImageRepresentationOption(
-                        rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.8
-                ])
-        else { return }
-        frameHub.set(jpeg)
-    }
 }
 
 // MARK: - 极简 HTTP 服务(只听回环)
@@ -379,6 +400,7 @@ final class HttpConnection {
             let body = """
                 {"ok":true,"sampleRate":\(effectiveSampleRate),"channels":\(CHANNELS),\
                 "audioBackend":"\(systemTap.running ? "coreaudio-tap" : "screencapturekit")",\
+                "audioSilent":\(systemTap.silent),\
                 "permission":\(permissionOK),"needsToken":true,"tokenOk":\(ok)}
                 """
             return send(status: "200 OK", type: "application/json", body: Data(body.utf8))
@@ -392,12 +414,21 @@ final class HttpConnection {
         switch path {
         case "/audio": startAudioStream()
         case "/frame":
-            guard let (jpeg, at) = frameHub.latest(), Date().timeIntervalSince(at) < 5 else {
-                return send(
-                    status: "503 Service Unavailable", type: "application/json",
-                    body: Data("{\"error\":\"no frame yet\"}".utf8))
+            // 按需截一张(约 0.2~0.5 秒)。没有持续采集,所以没有会被系统掐断的流。
+            if let fake = fakeFrameJpeg {
+                return send(status: "200 OK", type: "image/jpeg", body: fake)
             }
-            send(status: "200 OK", type: "image/jpeg", body: jpeg)
+            Task { [weak self] in
+                do {
+                    let jpeg = try await screenGrabber.grab()
+                    self?.send(status: "200 OK", type: "image/jpeg", body: jpeg)
+                } catch {
+                    logLine("[helper] 截图失败:\(error.localizedDescription)")
+                    self?.send(
+                        status: "503 Service Unavailable", type: "application/json",
+                        body: Data("{\"error\":\"screenshot failed\"}".utf8))
+                }
+            }
         default:
             send(
                 status: "404 Not Found", type: "application/json",
@@ -410,7 +441,7 @@ final class HttpConnection {
           "Cache-Control: no-store"] + extra).joined(separator: "\r\n") + "\r\n\r\n"
     }
 
-    private func send(status: String, type: String, body: Data) {
+    func send(status: String, type: String, body: Data) {
         var out = Data(headers(status, type, extra: ["Content-Length: \(body.count)", "Connection: close"]).utf8)
         out.append(body)
         conn.send(
@@ -424,8 +455,14 @@ final class HttpConnection {
         let head = headers(
             "200 OK", "application/octet-stream", extra: ["Transfer-Encoding: chunked"])
         conn.send(content: Data(head.utf8), completion: .contentProcessed { _ in })
+        let myEpoch = audioEpoch
         audioHub.subscribe(id) { [weak self] pcm in
             guard let self, self.streaming else { return }
+            // 输出设备变了(世代号 +1)→ 主动断开,让页面重连并重新读采样率
+            if audioEpoch != myEpoch {
+                self.finish()
+                return
+            }
             var chunk = Data(String(format: "%x\r\n", pcm.count).utf8)
             chunk.append(pcm)
             chunk.append(Data("\r\n".utf8))
@@ -516,9 +553,7 @@ func writeInfoFile(port: UInt16) throws -> URL {
 ///   AUTOXHS_HELPER_FAKE_WAV=/path/a.wav  AUTOXHS_HELPER_FAKE_FRAME=/path/a.jpg
 func startFakeSource(wavPath: String, framePath: String?) {
     if let framePath, let jpeg = FileManager.default.contents(atPath: framePath) {
-        frameHub.set(jpeg)
-        // 画面有 5 秒新鲜度限制,自测时定期刷新一下
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in frameHub.set(jpeg) }
+        fakeFrameJpeg = jpeg  // 自测模式:/frame 直接回这张,不去真截屏
     }
     guard let wav = FileManager.default.contents(atPath: wavPath), wav.count > 44 else {
         logLine("[helper] 自测:读不到 WAV \(wavPath)\n")
@@ -605,6 +640,18 @@ do {
         """)
 }
 
+// tap 正常 → **完全不起 ScreenCaptureKit 流**(画面按需截,音频有 tap)。
+// 这样就没有任何长连接会被系统掐断,日志也不会再被 -3821 刷屏。
+if systemTap.running {
+    logLine("[helper] 就绪:音频=CoreAudio tap,画面=按需截图(不持续采集)")
+    logLine("[helper] 就绪:http://127.0.0.1:\(port)(token 已写入 ~/.autoxhs/helper.json)")
+    permissionOK = true
+    RunLoop.main.run()
+    exit(0)
+}
+
+// tap 不可用 → 起 2×2 的 SCK 流当音频兜底
+logLine("[helper] Core Audio tap 不可用,改用 ScreenCaptureKit 音轨兜底")
 Task {
     do {
         try await capture.start()

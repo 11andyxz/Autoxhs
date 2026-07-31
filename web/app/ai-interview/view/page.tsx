@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { splitLayered } from "@/lib/aiInterview/layered";
 import { EMPTY_LIVE_STATE, MODE_LABELS, type LiveState } from "@/lib/aiInterview/schema";
+import { COMMAND_TIMEOUT_MS, isStale, reconnectDelayMs } from "@/lib/aiInterview/viewState";
 
 /**
  * 副屏视图:手机 / iPad / 第二显示器上只读地看「当前问题 + 该说的话」。
@@ -43,6 +44,65 @@ export default function LiveViewPage() {
   const [showTranscript, setShowTranscript] = useState(true);
   const answerRef = useRef<HTMLDivElement | null>(null);
   const stickRef = useRef(true);
+  /**
+   * 手机 → Mac 的命令。
+   *
+   * 为什么要在手机上放截图按钮:算法题的时候人是盯着手机看答案的,而截图快捷键在
+   * Mac 上 —— 题目看得见、键按不到。点一下这里,命令搭桌面端下一次推帧(150ms 一次)
+   * 的响应回去执行,所以从点到 Mac 动作最多差一帧。
+   *
+   * shots 是「我按了几下截图」的本地计数,不是 Mac 的确认 —— 真正的确认是答案出现。
+   * 发送之后归零。
+   */
+  /**
+   * 「完美答案」当前是不是展开着。
+   *
+   * 默认看第一版:面试时正在念的那一版不能被后台跑完的结果**悄悄换掉** ——
+   * 眼睛跟着的文字突然变了比没有更糟。所以要人主动点。
+   */
+  const [showPerfect, setShowPerfect] = useState(false);
+  const [shots, setShots] = useState(0);
+  const [cmdBusy, setCmdBusy] = useState<string | null>(null);
+  const [cmdNote, setCmdNote] = useState<string | null>(null);
+
+  const sendCommand = useCallback(async (type: string) => {
+    const k = new URLSearchParams(window.location.search).get("k") || "";
+    if (!k) return;
+    setCmdBusy(type);
+    setCmdNote(null);
+    try {
+      // 必须有超时:按钮的 disabled 只在 finally 里清,一个永不 settle 的 fetch
+      // (隧道半死不活时最常见)会把三个按钮永久变灰 —— 而那正是最需要
+      //「回答这句」的时候。
+      const res = await fetch("/api/ai-interview/live/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ k, type }),
+        signal: AbortSignal.timeout(COMMAND_TIMEOUT_MS),
+      });
+      const data = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !data?.success) {
+        setCmdNote(data?.error || "没发出去");
+        return;
+      }
+      if (type === "takeScreenshot") {
+        setShots((n) => n + 1);
+        setCmdNote("已让 Mac 截一张");
+      } else if (type === "processScreenshots") {
+        setShots(0);
+        setCmdNote("已送去解题,等答案");
+      } else if (type === "whatToAnswer") {
+        setCmdNote("已让 Mac 回答这句,等答案");
+      } else {
+        setShots(0);
+        setCmdNote("已清空");
+      }
+    } catch {
+      setCmdNote("网络不通");
+    } finally {
+      setCmdBusy(null);
+    }
+  }, []);
 
   /* ---- 连接 ---- */
   useEffect(() => {
@@ -51,22 +111,81 @@ export default function LiveViewPage() {
       setConn("denied");
       return;
     }
-    const es = new EventSource(`/api/ai-interview/live/stream?k=${encodeURIComponent(k)}`);
-    es.onopen = () => setConn("open");
-    es.onmessage = (e) => {
+    const url = `/api/ai-interview/live/stream?k=${encodeURIComponent(k)}`;
+    let es: EventSource | null = null;
+    let timer: number | null = null;
+    let attempt = 0;
+    let stopped = false;
+
+    /**
+     * 配对码到底是不是错的?
+     *
+     * `readyState === CLOSED` 不能直接当成「没有配对」:服务端返回任何非 200 都会让
+     * 浏览器**永久**关掉 EventSource,而这包括隧道重启、Cloudflare 5xx、切网时的一瞬。
+     * 之前就是这么判的 —— 网络抖一下,手机永远停在「没有配对」,提示还指错方向
+     * (人会去翻配对码,而其实只要重连)。所以这里真的去问一次状态码:
+     * 只有 403 才是配对问题,其余一律重连。
+     */
+    const isDenied = async (): Promise<boolean> => {
+      const ctl = new AbortController();
+      // 只要状态码,不要消费这条 SSE 流,所以拿到响应头就掐掉。
+      const kill = window.setTimeout(() => ctl.abort(), 4_000);
       try {
-        setState(JSON.parse(e.data) as LiveState);
-        setReceivedAt(Date.now());
-        setConn("open");
+        const res = await fetch(url, { signal: ctl.signal, cache: "no-store" });
+        ctl.abort();
+        return res.status === 403;
       } catch {
-        /* 坏包跳过 */
+        return false; // 探测本身失败 = 网络问题,不是配对问题
+      } finally {
+        window.clearTimeout(kill);
       }
     };
-    es.onerror = () => {
-      // 配对码不对 → 服务端 403,EventSource 直接关闭不再重连。
-      setConn(es.readyState === EventSource.CLOSED ? "denied" : "lost");
+
+    const connect = () => {
+      if (stopped) return;
+      es = new EventSource(url);
+      es.onopen = () => {
+        attempt = 0; // 连上了就把退避清零,下次抖动仍然从 1 秒开始重试
+        setConn("open");
+      };
+      es.onmessage = (e) => {
+        try {
+          setState(JSON.parse(e.data) as LiveState);
+          setReceivedAt(Date.now());
+          setConn("open");
+        } catch {
+          /* 坏包跳过 */
+        }
+      };
+      es.onerror = () => {
+        if (stopped) return;
+        if (es && es.readyState !== EventSource.CLOSED) {
+          // 浏览器自己会重连,别插手。
+          setConn("lost");
+          return;
+        }
+        setConn("lost");
+        es?.close();
+        es = null;
+        void isDenied().then((denied) => {
+          if (stopped) return;
+          // 403 不是终态。配对码是每个 web 进程重新生成的(dev 重启一次就变),
+          // 桌面端会自己取到新码继续推 —— 只有手机会永远停在「未配对」。
+          // 所以照样重试,只是把间隔拉长。
+          if (denied) setConn("denied");
+          attempt += 1;
+          const wait = reconnectDelayMs({ denied, attempt });
+          timer = window.setTimeout(connect, wait);
+        });
+      };
     };
-    return () => es.close();
+
+    connect();
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+      es?.close();
+    };
   }, []);
 
   /* ---- 本地走时钟(空闲时不会有新帧,但计时得继续动) ---- */
@@ -105,11 +224,27 @@ export default function LiveViewPage() {
   useEffect(() => {
     const box = answerRef.current;
     if (box && stickRef.current) box.scrollTop = box.scrollHeight;
-  }, [state.answer]);
+  }, [state.answer, showPerfect]);
 
-  const layered = splitLayered(state.answer);
+  // 新一轮答案开始(桌面端把 perfectState 复位成 none/running)就收起来,
+  // 否则会拿上一题的「完美答案」盖住这一题。
+  useEffect(() => {
+    if (state.perfectState === "none" || state.perfectState === "running") setShowPerfect(false);
+  }, [state.perfectState]);
+
+  const shown = showPerfect && state.perfectAnswer ? state.perfectAnswer : state.answer;
+  const layered = splitLayered(shown);
   // 只有「Mac 那边正在面试」时,长时间没新帧才算异常;没开始时本来就没人推,别误报。
-  const stale = state.live && receivedAt > 0 && now - receivedAt > STALE_MS;
+  // 同时看两个时钟:本机收到时间,和桌面端盖在帧上的 state.at。
+  // 只看前者的话,刚打开页面时 SSE 补的那一帧(可能是几小时前桌面端死掉时留下的)
+  // 会被显示成跳动的绿色「进行中」。
+  const stale = isStale({
+    live: state.live,
+    frameAt: state.at,
+    receivedAt,
+    now,
+    staleAfterMs: STALE_MS,
+  });
   const elapsed = state.live && receivedAt ? state.elapsedMs + (now - receivedAt) : state.elapsedMs;
   const font = SIZES[sizeIdx];
 
@@ -150,6 +285,11 @@ export default function LiveViewPage() {
                   : "未开始"}
         </span>
         <span className="font-mono">{fmtClock(elapsed)}</span>
+        {state.sttFailed > 0 && (
+          <span className="rounded bg-rose-500/20 px-1.5 py-0.5 font-semibold text-rose-300">
+            ⚠️ 采集断过 {state.sttFailed} 次
+          </span>
+        )}
         {state.company && <span className="truncate">{state.company}</span>}
         <span>{MODE_LABELS[state.mode]?.name}</span>
         <div className="ml-auto flex items-center gap-1">
@@ -173,6 +313,70 @@ export default function LiveViewPage() {
           </button>
         </div>
       </header>
+
+      {/*
+        桌面端报上来的失败原因。
+        在这之前,所有失败在手机上长得一模一样 —— 就是「屏幕不动了」:答案生成失败、
+        重试耗尽、发布权被网页版抢走、采集中断,全部无声。面试进行中最没用的信息就是
+        「它好像卡住了」,因为你无法据此决定要不要开口。
+      */}
+      {state.error && (
+        <div className="border-b border-amber-900/60 bg-amber-950/40 px-4 py-2 text-sm text-amber-200">
+          ⚠️ {state.error}
+        </div>
+      )}
+
+      {/*
+        手动兜底。自动回答要等桌面端收到 final 转写,而「问题已经显示出来了、答案却
+        没动」是这套东西最难受的失败模式 —— 面试官在等你,你在等一个不会来的事件。
+        这个按钮不看任何自动判断,点了就等于在 Mac 上按 ⌘1。
+        放在最上面、占满一行:需要它的时候人是慌的,不该还要瞄准。
+      */}
+      {conn !== "denied" && (
+        <div className="border-b border-slate-800 px-4 pt-2 text-sm">
+          <button
+            onClick={() => void sendCommand("whatToAnswer")}
+            disabled={cmdBusy !== null}
+            className="w-full rounded-lg border border-sky-600 bg-sky-700 px-3 py-2.5 font-semibold text-white active:bg-sky-600 disabled:opacity-50"
+          >
+            💬 回答这句
+          </button>
+        </div>
+      )}
+
+      {/* 截图解题:算法题时人在手机前,截图键在 Mac 上 —— 这两个按钮把键搬过来。 */}
+      {conn !== "denied" && (
+        <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-2 text-sm">
+          <button
+            onClick={() => void sendCommand("takeScreenshot")}
+            disabled={cmdBusy !== null}
+            className="flex-1 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2.5 font-medium text-slate-100 active:bg-slate-700 disabled:opacity-50"
+          >
+            📷 截图{shots > 0 ? ` · ${shots}` : ""}
+          </button>
+          <button
+            onClick={() => void sendCommand("processScreenshots")}
+            disabled={cmdBusy !== null}
+            className="flex-1 rounded-lg border border-emerald-600 bg-emerald-700 px-3 py-2.5 font-medium text-white active:bg-emerald-600 disabled:opacity-50"
+          >
+            ➤ 发送解题
+          </button>
+          {shots > 0 && (
+            <button
+              onClick={() => void sendCommand("resetCancel")}
+              disabled={cmdBusy !== null}
+              className="rounded-lg border border-slate-700 px-2.5 py-2.5 text-slate-400 active:bg-slate-800 disabled:opacity-50"
+            >
+              清空
+            </button>
+          )}
+        </div>
+      )}
+      {cmdNote && (
+        <div className="border-b border-slate-800 bg-slate-900/60 px-4 py-1.5 text-xs text-slate-400">
+          {cmdNote}
+        </div>
+      )}
 
       {conn === "denied" ? (
         <div className="flex flex-1 items-center justify-center px-6 text-center text-sm leading-relaxed text-slate-400">
@@ -208,9 +412,49 @@ export default function LiveViewPage() {
           {/* 该说的话 */}
           <div className="flex min-h-0 flex-1 flex-col px-4 py-3">
             <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wide text-slate-500">
-              <span>{state.label || "建议这样说"}</span>
+              <span>{showPerfect ? "完美答案" : state.label || "建议这样说"}</span>
               {state.streaming && <span className="text-emerald-400">生成中</span>}
+
+              {/*
+                「完美答案」= 桌面端在后台把代码丢进沙箱跑测试用例的结果。
+                四态:没在验 → 不显示;正在跑 → 置灰;第一版就全过 → 绿勾(没东西可切);
+                有纠正版 → 高亮可点。
+                刻意做成手动切换而不是自动替换:面试时正在念的文字被悄悄换掉比不换更糟。
+              */}
+              {state.perfectState !== "none" && (
+                <button
+                  onClick={() => state.perfectState === "ready" && setShowPerfect((v) => !v)}
+                  disabled={state.perfectState !== "ready"}
+                  className={
+                    state.perfectState === "ready"
+                      ? `ml-auto rounded-full px-2.5 py-1 text-[11px] font-semibold normal-case ${
+                        showPerfect
+                          ? "bg-emerald-500 text-slate-900"
+                          : "bg-emerald-600/90 text-white ring-1 ring-emerald-300 animate-pulse"
+                      }`
+                      : "ml-auto rounded-full bg-slate-800 px-2.5 py-1 text-[11px] font-medium normal-case text-slate-500"
+                  }
+                >
+                  {state.perfectState === "running" && "验证中…"}
+                  {state.perfectState === "skipped" && "⚠ 未验证"}
+                  {state.perfectState === "already" && "✓ 用例全过"}
+                  {state.perfectState === "ready" && (showPerfect ? "← 看第一版" : "完美答案")}
+                </button>
+              )}
             </div>
+
+            {/* 验证结论:哪里错了 / 几个用例过了。人要照着念,得知道这版的可信度。 */}
+            {state.perfectNote && state.perfectState !== "none" && (
+              <div
+                className={`mb-2 rounded-md px-2 py-1 text-[11px] ${
+                  state.perfectState === "ready"
+                    ? "bg-emerald-950/60 text-emerald-300"
+                    : "bg-slate-800/60 text-slate-400"
+                }`}
+              >
+                {state.perfectNote}
+              </div>
+            )}
             <div
               ref={answerRef}
               onScroll={(e) => {
@@ -236,7 +480,7 @@ export default function LiveViewPage() {
                 </p>
               )}
               {layered.plain && <p className="whitespace-pre-wrap">{layered.plain}</p>}
-              {!state.answer && (
+              {!shown && (
                 <span className="text-base font-normal text-slate-500">
                   对方一提问,这里就会出现可以直接照着说的话。
                 </span>

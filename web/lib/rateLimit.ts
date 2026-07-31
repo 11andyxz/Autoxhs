@@ -11,7 +11,14 @@ const WINDOW_MS = 60_000;
 const MAX_REQUESTS = Number(process.env.RATE_LIMIT_MAX_PER_MIN) || 120;
 const buckets = new Map<string, Bucket>();
 
-export function rateLimit(key: string): { allowed: boolean } {
+/**
+ * @param key  计数键。**不同用途要用不同前缀**,否则会互相饿死:
+ *             实测「AI 辅助面试」的副屏推流(60~70 次/分钟)+ 生成答案的推流,
+ *             会在一分钟内吃满 120 的共享桶,然后**面试官那句话的转写请求被 429 丢掉** ——
+ *             声音抓到了、段也切出来了,却因为自家限流而永远听不到。
+ * @param max  这个用途自己的上限(不传用全局默认)
+ */
+export function rateLimit(key: string, max: number = MAX_REQUESTS): { allowed: boolean } {
   const now = Date.now();
   const bucket = buckets.get(key);
 
@@ -26,7 +33,7 @@ export function rateLimit(key: string): { allowed: boolean } {
     return { allowed: true };
   }
 
-  if (bucket.count >= MAX_REQUESTS) {
+  if (bucket.count >= max) {
     return { allowed: false };
   }
 

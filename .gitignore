@@ -36,3 +36,8 @@ data/
 
 # Vercel 项目链接(不应提交)
 .vercel
+
+# 桌面版面试外挂:自带 .git 的第三方仓库(natively,Personal Use Source 许可)。
+# 不嵌进本仓库 —— 它是独立仓库,我们的集成层(electron/services/autoxhs 等)提交在它自己的
+# git 里。见 natively-cluely-ai-assistant/AUTOXHS_INTEGRATION.md。
+natively-cluely-ai-assistant/

@@ -1,8 +1,6 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
 import { NextResponse, type NextRequest } from "next/server";
 
+import { readDefaultResume } from "@/lib/aiInterview/resumeSource";
 import { LIMITS } from "@/lib/aiInterview/schema";
 import { FileParseError, extractTextFromFile } from "@/lib/job-hunter/parse";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
@@ -12,9 +10,6 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
-/** 与 /api/job-hunter/default-resume 同一份文件(不放 public/,那份带手机号邮箱) */
-const DEFAULT_RESUME = "Andy_Xiong_Senior_Backend_Java_Developer.docx";
-const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 /**
  * 把简历变成纯文本,供实时回答做「事实依据」。
@@ -44,18 +39,10 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const buf = await readFile(
-      path.join(process.cwd(), "assets", "default-resume", DEFAULT_RESUME),
-    ).catch(() => null);
-    if (!buf) return bad("没有默认简历,请手动上传。", 404);
+    const fallback = await readDefaultResume();
+    if (!fallback) return bad("没有默认简历,请手动上传。", 404);
 
-    const file = new File([new Uint8Array(buf)], DEFAULT_RESUME, { type: DOCX_MIME });
-    const text = await extractTextFromFile(file);
-    return NextResponse.json({
-      success: true,
-      text: text.slice(0, LIMITS.resume),
-      name: DEFAULT_RESUME,
-    });
+    return NextResponse.json({ success: true, text: fallback.text, name: fallback.name });
   } catch (err) {
     if (err instanceof FileParseError) return bad(err.message);
     return fail(err, "ai-interview/resume-text");

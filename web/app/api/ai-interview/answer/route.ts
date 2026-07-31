@@ -4,7 +4,7 @@ import { streamAnswer } from "@/lib/aiInterview/ai";
 import type { QuestionKind } from "@/lib/aiInterview/question";
 import { parseAnswerRequest } from "@/lib/aiInterview/schema";
 import { sseResponse } from "@/lib/aiInterview/stream";
-import { bad, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
+import { bad, rateLimited, tooManyIn } from "@/lib/job-hunter/interview/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +24,7 @@ const QUESTION_KINDS = new Set([
  * 请求中断(用户换问题或点停)时 req.signal 会取消上游调用,不白烧 token。
  */
 export async function POST(req: NextRequest) {
-  if (tooMany(req)) return rateLimited();
+  if (tooManyIn(req, "aiitv-live", 600)) return rateLimited();
 
   let body: unknown;
   try {

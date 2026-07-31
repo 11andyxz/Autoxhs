@@ -147,6 +147,8 @@ export default function AiInterviewPage() {
   const [echoDropped, setEchoDropped] = useState(0);
   /** 采集是否掉线(辅助程序被系统掐断 / 共享被停);副屏和顶栏都要看得见 */
   const [sourceDown, setSourceDown] = useState(false);
+  /** 重试后仍然没转写成功的段数(会推到副屏,免得人在看手机时不知道自己聋了) */
+  const [sttFailed, setSttFailed] = useState(0);
   const [helperBusy, setHelperBusy] = useState(false);
   const [helperLog, setHelperLog] = useState("");
   const [viewing, setViewing] = useState<{ title: string; turns: Turn[]; summary: string } | null>(
@@ -281,9 +283,22 @@ export default function AiInterviewPage() {
       };
       if (!data.success) return;
       if (data.accepted === false) {
-        // 又开了一个更新的页面 → 让位,别再往副屏写(否则手机会在两场之间来回跳)。
+        // 让位,别再往副屏写(否则手机会在两场之间来回跳)。
+        //
+        // 但**不是永久的**:hub 现在的规则是「真的在面试的发布者」优先于「闲着的」
+        // (见 liveHub 的归属权判定),所以这个页面一旦真的开始面试,它是应该能
+        // 拿回副屏的。以前 supersededRef 一置上就再也不清,于是「先开了页面、
+        // 后开始面试」这个最自然的顺序会让手机永远收不到这一场。
         supersededRef.current = true;
-        setNotice("副屏已被另一个更新的「AI 辅助面试」页面接管 —— 这个页面不再往手机推送。");
+        setNotice(
+          phase === "live"
+            ? "副屏正被另一个发布者占用 —— 正在重新争取。"
+            : "副屏已被另一个更新的「AI 辅助面试」页面接管 —— 这个页面不再往手机推送。",
+        );
+        // 正在面试就过一会儿再争一次;闲着就老实让位。
+        if (phase === "live") {
+          window.setTimeout(() => { supersededRef.current = false; }, 5_000);
+        }
         return;
       }
       setViewers(data.viewers ?? 0);
@@ -406,6 +421,7 @@ export default function AiInterviewPage() {
     return () => window.clearInterval(id);
   }, [phase, save]);
 
+
   /* ============================ 生成回答 ============================ */
 
   const runAnswer = useCallback(
@@ -450,8 +466,15 @@ export default function AiInterviewPage() {
         }
         const full = await readSse(res, (event) => {
           if (event.t === "delta") setAnswer((prev) => prev + event.v);
-          else if (event.t === "error") setError(event.v);
+          else if (event.t === "error") {
+            setError(event.v);
+            // 也写进答案区:副屏只看这一块,不然手机上就是一片空白、你不知道该等还是该重按
+            setAnswer((prev) => prev || `⚠️ ${event.v}(按 ⌥A 重试)`);
+          }
         });
+        if (!full.trim()) {
+          setAnswer((prev) => prev || "⚠️ 这次没生成出内容,按 ⌥A 重试。");
+        }
         if (full.trim() && kind !== "ask") {
           // 记进全文,复盘时能看到「当时 AI 建议怎么说」。
           const at = Math.round(capRef.current?.elapsed ?? 0);
@@ -464,7 +487,9 @@ export default function AiInterviewPage() {
         }
       } catch (err) {
         if ((err as { name?: string })?.name !== "AbortError") {
-          setError(err instanceof Error ? err.message : "生成失败,请重试。");
+          const msg = err instanceof Error ? err.message : "生成失败,请重试。";
+          setError(msg);
+          setAnswer((prev) => prev || `⚠️ ${msg}(按 ⌥A 重试)`);
         }
       } finally {
         if (abortRef.current === controller) {
@@ -511,6 +536,18 @@ export default function AiInterviewPage() {
     [sendSnapshot],
   );
 
+  /**
+   * 自动回答的兜底闹钟。
+   * 主路径是音频心跳(不受标签页节流影响),但心跳来自 PCM 数据 ——
+   * 万一音频流卡住,已经排好的那次回答就永远不会触发(问题在字幕里躺着,却没人答)。
+   * 所以再加一条低频定时器兜着:被节流也就晚一两秒,总比永远不触发好。
+   */
+  useEffect(() => {
+    if (phase !== "live") return;
+    const id = window.setInterval(() => onHeartbeat(performance.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, [phase, onHeartbeat]);
+
   /* ============================ 转写 ============================ */
 
   const transcribe = useCallback(
@@ -524,9 +561,19 @@ export default function AiInterviewPage() {
       inflightRef.current += 1;
       setPending(inflightRef.current);
       try {
-        const res = await fetch("/api/ai-interview/transcribe", { method: "POST", body: form });
-        const data = (await res.json()) as { success?: boolean; text?: string; error?: string };
-        if (!data.success) throw new Error(data.error || "转写失败");
+        // 失败重试一次:面试官那一句只有这一份音频,丢了就永远听不到了。
+        // (实测过被自家限流 429 掉 —— 现在限流分桶了,但网络/上游抖动也不该让一个问题消失。)
+        let data: { success?: boolean; text?: string; error?: string } | null = null;
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+          const res = await fetch("/api/ai-interview/transcribe", { method: "POST", body: form });
+          data = (await res.json()) as { success?: boolean; text?: string; error?: string };
+          if (data.success) break;
+          if (attempt === 1) await new Promise((r) => window.setTimeout(r, 400));
+        }
+        if (!data?.success) {
+          setSttFailed((n) => n + 1);
+          throw new Error(data?.error || "转写失败");
+        }
         const text = (data.text || "").trim();
         if (!text) return;
         const role = segment.channel === "interviewer" ? "interviewer" : "me";
@@ -636,6 +683,7 @@ export default function AiInterviewPage() {
     turnsRef.current = [];
     setEchoDropped(0);
     setSourceDown(false);
+    setSttFailed(0);
     setAnswer("");
     setDetected(null);
     lastAnsweredRef.current = "";
@@ -885,10 +933,19 @@ export default function AiInterviewPage() {
       question,
       questionKind: detected?.kind ?? "",
       confidence: detected?.confidence ?? 0,
+      // 浏览器版没有沙箱跑用例那一套(那是桌面端 natively 自带的代码验证),
+      // 所以如实推 none —— 副屏上那个按钮就一直是灰的,不假装有。
+      // 这个页面自己的失败原因也推给副屏 —— 手机上看到的「为什么不动了」不该
+      // 取决于是桌面端还是网页版在发布。
+      error,
+      perfectState: "none" as const,
+      perfectAnswer: "",
+      perfectNote: "",
       label: answerSource === "screen" ? "截屏解题" : ANSWER_LABEL[answerKind],
       answer,
       streaming,
       sourceDown,
+      sttFailed,
       transcript: turns.slice(-LIVE_TRANSCRIPT_TURNS),
     };
     const since = performance.now() - pubLastRef.current;
@@ -914,6 +971,7 @@ export default function AiInterviewPage() {
     question,
     sendSnapshot,
     sourceDown,
+    sttFailed,
     streaming,
     turns,
   ]);
@@ -959,6 +1017,8 @@ export default function AiInterviewPage() {
         )}
 
         <PairingCard pairing={pairing} viewers={viewers} />
+
+        <DesktopCard />
 
         {phase === "setup" ? (
           <SetupPanel
@@ -1006,6 +1066,7 @@ export default function AiInterviewPage() {
               pending={pending}
               stats={stats}
               echoDropped={echoDropped}
+              sttFailed={sttFailed}
               sourceDown={sourceDown}
               autoAnswer={autoAnswer}
               setAutoAnswer={setAutoAnswer}
@@ -1137,6 +1198,54 @@ function PairingCard({
             </p>
           </>
         )}
+      </div>
+    </details>
+  );
+}
+
+/**
+ * 「桌面端」入口说明。
+ *
+ * 浏览器版(就是这个页面)和桌面版(natively-cluely-ai-assistant + 我们的集成层)是**两条并存的路**,
+ * 不是替代关系:
+ *  - 浏览器版:免安装,开一个标签页就能用;代价是听系统声音要靠共享标签页音频 / 虚拟声卡 / 本机辅助程序,
+ *    而且答案显示在这台机器的浏览器里。
+ *  - 桌面端:原生抓系统音频(Zoom / Teams / 电话都不用额外配),悬浮窗不进屏幕共享,答案更快;
+ *    代价是要先装一次(Electron + 原生模块)。
+ *
+ * 两边共用同一套东西:同一份默认简历、同一个手机副屏页面(/ai-interview/view)、同两张库表
+ * (ai_itv_session / ai_itv_turn),所以历史会话和复盘不用管这场面试是从哪边开的。
+ */
+function DesktopCard() {
+  return (
+    <details className="mb-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+      <summary className="cursor-pointer text-sm font-medium text-slate-700">
+        桌面端(natively 集成)
+        <span className="ml-2 text-xs font-normal text-slate-400">
+          原生抓系统声音 / 悬浮窗不进屏幕共享
+        </span>
+      </summary>
+      <div className="mt-3 space-y-3 text-xs leading-relaxed text-slate-500">
+        <p>
+          仓库里的 <code className="rounded bg-slate-100 px-1 py-0.5">natively-cluely-ai-assistant/</code>{" "}
+          是桌面版面试外挂,已经接上了这套工具箱:简历 / JD 作为作答依据、手机副屏、面试记录入库、
+          被问到的题进复习队列。第一次用先装依赖再起:
+        </p>
+        <pre className="overflow-x-auto rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-700">
+{`cd natively-cluely-ai-assistant
+npm install        # 首次:会编译原生模块、下本地模型,比较久
+npm run app:dev`}
+        </pre>
+        <p>
+          起来之后进 <span className="font-medium text-slate-600">Settings → Autoxhs</span>:打开集成开关 →
+          「从 Autoxhs 同步」拿简历和上一场的 JD → 复制手机副屏地址。
+          这个网页端要保持在跑(默认 <code className="rounded bg-slate-100 px-1 py-0.5">localhost:3100</code>),
+          它负责出简历、收字幕、当手机副屏的中转。
+        </p>
+        <p className="text-slate-400">
+          两边可以随便挑:浏览器版免安装,桌面端听得更干净。手机副屏同一时刻只认最后打开的那个发布方,
+          所以用桌面端时把这个页面的「开始面试」留着不点就行。
+        </p>
       </div>
     </details>
   );
@@ -1523,6 +1632,7 @@ function LiveBar(p: {
   pending: number;
   stats: { asked: number; said: number };
   echoDropped: number;
+  sttFailed: number;
   sourceDown: boolean;
   autoAnswer: boolean;
   setAutoAnswer: (v: boolean) => void;
@@ -1547,6 +1657,9 @@ function LiveBar(p: {
         提问 {p.stats.asked} · 我说 {p.stats.said}
         {p.pending > 0 && ` · 转写中 ${p.pending}`}
         {p.echoDropped > 0 && ` · 滤掉回声 ${p.echoDropped}`}
+        {p.sttFailed > 0 && (
+          <span className="font-semibold text-rose-600"> · 转写失败 {p.sttFailed} 段</span>
+        )}
       </span>
       <label className="flex items-center gap-2 text-xs text-slate-500">
         <input

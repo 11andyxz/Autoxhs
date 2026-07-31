@@ -25,15 +25,34 @@ function escapeXml(text: string): string {
     .replace(/'/g, "&#39;");
 }
 
-/** 把「指令腔」的句子中和掉:面试官/JD 里出现这种话时,它是内容而不是命令。 */
+/**
+ * 把「指令腔」的句子中和掉:面试官/JD 里出现这种话时,它是内容而不是命令。
+ *
+ * 这是**第二层**,不是边界。真正挡住「从 <transcript> 块里逃出去」的是下面的
+ * escapeXml —— 那个是结构性的,穷举不完的是这一层。所以这里的取舍是:覆盖最常见的
+ * 几种说法,不追求完备,也不因为不完备就放弃(两层都比一层强)。
+ *
+ * 覆盖面来自一次实测:原来的列表只认字面的 "ignore ... previous instructions",
+ * 而 disregard / forget everything above / New instructions: / 无视 / 从现在开始
+ * 全部原样穿过去。
+ */
 function neutralize(text: string): string {
+  const REMOVED_EN = "[instruction-like text removed]";
+  const REMOVED_ZH = "[已移除的指令样文本]";
   return text
+    // ignore / disregard / forget / override + previous|prior|above|earlier|all
     .replace(
-      /ignore\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|prompts?|rules?)/gi,
-      "[instruction-like text removed]",
+      /\b(?:ignore|disregard|forget|override|skip)\s+(?:all\s+|any\s+|the\s+|everything\s+)?(?:previous|prior|above|earlier|preceding|foregoing)?\s*(?:instructions?|prompts?|rules?|directions?|guidance)?\b/gi,
+      (m) => (/(?:instruction|prompt|rule|direction|guidance|everything|above|previous|prior|earlier)/i.test(m) ? REMOVED_EN : m),
     )
-    .replace(/(?:system|developer)\s*prompt\s*[::]/gi, "[prompt-reference removed]")
-    .replace(/忽略(?:之前|上面|以上|前面)(?:的)?(?:所有)?(?:指令|提示|规则|要求)/g, "[已移除的指令样文本]")
+    // "New instructions:" / "Your new task is" / "From now on"
+    .replace(/\bnew\s+(?:instructions?|rules?|task)\s*[::]/gi, REMOVED_EN)
+    .replace(/\bfrom\s+now\s+on\b/gi, REMOVED_EN)
+    .replace(/\byou\s+are\s+now\s+(?:a|an|the)\b/gi, REMOVED_EN)
+    .replace(/(?:system|developer|assistant)\s*prompt\s*[::]/gi, "[prompt-reference removed]")
+    // 中文:忽略 / 无视 / 不要理会 + 之前|上面|以上|前面|全部
+    .replace(/(?:忽略|无视|不要理会|不用管)(?:之前|上面|以上|前面|先前)?(?:的)?(?:所有|全部)?(?:指令|提示|规则|要求|设定)/g, REMOVED_ZH)
+    .replace(/从(?:现在|此)开始[,,]?\s*(?:你)?(?:必须|只能|要)/g, REMOVED_ZH)
     .replace(/(?:系统|开发者)提示词?\s*[::]/g, "[已移除的提示词引用]")
     .replace(/\[\/?INST\]/gi, "[inst]");
 }

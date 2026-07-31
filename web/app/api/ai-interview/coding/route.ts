@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import { streamCodingHint } from "@/lib/aiInterview/ai";
 import { LIMITS, asLang, clip, parseProfile, parseTurns } from "@/lib/aiInterview/schema";
 import { sseResponse } from "@/lib/aiInterview/stream";
-import { bad, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
+import { bad, rateLimited, tooManyIn } from "@/lib/job-hunter/interview/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,7 +17,7 @@ const IMAGE_RE = /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
  * 流式给出「先复述题目 → 思路 → 代码 → 复杂度 → 边界」。
  */
 export async function POST(req: NextRequest) {
-  if (tooMany(req)) return rateLimited();
+  if (tooManyIn(req, "aiitv-live", 600)) return rateLimited();
 
   let body: Record<string, unknown>;
   try {

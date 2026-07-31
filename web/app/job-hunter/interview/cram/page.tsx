@@ -30,6 +30,8 @@ type CramCard = {
   content: string;
   svg: string;
   extra: WordExtra | null;
+  /** 「结合我的项目」的简历版回答(空 = 还没生成);与 content(原答案)分开存,原答案不动。 */
+  projectAnswer: string;
   state: SrState;
   isDue: boolean;
   dueAt: string | null;
@@ -1216,7 +1218,166 @@ function CramFlashcard({
           onChanged={onChanged}
         />
       )}
+      {showBack && (ec || ef) && (
+        <ProjectAnswerSection card={card} sessionId={sessionId} onChanged={onChanged} />
+      )}
     </>
+  );
+}
+
+/* ============================ 结合我的项目(简历版回答) ============================ */
+
+/**
+ * 同一道题,再给一份「按这份简历里的项目」的第一人称回答,显示在原答案**下面**;
+ * 原答案(content)一字不动,这份单独存 project_answer,可重生成 / 手改 / 删。
+ *
+ * 本地状态先行:复习队列里的 card 是开轮时的快照(onChanged 只刷新下面的卡片清单),
+ * 生成完不会自己回流到这张卡,所以以 text 为准显示。
+ */
+function ProjectAnswerSection({
+  card,
+  sessionId,
+  onChanged,
+}: {
+  card: CramCard;
+  sessionId: number;
+  onChanged: () => void;
+}) {
+  const [text, setText] = useState(card.projectAnswer || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const URL_ = "/api/job-hunter/interview/cram/project-answer";
+
+  async function generate() {
+    setBusy(true);
+    setErr(null);
+    const r = await postJson<{ projectAnswer: string }>(URL_, { cardId: card.id });
+    setBusy(false);
+    if (r.ok && r.data) {
+      setText(r.data.projectAnswer);
+      setEditing(false);
+      onChanged();
+    } else {
+      setErr(r.error || "生成失败");
+    }
+  }
+
+  async function save() {
+    setBusy(true);
+    setErr(null);
+    const r = await postJson<{ projectAnswer: string }>(URL_, { cardId: card.id, projectAnswer: draft }, "PUT");
+    setBusy(false);
+    if (r.ok && r.data) {
+      setText(r.data.projectAnswer);
+      setEditing(false);
+      onChanged();
+    } else {
+      setErr(r.error || "保存失败");
+    }
+  }
+
+  async function clear() {
+    setBusy(true);
+    setErr(null);
+    const res = await fetch(`${URL_}?id=${card.id}`, { method: "DELETE" });
+    setBusy(false);
+    if (res.ok) {
+      setText("");
+      setEditing(false);
+      onChanged();
+    } else {
+      setErr("删除失败");
+    }
+  }
+
+  if (!text && !editing) {
+    return (
+      <div className="mt-3 border-t border-dashed border-slate-200 pt-2">
+        <button
+          onClick={generate}
+          disabled={busy}
+          title="同一道题，AI 按这份简历里的项目再写一份第一人称回答，存下来（原答案不动）"
+          className="rounded-lg border border-indigo-200 px-2.5 py-1 text-xs font-medium text-indigo-600 transition hover:bg-indigo-50 disabled:opacity-60"
+        >
+          {busy ? "按简历生成中…" : "🧩 结合我的项目回答"}
+        </button>
+        {err && <span className="ml-2 text-xs text-rose-500">{err}</span>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded-xl border border-indigo-200 bg-indigo-50/40 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-semibold text-indigo-700">🧩 结合我的项目（简历版回答）</p>
+        <div className="flex items-center gap-2.5">
+          {!editing && (
+            <>
+              <button
+                onClick={generate}
+                disabled={busy}
+                title="按简历重新生成（覆盖这份）"
+                className="text-xs font-medium text-indigo-500 transition hover:text-indigo-700 disabled:opacity-60"
+              >
+                {busy ? "生成中…" : "🔄 重新生成"}
+              </button>
+              <button
+                onClick={() => {
+                  setDraft(text);
+                  setEditing(true);
+                }}
+                className="text-xs text-slate-400 transition hover:text-slate-600"
+              >
+                ✏️ 改
+              </button>
+              <button
+                onClick={clear}
+                disabled={busy}
+                className="text-xs text-slate-300 transition hover:text-rose-500 disabled:opacity-60"
+              >
+                删除
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+      {editing ? (
+        <div className="mt-2 space-y-2">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={7}
+            className="w-full resize-y rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm leading-relaxed outline-none focus:border-indigo-400"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={save}
+              disabled={busy}
+              className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60"
+            >
+              {busy ? "保存中…" : "保存"}
+            </button>
+            <button
+              onClick={() => setEditing(false)}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-500 transition hover:bg-slate-50"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      ) : (
+        <CramSelectable
+          sessionId={sessionId}
+          text={text}
+          className="mt-1.5 whitespace-pre-wrap text-sm leading-relaxed text-slate-700"
+          onChanged={onChanged}
+        />
+      )}
+      {err && <p className="mt-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{err}</p>}
+    </div>
   );
 }
 

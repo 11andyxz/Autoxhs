@@ -487,6 +487,9 @@ export class LiveCapture {
   /** 走辅助程序时:画面从它的 /frame 拿,不需要再申请屏幕共享 */
   private helper: { port: number; token: string } | null = null;
   private helperAbort: AbortController | null = null;
+  /** 最近一次收到 PCM 的时间 —— 流「不报错但也不来数据」时靠它发现(看门狗) */
+  private lastPcmAt = 0;
+  private watchdog: number | null = null;
   /** stop() 之后不再重连 */
   private stopping = false;
   private timer: number | null = null;
@@ -632,6 +635,22 @@ export class LiveCapture {
   }
 
   /**
+   * 看门狗:PCM 流有时会「不报错、也不来数据」(TCP 背压、上游卡住)。
+   * 那种情况 fetch 的 reader 一直挂着,页面看起来正常,实际上已经聋了 ——
+   * 所以额外盯一下「最后一次收到数据的时间」,超过 6 秒就当掉线,主动重连。
+   */
+  private startPcmWatchdog(): void {
+    if (this.watchdog !== null) return;
+    this.watchdog = window.setInterval(() => {
+      if (this.stopping || !this.helper) return;
+      if (performance.now() - this.lastPcmAt > 6_000) {
+        this.handlers.onSourceState?.("interviewer", false);
+        this.helperAbort?.abort(); // 触发 pumpHelper 里的重连逻辑
+      }
+    }, 2_000);
+  }
+
+  /**
    * 一直读辅助程序的 PCM 流;流断了就自己重连。
    *
    * 为什么必须重连:macOS 会因为息屏/换显示器/系统那个「正在录屏」提示等原因掐断 SCStream,
@@ -648,12 +667,16 @@ export class LiveCapture {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (value?.length) pipeline.push(value);
+        if (value?.length) {
+          this.lastPcmAt = performance.now();
+          pipeline.push(value);
+        }
       }
     } catch {
       /* 断了,下面统一处理 */
     }
-    if (controller.signal.aborted || this.stopping) return;
+    // 注意:watchdog 也会 abort(用来强制重连),所以这里只认「用户真的停了」
+    if (this.stopping) return;
 
     this.handlers.onSourceState?.("interviewer", false);
     // 重连:辅助程序可能正在自我重启,端口/token 都要重新问
@@ -668,6 +691,7 @@ export class LiveCapture {
         };
         if (!info.available || !info.port || !info.token) continue;
         await this.startFromHelper(info.port, info.token);
+        this.lastPcmAt = performance.now();
         this.handlers.onSourceState?.("interviewer", true);
         return;
       } catch {
@@ -784,6 +808,10 @@ export class LiveCapture {
     for (const pipeline of this.channels.values()) pipeline.stop();
     this.channels.clear();
     // 先让 pipeline 收尾最后一段,再断掉和辅助程序的连接。
+    if (this.watchdog !== null) {
+      window.clearInterval(this.watchdog);
+      this.watchdog = null;
+    }
     this.helperAbort?.abort();
     this.helperAbort = null;
     this.helper = null;

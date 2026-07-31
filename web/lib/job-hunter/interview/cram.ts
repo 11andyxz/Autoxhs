@@ -61,6 +61,9 @@ export function ensureCramSchema(): Promise<void> {
           REFERENCES ip_cram_session(id) ON DELETE CASCADE
       )
     `);
+    // 「结合我的项目」的简历版回答。和 content(原答案)分开存:原答案一字不动,这一份可单独
+    // 重生成/改/删,复习时显示在原答案下面。
+    await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN project_answer MEDIUMTEXT NULL", ["ER_DUP_FIELDNAME"]);
     // FSRS(ts-fsrs)状态列。新卡留默认(NULL/0=New),复习时由 FSRS 填。
     await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN fsrs_difficulty DOUBLE NULL", ["ER_DUP_FIELDNAME"]);
     await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN fsrs_stability DOUBLE NULL", ["ER_DUP_FIELDNAME"]);
@@ -183,6 +186,7 @@ export type CramCardRow = {
   content: string;
   svg: string | null;
   extra_json: string | null;
+  project_answer: string | null;
   ease_factor: number;
   interval_days: number;
   repetitions: number;
@@ -287,7 +291,7 @@ export async function addCramCardsBulk(
 }
 
 const CARD_COLS =
-  `id, session_id, kind, front, content, svg, extra_json, ease_factor, interval_days, repetitions, lapses,
+  `id, session_id, kind, front, content, svg, extra_json, project_answer, ease_factor, interval_days, repetitions, lapses,
    fsrs_difficulty, fsrs_stability, fsrs_state, due_at, last_reviewed_at, last_grade`;
 
 export async function listCramCards(sessionId: number): Promise<CramCardRow[]> {
@@ -341,6 +345,17 @@ export async function updateCramCard(id: number, patch: { front?: string; conten
   if (!sets.length) return;
   params.push(id);
   await p.execute(`UPDATE ip_cram_card SET ${sets.join(", ")} WHERE id = ?`, params);
+}
+
+/**
+ * 写入/清空这张卡的「结合我的项目」回答(传 null 或空串 = 清掉)。
+ * 不动 content(原答案)也不动 SM-2/FSRS 进度 —— 重生成不该让复习进度倒退。
+ */
+export async function setCramCardProjectAnswer(id: number, text: string | null): Promise<void> {
+  await ensureCramSchema();
+  const p = getPool();
+  const value = text && text.trim() ? text.slice(0, 8000) : null;
+  await p.execute("UPDATE ip_cram_card SET project_answer = ? WHERE id = ?", [value, id]);
 }
 
 /** 复习后按 FSRS 更新记忆卡调度。写入难度/稳定性/状态/reps/lapses,due_at 用整天间隔落库(避开时区)。 */

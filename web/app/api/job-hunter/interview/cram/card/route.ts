@@ -36,6 +36,7 @@ export async function GET(req: NextRequest) {
       content: c.content,
       svg: c.svg ?? "",
       extra: parseExtra(c.extra_json),
+      projectAnswer: c.project_answer ?? "", // 「结合我的项目」的简历版回答(空 = 还没生成)
       state: srStateFromStability(c.last_reviewed_at != null, c.fsrs_stability ?? 0),
       isDue: c.is_due === 1,
       dueAt: c.due_at,

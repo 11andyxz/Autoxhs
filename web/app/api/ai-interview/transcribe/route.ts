@@ -3,7 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { LIMITS } from "@/lib/aiInterview/schema";
 import { echoesPrompt, looksLikeHallucination } from "@/lib/aiInterview/transcript";
-import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
+import { bad, fail, rateLimited, tooManyIn } from "@/lib/job-hunter/interview/http";
 import { transcribeAudio } from "@/lib/openai";
 
 export const runtime = "nodejs";
@@ -32,7 +32,8 @@ const MIN_AUDIO_BYTES = 2_000;
  * hint 传一小段简历/JD 里的专有名词,让 Kafka / Kubernetes 这类词不被听错。
  */
 export async function POST(req: NextRequest) {
-  if (tooMany(req)) return rateLimited();
+  // 这是实时链路的命脉:一场面试两个声道会发很多段,不能和别的工具共用计数
+  if (tooManyIn(req, "aiitv-live", 600)) return rateLimited();
 
   let form: FormData;
   try {

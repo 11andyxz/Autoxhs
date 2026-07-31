@@ -20,6 +20,15 @@ export function tooMany(req: NextRequest): boolean {
   return !rateLimit(clientKey(req)).allowed;
 }
 
+/**
+ * 独立计数桶。实时功能(听音/转写/推流)必须和「表单式」工具分开算,
+ * 否则高频的那一路会把低频但关键的那一路饿死(实测:副屏推流把转写请求 429 掉,
+ * 结果面试官的问题永远听不到)。
+ */
+export function tooManyIn(req: NextRequest, namespace: string, max: number): boolean {
+  return !rateLimit(`${namespace}:${clientKey(req)}`, max).allowed;
+}
+
 export function bad(error: string, status = 400) {
   return NextResponse.json({ success: false, error }, { status });
 }

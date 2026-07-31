@@ -200,6 +200,44 @@ export async function listSessions(limit = 30): Promise<SessionMeta[]> {
   return rows.map(toMeta);
 }
 
+/**
+ * 上一场面试的「开场上下文」(公司 / JD / 备忘 / 模式),不带字幕。
+ *
+ * 桌面端(natively 集成层)开新会话时拿它当默认值 —— 同一家公司连着面几轮很常见,
+ * 每轮都去网页里重新贴一遍 JD 是纯粹的浪费。故意**不**走 getSession():那个会把
+ * 整场几百上千句字幕全读出来,而这里只要几个字段。
+ */
+export async function getLatestContext(): Promise<
+  | {
+      id: number;
+      company: string;
+      jd: string;
+      notes: string;
+      mode: Mode;
+      lang: Lang;
+    }
+  | null
+> {
+  await ensureAiInterviewSchema();
+  const [rows] = await getPool().query<SessionRow[]>(
+    `SELECT id, title, mode, lang, company, jd_text, notes_text, '' AS summary,
+            turn_count, started_at, ended_at
+       FROM ai_itv_session
+      ORDER BY id DESC
+      LIMIT 1`,
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    company: row.company,
+    jd: row.jd_text,
+    notes: row.notes_text,
+    mode: asMode(row.mode),
+    lang: asLang(row.lang),
+  };
+}
+
 export async function getSession(sessionId: number): Promise<SessionDetail | null> {
   await ensureAiInterviewSchema();
   const p = getPool();

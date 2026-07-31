@@ -7,6 +7,7 @@ import {
   CODING_TRACE_SYSTEM,
   CRAM_ASK_SYSTEM,
   CRAM_CARDS_SYSTEM,
+  CRAM_PROJECT_ANSWER_SYSTEM,
   CUSTOM_ANSWER_SYSTEM,
   DIAGRAM_ASK_SYSTEM,
   REFINE_SYSTEM,
@@ -458,6 +459,34 @@ export async function answerAboutResume(args: {
   });
   const text = (response.output_text ?? "").trim();
   if (!text) throw new SchemaValidationError("回答为空");
+  return text;
+}
+
+/**
+ * 「结合我的项目」:同一道题,再给一份**按这份简历**的第一人称回答(原答案不动,另存一份)。
+ * 与原答案同语言(题库多是英文 → 英文,面试当场就能说)。返回纯文本。
+ */
+export async function answerFromMyProjects(args: {
+  question: string;
+  baseAnswer: string;
+  resumeText: string;
+}): Promise<string> {
+  // 压在路由 maxDuration=60 内,慢调用被客户端中止走优雅报错,而不是被 Vercel 硬杀成 504。
+  const client = getClient(52_000);
+  const content = dataBlock([
+    { label: "QUESTION (answer THIS)", body: args.question },
+    { label: "GENERIC ANSWER (already on the card; theory reference, do not repeat it)", body: args.baseAnswer },
+    { label: "CANDIDATE RESUME (the ONLY source of projects/facts you may use)", body: args.resumeText },
+  ]);
+  const response = await client.responses.create({
+    model: getModel(),
+    input: [
+      { role: "system", content: CRAM_PROJECT_ANSWER_SYSTEM },
+      { role: "user", content },
+    ],
+  });
+  const text = (response.output_text ?? "").trim();
+  if (!text) throw new SchemaValidationError("简历版回答为空");
   return text;
 }
 

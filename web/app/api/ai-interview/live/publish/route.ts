@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { checkCode, publishLive, viewerCount } from "@/lib/aiInterview/liveHub";
+import { checkCode, drainLiveCommands, publishLive, viewerCount } from "@/lib/aiInterview/liveHub";
 import { parseLiveState } from "@/lib/aiInterview/schema";
-import { bad, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
+import { bad, rateLimited, tooManyIn } from "@/lib/job-hunter/interview/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +12,9 @@ export const dynamic = "force-dynamic";
  * 所以这里要尽量轻:校验 + 写内存 + 广播,不落库、不调模型。
  */
 export async function POST(req: NextRequest) {
-  if (tooMany(req)) return rateLimited();
+  // 推流走自己的桶:它是本机、有配对码、纯内存操作的高频请求,
+  // 绝不能和「转写/生成答案」抢同一个计数(那样会把面试官的问题挤掉,实测踩过)。
+  if (tooManyIn(req, "aiitv-publish", 3_000)) return rateLimited();
 
   let body: Record<string, unknown>;
   try {
@@ -40,5 +42,9 @@ export async function POST(req: NextRequest) {
     accepted,
     v: state.v,
     viewers: viewerCount(),
+    // 顺路把手机排的命令(截图 / 发送)带回桌面端执行。复用这条本来就在跑的
+    // 150ms 通道,不用再为「手机 → Mac」单独开一个连接。
+    // 只有拿到写权限的发布者才取走:被接管的旧页面不该替新的那场执行动作。
+    commands: accepted ? drainLiveCommands() : [],
   });
 }
