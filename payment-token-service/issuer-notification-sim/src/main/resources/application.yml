@@ -1,0 +1,65 @@
+spring:
+  application:
+    name: issuer-notification-sim
+  config:
+    import: "classpath:config/pts-defaults.yml"
+  datasource:
+    url: "jdbc:h2:file:./target/pts-local;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1"
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 10
+      pool-name: notification-pool
+  sql:
+    init:
+      mode: always
+      schema-locations: "classpath:db/h2/schema.sql"
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: issuer-notification-sim
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.adxztech.pts.common.api"
+        spring.json.value.default.type: "com.adxztech.pts.common.api.LifecycleEvent"
+
+server:
+  port: 8086
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+
+pts:
+  bins:
+    seed-on-startup: false
+
+notification:
+  kafka:
+    enabled: false
+    topic: token.lifecycle
+    group-id: issuer-notification-sim
+
+---
+spring:
+  config:
+    activate:
+      on-profile: compose
+  datasource:
+    url: "jdbc:oracle:thin:@//toxiproxy:21521/FREEPDB1"
+    username: pts
+    password: pts
+    driver-class-name: oracle.jdbc.OracleDriver
+  sql:
+    init:
+      mode: never
+  kafka:
+    bootstrap-servers: kafka:9092
+notification:
+  kafka:
+    enabled: true

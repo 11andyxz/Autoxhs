@@ -14,6 +14,9 @@ export const MAX_PROJECT_ANSWER = 8_000;
 export const MAX_QUESTION = 2_000;
 export const MAX_BASE_ANSWER = 8_000;
 
+/** 「默认项目」名的入库上限(= ip_cram_session.preferred_project 的列宽)。 */
+export const MAX_PREFERRED_PROJECT = 120;
+
 /** 少于这么多字的「简历」基本是空壳(只有标题或几个词),硬编只会让模型编造项目。 */
 const MIN_USEFUL_RESUME = 80;
 
@@ -73,10 +76,50 @@ export function hasUsableResume(text: string): boolean {
   return text.trim().length >= MIN_USEFUL_RESUME;
 }
 
-/** 模型偶尔把整段答案用 ``` 围栏包起来 / 加空行,去掉再落库。 */
+/**
+ * 「默认项目」名的归一化:压掉换行/多余空格再按列宽截断,空白视为「不指定」(空串)。
+ * 它会作为一条数据块喂给模型,所以别让换行把提示词的分块结构撑破。
+ */
+export function normalizePreferredProject(v: unknown): string {
+  if (typeof v !== "string") return "";
+  return v.replace(/\s+/g, " ").trim().slice(0, MAX_PREFERRED_PROJECT);
+}
+
+/**
+ * 模型偶尔把**整段答案**用 ``` 围栏包起来,去掉再落库。
+ * 注意:回答里现在会有「代码佐证」的代码块,所以只有在**全文只有一对**围栏、
+ * 且它正好裹住整段时才剥 —— 否则会把首尾两个代码块的标记吃掉、中间的散文全变成代码。
+ */
 export function cleanProjectAnswer(raw: string): string {
-  let t = raw.trim();
-  const fenced = t.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);
-  if (fenced) t = fenced[1].trim();
-  return t.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").slice(0, MAX_PROJECT_ANSWER).trim();
+  let t = raw.trim().replace(/\r\n/g, "\n");
+  const fenceCount = (t.match(/^```/gm) || []).length;
+  if (fenceCount === 2) {
+    const fenced = t.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);
+    if (fenced) t = fenced[1].trim();
+  }
+  return t.replace(/\n{3,}/g, "\n\n").slice(0, MAX_PROJECT_ANSWER).trim();
+}
+
+export type AnswerBlock = { kind: "text" | "code"; lang: string; body: string };
+
+/**
+ * 把回答拆成「散文段 / 代码块」交替的序列,供前端分别渲染(散文可划词,代码等宽可横向滚动)。
+ * 没闭合的围栏(被 8000 字截断时会遇到)按代码块处理到结尾,别把剩下的内容整段吞掉。
+ */
+export function splitFencedBlocks(text: string): AnswerBlock[] {
+  const out: AnswerBlock[] = [];
+  const push = (kind: AnswerBlock["kind"], lang: string, body: string) => {
+    if (body.trim()) out.push({ kind, lang, body: kind === "code" ? body.replace(/\n+$/, "") : body.trim() });
+  };
+  const re = /```([\w+#.-]*)[ \t]*\n?([\s\S]*?)(?:```|$)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    push("text", "", text.slice(last, m.index));
+    push("code", (m[1] || "").toLowerCase(), m[2]);
+    last = re.lastIndex;
+    if (last >= text.length) break;
+  }
+  push("text", "", text.slice(last));
+  return out;
 }

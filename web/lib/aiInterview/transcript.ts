@@ -123,9 +123,30 @@ function isRepeatedJunk(t: string): boolean {
     if (compact.slice(0, unit).repeat(times) === compact.slice(0, unit * times)) return true;
   }
   // ② 用字太少:重复片段不一定从第一个字开始(实测那条是「無垢」+「無缺」×N),
-  //    但这种刷屏的共同点是「很长、却只用了几个字」。正常句子的用字比例远高于此。
-  const distinct = new Set(compact).size;
-  if (distinct / compact.length < 0.25) return true;
+  //    但这种刷屏的共同点是「很长、却只用了几个字」。
+  //
+  //    **这条判据只对 CJK 成立,必须按文种分开算**(2026-08-01 修):
+  //    汉字表庞大,正常中文句子用字分散,distinct/length 很高;而拉丁字母只有 26 个,
+  //    英文句子越长这个比值必然越低 —— 一句 160 字符的正常面试问句只有约 30 个不同
+  //    字符 = 0.19,低于 0.25 阈值,于是**越长越正常的英文句子越会被判成刷屏丢掉**。
+  //    实测被误杀的原句:
+  //      "Can you briefly introduce yourself and highlight your experience relevant
+  //       to the JavaScript, Python, Java, and Kotlin programming languages
+  //       mentioned in the job description?"
+  //    网页版 /ai-interview 因此一直在静默丢弃面试官的长问题 —— 没有任何日志,
+  //    表现就是「明明说了一大段,字幕里什么都没有」。
+  const cjk = cjkRatio(t);
+  if (cjk > 0.5) {
+    const distinct = new Set(compact).size;
+    if (distinct / compact.length < 0.25) return true;
+    return false;
+  }
+  // 拉丁文本换一个不受字母表大小影响的口径:**不同词 / 总词数**。
+  // 刷屏和词汇沙拉的共同点是同几个词反复出现("thank you" ×N),正常句子哪怕很长,
+  // 词也基本互不重复。门槛放在 0.35 而不是更高,是因为正常英文本来就会重复
+  // the/and/to/your 这类虚词;实测那句正常问句是 0.92,"thank you"×5 是 0.20。
+  const words = t.toLowerCase().match(/[\p{L}\p{N}']+/gu) || [];
+  if (words.length >= 8 && new Set(words).size / words.length < 0.35) return true;
   return false;
 }
 

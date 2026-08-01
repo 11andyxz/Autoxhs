@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 
 import { answerFromMyProjects } from "@/lib/job-hunter/interview/ai";
+import { type CodeContext, collectCodeContext } from "@/lib/job-hunter/interview/codeContext";
 import { getCramCard, getCramSession, setCramCardProjectAnswer } from "@/lib/job-hunter/interview/cram";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
 import {
@@ -8,6 +9,7 @@ import {
   cleanProjectAnswer,
   clipResumeForPrompt,
   hasUsableResume,
+  normalizePreferredProject,
   projectAnswerInputs,
   resumeTextFromHtml,
 } from "@/lib/job-hunter/interview/projectAnswer";
@@ -49,7 +51,29 @@ export async function POST(req: NextRequest) {
       return bad("这份简历里没有可用的正文，先上传/追加简历内容再结合项目回答。");
     }
 
-    const answer = cleanProjectAnswer(await answerFromMyProjects({ ...inputs, resumeText }));
+    // 代码佐证:从这份简历配的本机代码库里挑几段真代码。挑不到 / 读不了都不算失败 ——
+    // 少了代码块的回答仍然有用,为它整条接口报错才是本末倒置。
+    let code: CodeContext | null = null;
+    if (session.code_path) {
+      try {
+        code = await collectCodeContext(session.code_path, `${inputs.question}\n${inputs.baseAnswer}`);
+      } catch (err) {
+        console.warn("[interview:cram-project-answer] 读代码库失败", {
+          name: (err as { name?: string } | null)?.name ?? "Unknown",
+        });
+      }
+    }
+
+    const answer = cleanProjectAnswer(
+      await answerFromMyProjects({
+        ...inputs,
+        resumeText,
+        // 这份简历的「默认项目」(在猛攻页头部设):答得上就用它讲,答不上模型自己挑。
+        preferProject: normalizePreferredProject(session.preferred_project),
+        codeTree: code?.tree,
+        codeExcerpts: code?.excerpts,
+      }),
+    );
     if (!answer) return bad("生成的简历版回答是空的，请重试。", 502);
     await setCramCardProjectAnswer(cardId, answer);
     return NextResponse.json({ success: true, projectAnswer: answer });

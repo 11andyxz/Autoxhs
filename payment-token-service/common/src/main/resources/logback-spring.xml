@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shared logging configuration for every payment-token-service module (S13).
+
+  Two things it guarantees:
+    1. %scrubbedMsg : card data cannot reach a log line, whatever a call site passes (PanScrubber).
+    2. [%X{traceId}] : the trace id propagated from the auth switch through detokenization to the HSM
+       and the database appears on every line, so one authorization is greppable end to end.
+
+  Note for editors: XML forbids a double hyphen inside a comment. Logback rejects the whole file if one
+  appears, and the resulting error only says "problem parsing XML document". Use a colon or a single hyphen.
+-->
+<configuration>
+
+  <conversionRule conversionWord="scrubbedMsg"
+                  class="com.adxztech.pts.common.log.PanScrubbingConverter"/>
+
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] %-28logger{0} : %scrubbedMsg%n%ex</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="com.hazelcast" level="WARN"/>
+  <logger name="com.hazelcast.internal.diagnostics" level="ERROR"/>
+  <logger name="org.jpos" level="WARN"/>
+  <logger name="com.adxztech.pts" level="INFO"/>
+
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+</configuration>

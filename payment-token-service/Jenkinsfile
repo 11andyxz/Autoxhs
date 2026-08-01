@@ -1,0 +1,117 @@
+// Regulated change management (S10.5, claim 13).
+//
+// The shape that matters is the GATE, not the stages: a change cannot reach a production build
+// until the certification suite has passed against the cert profile, and a human has approved it.
+// That models a dual-approval, scheduled-window release process rather than continuous deployment
+// to a payment network.
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        // A hung ISO 8583 socket or a stuck Hazelcast join must fail the build, not occupy an agent.
+        timeout(time: 45, unit: 'MINUTES')
+    }
+
+    environment {
+        // Pinned deliberately: the artefact must be built on the JDK it runs on.
+        JAVA_HOME = tool name: 'jdk-17', type: 'jdk'
+        MAVEN_OPTS = '-Dmaven.repo.local=.m2 -Xmx1g'
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                sh './build.sh -DskipTests'
+            }
+        }
+
+        stage('Unit tests') {
+            steps {
+                sh 'mvn -B surefire:test'
+            }
+            post {
+                always { junit '**/target/surefire-reports/*.xml' }
+            }
+        }
+
+        stage('Integration tests') {
+            // Boots the whole stack in one JVM: eight Spring contexts, a Hazelcast member and a real
+            // ISO 8583 listener. This is where a break in field-level handling surfaces.
+            steps {
+                sh 'mvn -B verify'
+            }
+            post {
+                always { junit '**/target/failsafe-reports/*.xml' }
+            }
+        }
+
+        stage('Certification suite (cert profile)') {
+            // The gate. cert mirrors production configuration but points at simulators, so what is
+            // certified is the configuration that will ship.
+            steps {
+                sh '''
+                    docker compose -f docker-compose.yml up -d --wait
+                    docker compose --profile cert run --rm cert-harness
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'target/cert-reports/*.html',
+                                     allowEmptyArchive: true, fingerprint: true
+                    publishHTML(target: [reportDir: 'target/cert-reports',
+                                         reportFiles: 'cert-report-*.html',
+                                         reportName: 'Issuer certification',
+                                         keepAll: true, alwaysLinkToLastBuild: true])
+                    sh 'docker compose -f docker-compose.yml down -v || true'
+                }
+            }
+        }
+
+        stage('Performance gate') {
+            // Advisory rather than blocking: absolute latency on a shared CI agent is not a
+            // trustworthy pass/fail signal, and a flaky gate teaches people to ignore gates. The
+            // numbers are archived so a trend is visible across builds.
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh 'ops/bench-ab.sh 7 200 "ramp:50->300/10s,constant:300/20s"'
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'target/bench/reports/*.csv',
+                                     allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Release approval') {
+            // Dual approval, and deliberately not automatable. submitter restricts WHO may approve;
+            // without it this is a speed bump rather than a control.
+            when { branch 'main' }
+            steps {
+                timeout(time: 24, unit: 'HOURS') {
+                    input message: 'Approve production packaging? The certification suite must be green.',
+                          ok: 'Approve',
+                          submitter: 'release-managers'
+                }
+            }
+        }
+
+        stage('Package for production') {
+            when { branch 'main' }
+            steps {
+                // -Poracle swaps H2 for the Oracle JDBC driver; prod is the config-server profile.
+                sh 'mvn -B -Poracle -DskipTests package'
+                archiveArtifacts artifacts: '**/target/*-exec.jar', fingerprint: true
+            }
+        }
+    }
+
+    post {
+        failure {
+            echo 'Build failed. A red certification stage blocks the release gate by design.'
+        }
+    }
+}

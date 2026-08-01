@@ -4,7 +4,9 @@ import Link from "next/link";
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { type Followup } from "@/lib/job-hunter/interview/followups";
 import { frontKey } from "@/lib/job-hunter/interview/frontKey";
+import { splitFencedBlocks } from "@/lib/job-hunter/interview/projectAnswer";
 
 /**
  * 划词组件的「动作总线」:追问 / 生成记忆图卡 交给工作台的共享面板处理。
@@ -15,6 +17,13 @@ const CramActions = createContext<{
   onAsk?: (passage: string, context: string) => void;
   onGenerate?: (passage: string, context: string) => void;
 }>({});
+
+/**
+ * 卡片内部的「就地追问」总线:回答里的代码块(CodeEvidence,埋在 AnswerBody 里)点「追问」时,
+ * 把这段代码交给同一张卡底部的追问区。和上面的 CramActions 分开 —— 那个是把选中的文字送去
+ * 工作台的共享面板(会新起一段问答),这个刻意**不离开这张卡**。
+ */
+const CardAsk = createContext<{ askAbout?: (snippet: string, ref: string) => void }>({});
 
 /* ============================ 类型 ============================ */
 
@@ -32,12 +41,23 @@ type CramCard = {
   extra: WordExtra | null;
   /** 「结合我的项目」的简历版回答(空 = 还没生成);与 content(原答案)分开存,原答案不动。 */
   projectAnswer: string;
+  /** 就地追问的问答(存在这张卡里,复习时跟着看)。 */
+  followups: Followup[];
   state: SrState;
   isDue: boolean;
   dueAt: string | null;
 };
 
-type SessionMeta = { id: number; title: string; language: string; resumeHtml: string };
+type SessionMeta = {
+  id: number;
+  title: string;
+  language: string;
+  resumeHtml: string;
+  /** 「结合我的项目」默认讲哪个项目(空 = 让 AI 按题自己挑)。 */
+  preferredProject: string;
+  /** 代码佐证用的本机代码库绝对路径(空 = 回答里不带代码块)。 */
+  codePath: string;
+};
 type CramSummary = { id: number; title: string; language: string; created_at: string; total: number; due: number };
 type Diagram = { svg: string; caption: string; text: string };
 type Candidate = Diagram & { passage: string; cid: number; adding?: boolean };
@@ -586,6 +606,25 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold text-slate-800">📄 {session.title}</p>
           <p className="text-xs text-slate-400">划词翻译按简历情景来；选一大段可生成记忆卡片</p>
+          <SessionTextSetting
+            sessionId={sessionId}
+            field="preferredProject"
+            label="🧩 简历版回答默认讲"
+            empty="（不指定，AI 按题自己挑）"
+            placeholder="例：Visa Token Service（留空=AI 按题自己挑）"
+            value={session.preferredProject}
+            onSaved={(v) => setSession((s) => (s ? { ...s, preferredProject: v } : s))}
+          />
+          <SessionTextSetting
+            sessionId={sessionId}
+            field="codePath"
+            label="📂 代码佐证取自"
+            empty="（没配代码库，回答里不带代码）"
+            placeholder="代码库绝对路径，例：/Users/…/payment-token-service"
+            wide
+            value={session.codePath}
+            onSaved={(v) => setSession((s) => (s ? { ...s, codePath: v } : s))}
+          />
         </div>
         <Link href="/job-hunter/interview/cram" className="shrink-0 text-xs text-emerald-600 hover:underline">
           ＋ 换一份简历
@@ -1020,6 +1059,19 @@ function CramFlashcard({
   const [justRefined, setJustRefined] = useState(false);
   const [refineNotes, setRefineNotes] = useState<string[]>([]);
 
+  // 代码块点「追问」→ 把这段代码交给卡片底部的追问区(seq 变化 = 再点一次也重新聚焦输入框)。
+  const [pendingAsk, setPendingAsk] = useState<{ snippet: string; ref: string; seq: number } | null>(null);
+  const askSeq = useRef(0);
+  const askCtx = useMemo(
+    () => ({
+      askAbout: (snippet: string, ref: string) => {
+        askSeq.current += 1;
+        setPendingAsk({ snippet, ref, seq: askSeq.current });
+      },
+    }),
+    [],
+  );
+
   async function save() {
     setSaving(true);
     const r = await postJson("/api/job-hunter/interview/cram/card", { id: card.id, front: ef, content: ec }, "PUT");
@@ -1207,21 +1259,127 @@ function CramFlashcard({
 
   // block
   return (
-    <>
+    <CardAsk.Provider value={askCtx}>
       {editBtn}
       {ef && <div className="whitespace-pre-wrap text-base font-semibold text-slate-800">{ef}</div>}
-      {showBack && ec && (
-        <CramSelectable
-          sessionId={sessionId}
-          text={ec}
-          className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700"
-          onChanged={onChanged}
-        />
-      )}
+      {/* 原答案本身也可能带 ```代码块```(追问存下来的卡常有),和简历版回答同一套渲染。 */}
+      {showBack && ec && <AnswerBody sessionId={sessionId} text={ec} onChanged={onChanged} />}
       {showBack && (ec || ef) && (
         <ProjectAnswerSection card={card} sessionId={sessionId} onChanged={onChanged} />
       )}
-    </>
+      {showBack && (ec || ef) && (
+        <FollowupThread
+          cardId={card.id}
+          sessionId={sessionId}
+          initial={card.followups}
+          pending={pendingAsk}
+          onClearPending={() => setPendingAsk(null)}
+          onChanged={onChanged}
+        />
+      )}
+    </CardAsk.Provider>
+  );
+}
+
+/* ============================ session 级设置(默认项目 / 代码库) ============================ */
+
+/**
+ * 简历标题下的一行内联设置。目前两处:
+ *  - preferredProject:简历版回答默认讲哪个项目(答不上这道题时 AI 才换别的);
+ *  - codePath:代码佐证从哪个本机代码库里取(空 = 回答里不带代码块)。
+ * 都存在 session 上 —— 一份简历设一次,不用每张卡都选。路径合法性由后端校验后回填。
+ */
+function SessionTextSetting({
+  sessionId,
+  field,
+  label,
+  empty,
+  placeholder,
+  value,
+  wide,
+  onSaved,
+}: {
+  sessionId: number;
+  field: "preferredProject" | "codePath";
+  label: string;
+  empty: string;
+  placeholder: string;
+  value: string;
+  wide?: boolean;
+  onSaved: (v: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function save() {
+    setSaving(true);
+    setErr(null);
+    const r = await postJson<{ preferredProject: string; codePath: string }>(
+      "/api/job-hunter/interview/cram/session",
+      { id: sessionId, [field]: draft },
+      "PUT",
+    );
+    setSaving(false);
+    if (r.ok && r.data) {
+      onSaved(r.data[field]);
+      setEditing(false);
+    } else {
+      setErr(r.error || "保存失败");
+    }
+  }
+
+  if (!editing) {
+    return (
+      <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-400">
+        <span>{label}：</span>
+        <span className={value ? "font-medium text-indigo-600" : "text-slate-400"} title={value || undefined}>
+          {value || empty}
+        </span>
+        <button
+          onClick={() => {
+            setDraft(value);
+            setErr(null);
+            setEditing(true);
+          }}
+          className="text-slate-300 transition hover:text-slate-500"
+        >
+          改
+        </button>
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save();
+        }}
+        placeholder={placeholder}
+        className={`${wide ? "w-96" : "w-64"} rounded-lg border border-slate-200 px-2 py-1 text-xs outline-none focus:border-indigo-400`}
+      />
+      <button
+        onClick={save}
+        disabled={saving}
+        className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60"
+      >
+        {saving ? "保存中…" : "保存"}
+      </button>
+      <button
+        onClick={() => {
+          setEditing(false);
+          setErr(null);
+        }}
+        className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-500 transition hover:bg-slate-50"
+      >
+        取消
+      </button>
+      {err && <span className="text-xs text-rose-500">{err}</span>}
+    </div>
   );
 }
 
@@ -1369,13 +1527,218 @@ function ProjectAnswerSection({
           </div>
         </div>
       ) : (
-        <CramSelectable
-          sessionId={sessionId}
-          text={text}
-          className="mt-1.5 whitespace-pre-wrap text-sm leading-relaxed text-slate-700"
-          onChanged={onChanged}
-        />
+        <AnswerBody sessionId={sessionId} text={text} onChanged={onChanged} />
       )}
+      {err && <p className="mt-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{err}</p>}
+    </div>
+  );
+}
+
+/**
+ * 简历版回答的正文:散文段可划词(翻译/加卡/追问),```围栏```的代码佐证按代码块渲染
+ * (等宽、深色、可横向滚动、可一键复制)。代码块不裹划词——在代码里选中一片会疯狂弹翻译浮层。
+ */
+function AnswerBody({
+  sessionId,
+  text,
+  onChanged,
+}: {
+  sessionId: number;
+  text: string;
+  onChanged: () => void;
+}) {
+  const blocks = useMemo(() => splitFencedBlocks(text), [text]);
+  // 代码块上面那行常常就是文件路径(模型按提示词写的),拿来当追问时的「针对哪段代码」标签。
+  const pathAbove = (i: number): string => {
+    const prev = blocks[i - 1];
+    if (!prev || prev.kind !== "text") return "";
+    const last = prev.body.split("\n").map((l) => l.trim()).filter(Boolean).pop() || "";
+    return /^[\w./@-]+\/[\w./@-]+\.\w{1,5}$/.test(last) ? last : "";
+  };
+  return (
+    <div className="mt-1.5 space-y-2">
+      {blocks.map((b, i) =>
+        b.kind === "code" ? (
+          <CodeEvidence key={i} lang={b.lang} code={b.body} path={pathAbove(i)} />
+        ) : (
+          <CramSelectable
+            key={i}
+            sessionId={sessionId}
+            text={b.body}
+            className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700"
+            onChanged={onChanged}
+          />
+        ),
+      )}
+    </div>
+  );
+}
+
+function CodeEvidence({ lang, code, path }: { lang: string; code: string; path?: string }) {
+  const [copied, setCopied] = useState(false);
+  const { askAbout } = useContext(CardAsk);
+  return (
+    <div className="group relative overflow-hidden rounded-lg border border-slate-800 bg-slate-900">
+      <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-3 py-1">
+        <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500">{lang || "code"}</span>
+        <div className="flex items-center gap-3">
+          {askAbout && (
+            <button
+              onClick={() => askAbout(code, path || lang || "这段代码")}
+              title="就这段代码问一句，问答会留在这张卡里"
+              className="text-[10px] text-sky-400 transition hover:text-sky-300"
+            >
+              💬 追问这段
+            </button>
+          )}
+          <button
+            onClick={() => {
+              navigator.clipboard?.writeText(code).then(
+                () => {
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                },
+                () => undefined,
+              );
+            }}
+            className="text-[10px] text-slate-500 transition hover:text-slate-200"
+          >
+            {copied ? "已复制" : "复制"}
+          </button>
+        </div>
+      </div>
+      <pre className="overflow-x-auto px-3 py-2 text-xs leading-relaxed text-slate-100">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
+/* ============================ 就地追问(问答留在这张卡里) ============================ */
+
+/**
+ * 卡片底部的追问区:问一句(可针对上面某段代码),回答就留在**这张卡**上跟着复习 ——
+ * 不新起卡片、不弹独立面板(那是阅读区 AskPanel 干的事)。
+ * 已有的问答从 card.followups 来,新问的以接口返回的整份列表为准(本地 state 先行,
+ * 因为复习队列里的 card 是开轮快照,不会自己回流)。
+ */
+function FollowupThread({
+  cardId,
+  sessionId,
+  initial,
+  pending,
+  onClearPending,
+  onChanged,
+}: {
+  cardId: number;
+  sessionId: number;
+  initial: Followup[];
+  pending: { snippet: string; ref: string; seq: number } | null;
+  onClearPending: () => void;
+  onChanged: () => void;
+}) {
+  const [items, setItems] = useState<Followup[]>(initial || []);
+  const [q, setQ] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // 点了某段代码的「追问这段」→ 展开输入框并聚焦(同一段再点一次也重新聚焦)。
+  useEffect(() => {
+    if (pending) inputRef.current?.focus();
+  }, [pending?.seq]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function submit() {
+    const question = q.trim();
+    if (!question || asking) return;
+    setAsking(true);
+    setErr(null);
+    const r = await postJson<{ items: Followup[] }>("/api/job-hunter/interview/cram/card-followup", {
+      cardId,
+      question,
+      snippet: pending?.snippet || "",
+      ref: pending?.ref || "",
+    });
+    setAsking(false);
+    if (r.ok && r.data) {
+      setItems(r.data.items);
+      setQ("");
+      onClearPending();
+      onChanged();
+    } else {
+      setErr(r.error || "追问失败");
+    }
+  }
+
+  async function remove(id: number) {
+    const res = await fetch(`/api/job-hunter/interview/cram/card-followup?cardId=${cardId}&id=${id}`, {
+      method: "DELETE",
+    });
+    const j = await res.json().catch(() => null);
+    if (j?.success) {
+      setItems(j.items as Followup[]);
+      onChanged();
+    }
+  }
+
+  return (
+    <div className="mt-3 rounded-xl border border-sky-200 bg-sky-50/40 p-3">
+      <p className="text-xs font-semibold text-sky-700">💬 追问（问答留在这张卡里，复习时一起看）</p>
+
+      {items.length > 0 && (
+        <div className="mt-2 space-y-2">
+          {items.map((f) => (
+            <div key={f.id} className="rounded-lg border border-sky-100 bg-white p-2.5">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-xs font-semibold text-slate-700">
+                  ❓ {f.q}
+                  {f.ref && <span className="ml-1.5 font-normal text-slate-400">· {f.ref}</span>}
+                </p>
+                <button
+                  onClick={() => remove(f.id)}
+                  title="删掉这条追问"
+                  className="shrink-0 text-xs text-slate-300 transition hover:text-rose-500"
+                >
+                  ✕
+                </button>
+              </div>
+              <AnswerBody sessionId={sessionId} text={f.a} onChanged={onChanged} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {pending && (
+        <div className="mt-2 flex items-start gap-2 rounded-lg border border-sky-200 bg-white px-2 py-1.5">
+          <span className="shrink-0 text-[11px] font-medium text-sky-600">针对 {pending.ref}：</span>
+          <code className="min-w-0 flex-1 truncate text-[11px] text-slate-500">
+            {pending.snippet.split("\n").find((l) => l.trim()) || ""}
+          </code>
+          <button onClick={onClearPending} className="shrink-0 text-[11px] text-slate-300 hover:text-slate-500">
+            ✕
+          </button>
+        </div>
+      )}
+
+      <div className="mt-2 flex gap-2">
+        <input
+          ref={inputRef}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) submit();
+          }}
+          placeholder={pending ? "比如：这个 super 是什么意思？" : "对这张卡有什么想问的？（可先点代码块上的「追问这段」）"}
+          className="flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-sky-400"
+        />
+        <button
+          onClick={submit}
+          disabled={asking || !q.trim()}
+          className="rounded-lg bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:opacity-60"
+        >
+          {asking ? "思考中…" : "问"}
+        </button>
+      </div>
       {err && <p className="mt-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{err}</p>}
     </div>
   );
@@ -1567,7 +1930,8 @@ function CramCardRow({
     onReload();
   }
   const icon = card.kind === "svg" ? "📊" : card.kind === "word" ? "🔤" : "🧠";
-  const label = card.front || card.content || (card.kind === "svg" ? "（图示）" : "");
+  // 一行预览:把 ``` 围栏标记去掉(带代码块的卡不然预览开头是一串 ```java)。
+  const label = (card.front || card.content || (card.kind === "svg" ? "（图示）" : "")).replace(/```[\w+#.-]*\n?/g, "");
   return (
     <div className="rounded-lg border border-slate-100">
       <div className="flex items-center justify-between gap-3 px-3 py-2">

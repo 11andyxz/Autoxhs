@@ -61,9 +61,16 @@ export function ensureCramSchema(): Promise<void> {
           REFERENCES ip_cram_session(id) ON DELETE CASCADE
       )
     `);
+    // 「结合我的项目」默认用哪个项目讲(空 = 让模型按题自己挑)。存在 session 上:
+    // 一份简历一个默认,不用每张卡都选。
+    await execIgnoring("ALTER TABLE ip_cram_session ADD COLUMN preferred_project VARCHAR(120) NULL", ["ER_DUP_FIELDNAME"]);
+    // 「代码佐证」用的本机代码库绝对路径(空 = 不带代码)。只在本机生效,公网模式整体关闭。
+    await execIgnoring("ALTER TABLE ip_cram_session ADD COLUMN code_path VARCHAR(500) NULL", ["ER_DUP_FIELDNAME"]);
     // 「结合我的项目」的简历版回答。和 content(原答案)分开存:原答案一字不动,这一份可单独
     // 重生成/改/删,复习时显示在原答案下面。
     await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN project_answer MEDIUMTEXT NULL", ["ER_DUP_FIELDNAME"]);
+    // 就地追问:这张卡下的「问题 → 回答」列表(JSON 数组),跟卡一起复习,不另起卡片。
+    await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN followups_json MEDIUMTEXT NULL", ["ER_DUP_FIELDNAME"]);
     // FSRS(ts-fsrs)状态列。新卡留默认(NULL/0=New),复习时由 FSRS 填。
     await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN fsrs_difficulty DOUBLE NULL", ["ER_DUP_FIELDNAME"]);
     await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN fsrs_stability DOUBLE NULL", ["ER_DUP_FIELDNAME"]);
@@ -90,8 +97,15 @@ export type CramSessionRow = {
   language: string;
   resume_hash: string | null;
   resume_html: string;
+  /** 「结合我的项目」默认讲哪个项目(空 = 模型按题自己挑)。 */
+  preferred_project: string | null;
+  /** 代码佐证的本机代码库绝对路径(空 = 回答里不带代码)。 */
+  code_path: string | null;
   created_at: string;
 };
+
+const SESSION_COLS =
+  "id, title, language, resume_hash, resume_html, preferred_project, code_path, created_at";
 
 export type CramSessionSummary = {
   id: number;
@@ -123,7 +137,7 @@ export async function findCramSessionByHash(resumeHash: string): Promise<CramSes
   await ensureCramSchema();
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    "SELECT id, title, language, resume_hash, resume_html, created_at FROM ip_cram_session WHERE resume_hash = ? LIMIT 1",
+    `SELECT ${SESSION_COLS} FROM ip_cram_session WHERE resume_hash = ? LIMIT 1`,
     [resumeHash],
   );
   return (rows[0] as CramSessionRow | undefined) ?? null;
@@ -133,7 +147,7 @@ export async function getCramSession(id: number): Promise<CramSessionRow | null>
   await ensureCramSchema();
   const p = getPool();
   const [rows] = await p.execute<RowDataPacket[]>(
-    "SELECT id, title, language, resume_hash, resume_html, created_at FROM ip_cram_session WHERE id = ? LIMIT 1",
+    `SELECT ${SESSION_COLS} FROM ip_cram_session WHERE id = ? LIMIT 1`,
     [id],
   );
   return (rows[0] as CramSessionRow | undefined) ?? null;
@@ -168,6 +182,25 @@ export async function updateCramSessionHtml(id: number, resumeHtml: string): Pro
   await p.execute("UPDATE ip_cram_session SET resume_html = ? WHERE id = ?", [resumeHtml.slice(0, MAX_HTML), id]);
 }
 
+/**
+ * 设这份简历的「默认项目」——「结合我的项目」优先用它讲(空串/null = 让模型按题自己挑)。
+ * 不动 resume_html / hash / 已生成的回答。
+ */
+export async function setCramSessionPreferredProject(id: number, name: string | null): Promise<void> {
+  await ensureCramSchema();
+  const p = getPool();
+  const value = name && name.trim() ? name.trim().slice(0, 120) : null;
+  await p.execute("UPDATE ip_cram_session SET preferred_project = ? WHERE id = ?", [value, id]);
+}
+
+/** 设这份简历的「代码库路径」(空 = 不带代码佐证)。路径的合法性由路由层校验后再传进来。 */
+export async function setCramSessionCodePath(id: number, dir: string | null): Promise<void> {
+  await ensureCramSchema();
+  const p = getPool();
+  const value = dir && dir.trim() ? dir.trim().slice(0, 500) : null;
+  await p.execute("UPDATE ip_cram_session SET code_path = ? WHERE id = ?", [value, id]);
+}
+
 export async function deleteCramSession(id: number): Promise<void> {
   await ensureCramSchema();
   const p = getPool();
@@ -187,6 +220,7 @@ export type CramCardRow = {
   svg: string | null;
   extra_json: string | null;
   project_answer: string | null;
+  followups_json: string | null;
   ease_factor: number;
   interval_days: number;
   repetitions: number;
@@ -291,7 +325,8 @@ export async function addCramCardsBulk(
 }
 
 const CARD_COLS =
-  `id, session_id, kind, front, content, svg, extra_json, project_answer, ease_factor, interval_days, repetitions, lapses,
+  `id, session_id, kind, front, content, svg, extra_json, project_answer, followups_json,
+   ease_factor, interval_days, repetitions, lapses,
    fsrs_difficulty, fsrs_stability, fsrs_state, due_at, last_reviewed_at, last_grade`;
 
 export async function listCramCards(sessionId: number): Promise<CramCardRow[]> {
@@ -356,6 +391,13 @@ export async function setCramCardProjectAnswer(id: number, text: string | null):
   const p = getPool();
   const value = text && text.trim() ? text.slice(0, 8000) : null;
   await p.execute("UPDATE ip_cram_card SET project_answer = ? WHERE id = ?", [value, id]);
+}
+
+/** 写入这张卡的「就地追问」列表(已序列化的 JSON;null = 一条都没有)。不动答案和复习进度。 */
+export async function setCramCardFollowups(id: number, json: string | null): Promise<void> {
+  await ensureCramSchema();
+  const p = getPool();
+  await p.execute("UPDATE ip_cram_card SET followups_json = ? WHERE id = ?", [json, id]);
 }
 
 /** 复习后按 FSRS 更新记忆卡调度。写入难度/稳定性/状态/reps/lapses,due_at 用整天间隔落库(避开时区)。 */

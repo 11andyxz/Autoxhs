@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: loadtest
+  main:
+    web-application-type: none
+    banner-mode: off
+  config:
+    import: "classpath:config/pts-defaults.yml"
+  datasource:
+    # The driver reads the ACTIVE token pool from the vault so it can exercise the accept path.
+    url: "jdbc:h2:file:./target/pts-local;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1"
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 4
+      pool-name: loadtest-pool
+  sql:
+    init:
+      mode: never
+
+pts:
+  bins:
+    seed-on-startup: false
+  sim:
+    # The driver must never inject latency into itself: it measures the service, not its own reads.
+    hop-latency-ms: 0
+
+load:
+  url: "http://localhost:8082"
+  profile: "ramp:50->500/20s,constant:500/40s,spike:1200/10s"
+  label: "run"
+  zipf-exponent: 1.0
+  workers: 256
+  token-pool: 2000
+  out: "target/load-reports"
+
+logging:
+  level:
+    root: WARN
+    com.adxztech.pts: INFO

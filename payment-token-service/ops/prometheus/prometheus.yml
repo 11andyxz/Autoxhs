@@ -1,0 +1,48 @@
+# Scrape configuration for the Compose stack (S13).
+#
+# 5s interval on the authorization path: the claim is about a p99 in the low tens of milliseconds
+# under a load test that runs for minutes, and a 30s interval would leave a spike represented by
+# one or two samples.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  external_labels:
+    stack: payment-token-service
+
+scrape_configs:
+  - job_name: detokenization
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # Both replicas scraped separately: an asymmetry between them (one with a cold near-cache after
+      # a restart, say) is a signal, and averaging it away would hide the failover story.
+      - targets: ["detokenization-service-1:8082", "detokenization-service-2:8082"]
+
+  - job_name: provisioning
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["token-provisioning-service:8081"]
+
+  - job_name: token-controls
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["token-controls-service:8084"]
+
+  - job_name: auth-switch
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["auth-switch-simulator:8083"]
+
+  - job_name: issuer-notification
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["issuer-notification-sim:8086"]
+
+  - job_name: hazelcast-members
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["hazelcast-member-1:8090", "hazelcast-member-2:8090"]
+
+  - job_name: issuer-simulator
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["issuer-simulator:8085"]

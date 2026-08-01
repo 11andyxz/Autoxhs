@@ -1,0 +1,210 @@
+# =====================================================================================
+# The full-fidelity stack (S3, S14): Oracle, Kafka, two Hazelcast members, Toxiproxy,
+# Prometheus and Grafana, plus every service.
+#
+# This is the stack the design describes. It was NOT executed while this repository was
+# written -- the authoring machine had no Docker -- so treat it as reviewed-but-unrun
+# infrastructure, and see docs/SIMPLIFICATIONS.md for the honest status of every component.
+# Everything behavioural is verified instead by the pure-JVM path, which needs no Docker:
+#
+#     ./build.sh          # 260 tests, including the whole stack in one JVM
+#     ops/run-local.sh    # the same topology on H2 + embedded Hazelcast
+#     ops/bench-ab.sh     # the latency A/B, with its calibration disclosed
+#
+# What this file adds over the pure-JVM path: real Oracle partitioning, a real broker, real
+# cross-container network latency via Toxiproxy, and two load-balanced detokenization replicas
+# for the failover demo.
+# =====================================================================================
+
+name: payment-token-service
+
+services:
+
+  # ------------------------------------------------------------------ infrastructure
+
+  oracle:
+    image: gvenzl/oracle-free:23-slim
+    environment:
+      ORACLE_PASSWORD: oracle
+      APP_USER: pts
+      APP_USER_PASSWORD: pts
+    ports: ["1521:1521"]
+    volumes:
+      # Applied at first start, in filename order.
+      - ./db/oracle:/container-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 90s
+
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # acks=all is only meaningful with min.insync.replicas set; on a single broker it is 1.
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+    ports: ["9092:9092"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  # The credibility feature of the whole stack (S11.3). Without injected latency a local Oracle
+  # answers in under a millisecond, removing a round trip looks free, and the before/after curves
+  # mean nothing. Toxiproxy puts realistic cross-rack RTT on the JDBC path and the controls path.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    ports:
+      - "8474:8474"    # control API
+      - "21521:21521"  # -> oracle:1521      (JDBC path)
+      - "28084:28084"  # -> token-controls:8084
+    depends_on:
+      oracle: {condition: service_healthy}
+
+  # One-shot: creates the proxies and attaches the latency toxics, then exits.
+  toxiproxy-setup:
+    image: curlimages/curl:8.10.1
+    depends_on: [toxiproxy]
+    volumes: ["./ops/toxiproxy:/setup:ro"]
+    entrypoint: ["sh", "/setup/setup.sh"]
+
+  # Hazelcast members run THIS project's jar, not a stock image: the read-through MapLoader, the
+  # write-behind MapStore and the ATC entry processor all execute on the member and need these
+  # classes plus a DataSource (see VaultClusterConfig).
+  hazelcast-member-1:
+    build: {context: ., dockerfile: ops/docker/Dockerfile, args: {MODULE: hazelcast-member}}
+    environment:
+      SPRING_PROFILES_ACTIVE: compose
+      PTS_HAZELCAST_MODE: MEMBER
+      PTS_HAZELCAST_PORT: 5701
+      PTS_HAZELCAST_MEMBERS_0_: hazelcast-member-1:5701
+      PTS_HAZELCAST_MEMBERS_1_: hazelcast-member-2:5701
+    depends_on:
+      oracle: {condition: service_healthy}
+
+  hazelcast-member-2:
+    build: {context: ., dockerfile: ops/docker/Dockerfile, args: {MODULE: hazelcast-member}}
+    environment:
+      SPRING_PROFILES_ACTIVE: compose
+      PTS_HAZELCAST_MODE: MEMBER
+      PTS_HAZELCAST_PORT: 5701
+      PTS_HAZELCAST_MEMBERS_0_: hazelcast-member-1:5701
+      PTS_HAZELCAST_MEMBERS_1_: hazelcast-member-2:5701
+    depends_on:
+      oracle: {condition: service_healthy}
+
+  # ------------------------------------------------------------------ platform services
+
+  config-server:
+    build: {context: ., dockerfile: ops/docker/Dockerfile, args: {MODULE: config-server}}
+    ports: ["8888:8888"]
+    volumes: ["./config:/app/config:ro"]
+
+  issuer-simulator:
+    build: {context: ., dockerfile: ops/docker/Dockerfile, args: {MODULE: issuer-simulator}}
+    ports: ["8085:8085"]
+
+  issuer-notification-sim:
+    build: {context: ., dockerfile: ops/docker/Dockerfile, args: {MODULE: issuer-notification-sim}}
+    environment:
+      SPRING_PROFILES_ACTIVE: compose
+    ports: ["8086:8086"]
+    depends_on:
+      oracle: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+
+  # The "legacy hop" (S8.2). Reached through Toxiproxy so the round trip the optimization deletes
+  # actually costs something measurable.
+  token-controls-service:
+    build: {context: ., dockerfile: ops/docker/Dockerfile, args: {MODULE: token-controls-service}}
+    environment:
+      SPRING_PROFILES_ACTIVE: compose
+    ports: ["8084:8084"]
+    depends_on:
+      oracle: {condition: service_healthy}
+
+  token-provisioning-service:
+    build: {context: ., dockerfile: ops/docker/Dockerfile, args: {MODULE: token-provisioning-service}}
+    environment:
+      SPRING_PROFILES_ACTIVE: compose
+    ports: ["8081:8081"]
+    depends_on:
+      oracle: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      config-server: {condition: service_started}
+      hazelcast-member-1: {condition: service_started}
+
+  # Two replicas behind nginx: the failover demo (S10.4) and the load target.
+  detokenization-service-1: &detok
+    build: {context: ., dockerfile: ops/docker/Dockerfile, args: {MODULE: detokenization-service}}
+    environment:
+      # Default to the BASELINE flags so the A/B starts from the "before" world. Switch arms with
+      #   SPRING_PROFILES_ACTIVE=compose,optimized
+      SPRING_PROFILES_ACTIVE: compose
+      JAVA_OPTS: "-Xms2g -Xmx2g -XX:+UseG1GC -Xlog:gc*:file=/var/log/pts/gc.log:t,uptime,level,tags"
+    volumes: ["./target/gc-logs:/var/log/pts"]
+    depends_on:
+      oracle: {condition: service_healthy}
+      hazelcast-member-1: {condition: service_started}
+
+  detokenization-service-2:
+    <<: *detok
+
+  detok-lb:
+    image: nginx:1.27-alpine
+    volumes: ["./ops/nginx/detok-lb.conf:/etc/nginx/conf.d/default.conf:ro"]
+    ports: ["8082:80"]
+    depends_on: [detokenization-service-1, detokenization-service-2]
+
+  auth-switch-simulator:
+    build: {context: ., dockerfile: ops/docker/Dockerfile, args: {MODULE: auth-switch-simulator}}
+    environment:
+      SPRING_PROFILES_ACTIVE: compose
+    ports:
+      - "8083:8083"
+      - "8583:8583"   # ISO 8583 over TCP
+    depends_on:
+      detok-lb: {condition: service_started}
+      issuer-simulator: {condition: service_started}
+
+  # Runs both certification suites then exits non-zero on failure: this is the Jenkins cert gate.
+  cert-harness:
+    build: {context: ., dockerfile: ops/docker/Dockerfile, args: {MODULE: cert-harness}}
+    environment:
+      SPRING_PROFILES_ACTIVE: compose
+    volumes: ["./target/cert-reports:/app/target/cert-reports"]
+    depends_on:
+      auth-switch-simulator: {condition: service_started}
+      token-provisioning-service: {condition: service_started}
+    profiles: ["cert"]   # opt-in: docker compose --profile cert up cert-harness
+
+  # ------------------------------------------------------------------ observability
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes: ["./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]

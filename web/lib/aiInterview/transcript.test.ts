@@ -139,6 +139,27 @@ describe("looksLikeHallucination", () => {
     // 英文场次里夹一两个中文词也不算(比例不够)
     expect(looksLikeHallucination("We call it 灰度 release in our team", "en")).toBe(false);
   });
+
+  it("REG 长英文问句不能被「用字太少」判据误杀(2026-08-01)", () => {
+    // isRepeatedJunk 的第②条原本是 distinct字符/总字符 < 0.25 → 判为刷屏。
+    // 那条只对 CJK 成立:汉字表庞大,用字自然分散;而英文只有 26 个字母,
+    // **句子越长这个比值必然越低**。下面每一句都是真实录到的面试官提问,
+    // 修复前全部被静默丢弃 —— 网页版的表现就是「对方说了一大段,字幕里什么都没有」。
+    const realQuestions = [
+      "Can you briefly introduce yourself and highlight your experience relevant to the JavaScript, Python, Java, and Kotlin programming languages mentioned in the job description?",
+      "Please give a brief self-introduction focusing on your experience and skills relevant to this JavaScript, Python, Java, and Kotlin programming position.",
+      "Can you describe a specific project where you integrated large language model APIs like OpenAI or Anthropic into a production application?",
+      "Can you explain how you have applied parameter-efficient fine-tuning techniques like LoRA or QLoRA in your projects?",
+    ];
+    for (const q of realQuestions) {
+      expect(looksLikeHallucination(q, "en"), q.slice(0, 40)).toBe(false);
+    }
+    // 换成词级判据之后,真正的英文刷屏仍然要挡住
+    expect(looksLikeHallucination("thank you thank you thank you thank you thank you")).toBe(true);
+    expect(looksLikeHallucination("okay okay okay okay okay okay okay okay okay")).toBe(true);
+    // CJK 那条老判据不能因为这次改动失效
+    expect(looksLikeHallucination("無垢無缺無缺無缺無缺無缺無缺無缺無缺無缺無缺無缺")).toBe(true);
+  });
 });
 
 describe("echoesPrompt", () => {

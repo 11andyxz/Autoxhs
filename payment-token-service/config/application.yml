@@ -1,0 +1,40 @@
+# =====================================================================================
+# Config server: settings shared by EVERY application in every zone (S12).
+#
+# Anything that must agree across services belongs here. The HSM seed is the sharpest
+# example: provisioning seals funding PANs with it and detokenization opens them, so a
+# per-service copy of this value is an outage waiting for a deploy.
+# =====================================================================================
+
+pts:
+  hsm:
+    mode: JCE
+    dev-seed: "pts-shared-zone-seed-change-per-environment"
+
+  bins:
+    token-ranges:
+      - bin-start: 49996000
+        bin-end: 49996100
+        issuer-id: ISSA
+        token-aware: false
+      - bin-start: 49996100
+        bin-end: 49996200
+        issuer-id: ISSB
+        token-aware: true
+      - bin-start: 49996200
+        bin-end: 49996300
+        issuer-id: ISSC
+        token-aware: false
+    funding-ranges:
+      - bin-start: 41111000
+        bin-end: 41112000
+        issuer-id: ISSA
+        blocked: false
+      - bin-start: 42222000
+        bin-end: 42223000
+        issuer-id: ISSB
+        blocked: false
+      - bin-start: 43333000
+        bin-end: 43334000
+        issuer-id: ISSX
+        blocked: true

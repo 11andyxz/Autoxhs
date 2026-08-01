@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.adxztech.pts</groupId>
+    <artifactId>payment-token-service</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>integration-tests</artifactId>
+  <name>integration-tests</name>
+  <description>Boots the whole stack in one JVM and proves every behavioural claim end to end.</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.adxztech.pts</groupId>
+      <artifactId>common</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.adxztech.pts</groupId>
+      <artifactId>hazelcast-member</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.adxztech.pts</groupId>
+      <artifactId>issuer-simulator</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.adxztech.pts</groupId>
+      <artifactId>token-controls-service</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.adxztech.pts</groupId>
+      <artifactId>token-provisioning-service</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.adxztech.pts</groupId>
+      <artifactId>detokenization-service</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.adxztech.pts</groupId>
+      <artifactId>auth-switch-simulator</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.adxztech.pts</groupId>
+      <artifactId>issuer-notification-sim</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.adxztech.pts</groupId>
+      <artifactId>cert-harness</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.adxztech.pts</groupId>
+      <artifactId>loadtest</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- These are integration tests: they boot eight Spring contexts, a Hazelcast member and a real
+           TCP listener, so they run in the verify phase rather than alongside unit tests. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <includes>
+            <include>**/*IT.java</include>
+          </includes>
+          <!-- One JVM, one stack: re-booting the topology per test class would dominate the runtime. -->
+          <reuseForks>true</reuseForks>
+          <forkCount>1</forkCount>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -1,12 +1,16 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+import { CodePathError, resolveCodeDir } from "@/lib/job-hunter/interview/codeContext";
 import {
   createCramSession,
   findCramSessionByHash,
   getCramSession,
+  setCramSessionCodePath,
+  setCramSessionPreferredProject,
   updateCramSessionHtml,
 } from "@/lib/job-hunter/interview/cram";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
+import { normalizePreferredProject } from "@/lib/job-hunter/interview/projectAnswer";
 import { resumeHash } from "@/lib/job-hunter/interview/sr";
 
 export const runtime = "nodejs";
@@ -79,10 +83,16 @@ export async function POST(req: NextRequest) {
   }
 }
 
-/** 追加复习资料:把并好的整份 HTML 写回同一 session(客户端已合并 head 样式 + body)。 */
+/**
+ * 改这份 session:
+ * - {id, resumeHtml}       → 追加复习资料(客户端已合并 head 样式 + body,整份写回)
+ * - {id, preferredProject} → 设「结合我的项目」默认讲哪个项目(空串 = 不指定,交给模型挑)
+ * - {id, codePath}         → 设代码佐证用的本机代码库绝对路径(空串 = 不带代码)
+ * 可单独传,也可一起传。
+ */
 export async function PUT(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
-  let body: { id?: unknown; resumeHtml?: unknown };
+  let body: { id?: unknown; resumeHtml?: unknown; preferredProject?: unknown; codePath?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -90,14 +100,43 @@ export async function PUT(req: NextRequest) {
   }
   const id = Number(body.id);
   if (!Number.isInteger(id) || id <= 0) return bad("缺少简历 id。");
-  const resumeHtml = typeof body.resumeHtml === "string" ? body.resumeHtml : "";
-  if (!resumeHtml.trim()) return bad("没有可用的内容。");
-  if (resumeHtml.length > MAX_HTML) return bad("内容太多了,请精简后再追加。");
+  const wantsHtml = typeof body.resumeHtml === "string";
+  const wantsProject = typeof body.preferredProject === "string";
+  const wantsCode = typeof body.codePath === "string";
+  if (!wantsHtml && !wantsProject && !wantsCode) return bad("没有要修改的内容。");
+  const resumeHtml = wantsHtml ? (body.resumeHtml as string) : "";
+  if (wantsHtml) {
+    if (!resumeHtml.trim()) return bad("没有可用的内容。");
+    if (resumeHtml.length > MAX_HTML) return bad("内容太多了,请精简后再追加。");
+  }
+  const preferredProject = normalizePreferredProject(body.preferredProject);
+
+  // 代码库路径要先落地校验(绝对路径 / 目录存在 / 在允许的根目录内),不合法直接把原因返回给用户。
+  let codePath = "";
+  if (wantsCode) {
+    const raw = (body.codePath as string).trim();
+    if (raw) {
+      try {
+        codePath = await resolveCodeDir(raw);
+      } catch (err) {
+        if (err instanceof CodePathError) return bad(err.message);
+        return fail(err, "cram-session-code-path");
+      }
+    }
+  }
+
   try {
     const s = await getCramSession(id);
     if (!s) return bad("这份简历不存在。", 404);
-    await updateCramSessionHtml(id, resumeHtml);
-    return NextResponse.json({ success: true });
+    if (wantsHtml) await updateCramSessionHtml(id, resumeHtml);
+    if (wantsProject) await setCramSessionPreferredProject(id, preferredProject);
+    if (wantsCode) await setCramSessionCodePath(id, codePath);
+    // 只回传这次真的改过的字段:回一个空的 preferredProject 会让调用方以为它被清空了。
+    return NextResponse.json({
+      success: true,
+      ...(wantsProject ? { preferredProject } : {}),
+      ...(wantsCode ? { codePath } : {}),
+    });
   } catch (err) {
     return fail(err, "cram-session-update");
   }
@@ -118,6 +157,8 @@ export async function GET(req: NextRequest) {
         title: s.title,
         language: s.language,
         resumeHtml: s.resume_html,
+        preferredProject: s.preferred_project ?? "",
+        codePath: s.code_path ?? "",
         createdAt: s.created_at,
       },
     });

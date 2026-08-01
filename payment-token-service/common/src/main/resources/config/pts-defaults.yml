@@ -1,0 +1,65 @@
+# =====================================================================================
+# Shared defaults imported by every service via spring.config.import.
+#
+# In the Docker Compose stack these same values are served by config-server (S12) so a
+# zone cannot end up with two services disagreeing about, for example, which HSM key
+# seed to use -- which would make provisioning write PANs detokenization cannot read.
+# =====================================================================================
+
+pts:
+  hsm:
+    mode: JCE
+    # Every service in a deployment must share this. Overridden per environment; the
+    # PKCS11 mode replaces it entirely with HSM-resident keys.
+    dev-seed: "pts-local-dev-seed-do-not-use-in-prod"
+
+  sim:
+    # Toxiproxy stand-in. 0 for correctness runs; the latency A/B sets ~7ms (S11.3).
+    hop-latency-ms: 0
+
+  bins:
+    seed-on-startup: true
+
+    # Token BIN blocks. Each range maps 1:1 onto an Oracle partition (S4.1), and
+    # token-aware drives the ISO 8583 backward-compatibility split (S6.2).
+    token-ranges:
+      - bin-start: 49996000
+        bin-end: 49996100
+        issuer-id: ISSA
+        token-aware: false      # legacy issuer: switch fully detokenizes and strips token fields
+      - bin-start: 49996100
+        bin-end: 49996200
+        issuer-id: ISSB
+        token-aware: true       # modern issuer: switch forwards the token plus its cryptogram
+      - bin-start: 49996200
+        bin-end: 49996300
+        issuer-id: ISSC
+        token-aware: false
+
+    # Funding card BIN blocks, used to resolve the issuer of a card being provisioned.
+    funding-ranges:
+      - bin-start: 41111000
+        bin-end: 41112000
+        issuer-id: ISSA
+        blocked: false
+      - bin-start: 42222000
+        bin-end: 42223000
+        issuer-id: ISSB
+        blocked: false
+      - bin-start: 43333000
+        bin-end: 43334000
+        issuer-id: ISSX
+        blocked: true           # demo blocklist: DECLINE regardless of the issuer risk signal
+
+  hazelcast:
+    mode: DISABLED
+    cluster-name: pts-cluster
+    members:
+      - "127.0.0.1:5701"
+    vault-ttl-seconds: 300
+    write-behind-seconds: 1
+    backup-count: 1
+    near-cache:
+      enabled: true
+      ttl-seconds: 60
+      max-entries: 50000

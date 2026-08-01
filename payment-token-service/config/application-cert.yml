@@ -1,0 +1,32 @@
+# =====================================================================================
+# cert zone (S10.5): mirrors production configuration but points at simulators.
+#
+# This is the gate in the release pipeline. A change must pass the certification suite
+# under this profile before a prod build is allowed, which is the mechanical part of
+# the regulated change-management story.
+#
+# Calibrated network latency is ON here, because the cert zone is also where the
+# latency A/B is measured -- and the disclosure that it is calibration rather than real
+# RTT belongs in the same place as the number (S11.3).
+# =====================================================================================
+
+pts:
+  sim:
+    hop-latency-ms: 7
+
+detok:
+  cache-mode: NEAR_CACHE
+  atc-mode: CLUSTER
+  controls:
+    inline: true
+
+provisioning:
+  idv:
+    # Certification suites must be able to complete OTP step-up without an SMS gateway.
+    expose-otp-for-demo: true
+  events:
+    transport: KAFKA
+
+logging:
+  level:
+    com.adxztech.pts: INFO

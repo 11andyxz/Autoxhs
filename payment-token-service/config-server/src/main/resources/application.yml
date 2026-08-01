@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: config-server
+  profiles:
+    active: native
+  cloud:
+    config:
+      server:
+        native:
+          # Served from the repository's config/ directory so the demo needs no Git remote.
+          search-locations: "file:./config,classpath:/config"
+        # A client asking for a profile that does not exist should fail loudly rather than start with
+        # silently empty configuration -- in this system that would mean a wrong HSM seed.
+        fail-on-composite-error: true
+
+server:
+  port: 8888
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,env,refresh

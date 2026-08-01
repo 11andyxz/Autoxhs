@@ -4,6 +4,13 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  BATCH_ALLOWED_EXTENSIONS,
+  isBatchAllowedFileName,
+  MAX_BATCH_FILES,
+  sumBatchRows,
+  type ParsedBatchRow,
+} from "@/lib/expense/batch";
+import {
   ALLOWED_FILE_EXTENSIONS,
   EXPENSE_CATEGORY_PRESETS,
   INCOME_CATEGORY_PRESETS,
@@ -98,6 +105,19 @@ function screenReceipts(files: File[]): { accepted: File[]; rejected: string[] }
     if (file.size === 0) { rejected.push(`「${file.name}」是空文件`); continue; }
     if (file.size > MAX_FILE_BYTES) { rejected.push(`「${file.name}」超过 20MB`); continue; }
     if (!isAllowedFileName(file.name)) { rejected.push(`「${file.name}」类型不支持`); continue; }
+    accepted.push(file);
+  }
+  return { accepted, rejected };
+}
+
+/** 批量识别的待传文件校验(比凭证多收 CSV/TXT,不收 Word)。 */
+function screenBatchFiles(files: File[]): { accepted: File[]; rejected: string[] } {
+  const accepted: File[] = [];
+  const rejected: string[] = [];
+  for (const file of files) {
+    if (file.size === 0) { rejected.push(`「${file.name}」是空文件`); continue; }
+    if (file.size > MAX_FILE_BYTES) { rejected.push(`「${file.name}」超过 20MB`); continue; }
+    if (!isBatchAllowedFileName(file.name)) { rejected.push(`「${file.name}」类型不支持`); continue; }
     accepted.push(file);
   }
   return { accepted, rejected };
@@ -537,6 +557,15 @@ export default function BusinessExpensePage() {
           )}
         </section>
 
+        {/* 批量导入:一次上传 → 识别多笔 → 复核 → 一次入账 */}
+        <BatchImportSection
+          businesses={businesses}
+          defaultBusinessId={selectedBusinessId}
+          onToast={showToast}
+          onCreateBusiness={createBusinessFlow}
+          onSaved={() => loadData(selectedBusinessId)}
+        />
+
         {/* 分布 */}
         {summary && (summary.byMonth.length > 0 || summary.byCategory.expense.length > 0 || summary.byCategory.income.length > 0) && (
           <section className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -855,6 +884,375 @@ function ReceiptUploader({
         </ul>
       )}
     </div>
+  );
+}
+
+/* --------------------------- 批量导入 Batch Import --------------------------- */
+
+type BatchUIRow = ParsedBatchRow & { uid: number; selected: boolean };
+type BatchFileReport = { name: string; count: number; error?: string };
+
+function toExpenseInput(r: BatchUIRow, businessId: string): ExpenseInput {
+  return {
+    businessId,
+    type: r.type,
+    spentOn: r.spentOn,
+    amount: r.amount,
+    category: r.category,
+    vendor: r.vendor,
+    paymentMethod: r.paymentMethod,
+    note: r.note,
+  };
+}
+
+/**
+ * 一次上传一份/多份「含多笔交易」的材料(对账单 PDF、账单截图、CSV 流水),
+ * 识别成多笔 → 在表里逐笔复核/改 → 勾选的一次性入账。
+ * 与上面的「记一笔」互不影响:这里不传凭证文件,只写记录。
+ */
+function BatchImportSection({
+  businesses,
+  defaultBusinessId,
+  onToast,
+  onCreateBusiness,
+  onSaved,
+}: {
+  businesses: Business[];
+  defaultBusinessId: number | null;
+  onToast: (msg: string) => void;
+  onCreateBusiness: () => Promise<number | null>;
+  onSaved: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [businessId, setBusinessId] = useState("");
+  const [files, setFiles] = useState<PendingReceipt[]>([]);
+  const [rows, setRows] = useState<BatchUIRow[]>([]);
+  const [reports, setReports] = useState<BatchFileReport[]>([]);
+  const [truncated, setTruncated] = useState(false);
+  const [parsing, setParsing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [bulkCategory, setBulkCategory] = useState("");
+  const [bulkPayment, setBulkPayment] = useState("");
+  const uidRef = useRef(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  // 归属默认跟随页面上方选中的 business;只有一个 business 时直接选它
+  useEffect(() => {
+    const fallback = businesses.length === 1 ? businesses[0].id : null;
+    const next = defaultBusinessId ?? fallback;
+    setBusinessId(next ? String(next) : "");
+  }, [defaultBusinessId, businesses]);
+
+  const selectedRows = useMemo(() => rows.filter((r) => r.selected), [rows]);
+  const totals = useMemo(() => sumBatchRows(selectedRows), [selectedRows]);
+  const dupCount = useMemo(() => rows.filter((r) => r.duplicate).length, [rows]);
+
+  function addFiles(list: File[]) {
+    const { accepted, rejected } = screenBatchFiles(list);
+    const room = MAX_BATCH_FILES - files.length;
+    const taken = accepted.slice(0, Math.max(0, room));
+    if (taken.length) {
+      setFiles((p) => [...p, ...taken.map((file) => { uidRef.current += 1; return { uid: uidRef.current, file }; })]);
+    }
+    const msgs = [...rejected];
+    if (accepted.length > taken.length) msgs.push(`一次最多 ${MAX_BATCH_FILES} 个文件,多余的已忽略`);
+    setErrors(msgs.length ? [`以下文件未添加:${msgs.join(";")}`] : []);
+  }
+
+  async function onParse() {
+    if (!files.length) { setErrors(["请先选择要识别的文件。"]); return; }
+    setParsing(true);
+    setErrors([]);
+    try {
+      const fd = new FormData();
+      files.forEach((f) => fd.append("files", f.file));
+      if (businessId) fd.append("businessId", businessId);
+      fd.append("today", todayLocal()); // 只有 MM/DD 的账单靠它推年份,必须用用户本地的今天
+      const res = await fetch("/api/business-expense/parse-batch", { method: "POST", body: fd });
+      const json = (await res.json()) as {
+        success: boolean;
+        rows?: ParsedBatchRow[];
+        files?: BatchFileReport[];
+        truncated?: boolean;
+        error?: string;
+      };
+      if (!json.success) { setErrors([json.error ?? "识别失败,请稍后重试。"]); return; }
+      const parsed = (json.rows ?? []).map((r) => { uidRef.current += 1; return { ...r, uid: uidRef.current, selected: !r.duplicate }; });
+      setRows(parsed);
+      setReports(json.files ?? []);
+      setTruncated(Boolean(json.truncated));
+      if (!parsed.length) setErrors(["没有识别出任何交易,请换一份更清晰的截图 / 对账单再试。"]);
+      else onToast(`识别出 ${parsed.length} 笔,请复核后保存`);
+    } catch {
+      setErrors(["识别失败,请检查网络或稍后重试。"]);
+    } finally {
+      setParsing(false);
+    }
+  }
+
+  function patchRow(uid: number, patch: Partial<BatchUIRow>) {
+    setRows((list) => list.map((r) => (r.uid === uid ? { ...r, ...patch } : r)));
+  }
+  function setAllSelected(v: boolean) {
+    setRows((list) => list.map((r) => ({ ...r, selected: v })));
+  }
+  function applyToSelected(patch: Partial<BatchUIRow>) {
+    setRows((list) => list.map((r) => (r.selected ? { ...r, ...patch } : r)));
+  }
+  function clearAll() {
+    setRows([]);
+    setFiles([]);
+    setReports([]);
+    setTruncated(false);
+    setErrors([]);
+  }
+
+  async function onSaveBatch() {
+    if (!businessId) { setErrors(["请选择这批记录归属的 business。"]); return; }
+    if (!selectedRows.length) { setErrors(["请至少勾选一笔。"]); return; }
+    // 逐行按「记一笔」同一套规则校验,行号用表里的位置,方便对着改
+    for (const [i, r] of rows.entries()) {
+      if (!r.selected) continue;
+      const errs = validateExpense(toExpenseInput(r, businessId));
+      if (errs.length) { setErrors([`第 ${i + 1} 行:${errs[0]}`]); return; }
+    }
+    setSaving(true);
+    setErrors([]);
+    try {
+      const res = await fetch("/api/business-expense/save-batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          businessId,
+          rows: selectedRows.map((r) => ({
+            type: r.type,
+            spentOn: r.spentOn,
+            amount: r.amount,
+            category: r.category,
+            vendor: r.vendor,
+            paymentMethod: r.paymentMethod,
+            note: r.note,
+          })),
+        }),
+      });
+      const json = (await res.json()) as { success: boolean; savedCount?: number; error?: string };
+      if (!json.success) { setErrors([json.error ?? "保存失败,请稍后重试。"]); return; }
+      onToast(`已批量记入 ${json.savedCount ?? selectedRows.length} 笔`);
+      // 已保存的行从表里移走,留下没勾的(通常是判定为重复的),方便继续处理
+      setRows((list) => list.filter((r) => !r.selected));
+      setFiles([]);
+      onSaved();
+    } catch {
+      setErrors(["保存失败,请检查网络或稍后重试。"]);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-800">
+            批量导入 <span className="text-slate-400">Batch Import</span>
+          </h2>
+          <p className="mt-1 text-xs text-slate-500">
+            一次上传对账单 / 账单截图 / CSV 流水,自动识别出多笔收支,复核后一次性入账。
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="rounded-xl border border-sky-200 px-3 py-1.5 text-sm font-medium text-sky-700 transition hover:border-sky-400"
+        >
+          {open ? "收起" : "📥 批量导入"}
+        </button>
+      </div>
+
+      {open && (
+        <div className="mt-4 space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="这批记录归属的 Business">
+              <div className="flex gap-2">
+                <select value={businessId} onChange={(e) => setBusinessId(e.target.value)} className={inputCls}>
+                  <option value="">选择 business…</option>
+                  {businesses.map((b) => <option key={b.id} value={String(b.id)}>{b.displayName}</option>)}
+                </select>
+                <button
+                  type="button"
+                  onClick={async () => { const id = await onCreateBusiness(); if (id) setBusinessId(String(id)); }}
+                  className="shrink-0 rounded-xl border border-slate-200 px-3 text-sm text-slate-600 transition hover:border-sky-400 hover:text-sky-700"
+                  title="新建 business"
+                >
+                  ＋
+                </button>
+              </div>
+            </Field>
+          </div>
+
+          {/* 待识别文件 */}
+          <div>
+            <input
+              ref={inputRef}
+              type="file"
+              multiple
+              accept={BATCH_ALLOWED_EXTENSIONS.map((x) => `.${x}`).join(",")}
+              onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); if (inputRef.current) inputRef.current.value = ""; }}
+              className="hidden"
+            />
+            <div
+              onDragEnter={(e) => { e.preventDefault(); setDragging(true); }}
+              onDragOver={(e) => { e.preventDefault(); if (!dragging) setDragging(true); }}
+              onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
+              onDrop={(e) => { e.preventDefault(); setDragging(false); addFiles(Array.from(e.dataTransfer.files)); }}
+              className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-4 py-6 text-center transition ${dragging ? "border-sky-400 bg-sky-50" : "border-slate-300"}`}
+            >
+              <button type="button" onClick={() => inputRef.current?.click()} className="rounded-xl border border-dashed border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-sky-400 hover:text-sky-700">
+                + 选择对账单 / 截图 / CSV
+              </button>
+              <span className="text-[11px] text-slate-400">
+                {dragging ? "松开即可添加" : `或拖到此处 · 支持 PDF / 图片截图 / CSV / TXT · 一次最多 ${MAX_BATCH_FILES} 个、单个 ≤ 20MB`}
+              </span>
+            </div>
+
+            {files.length > 0 && (
+              <ul className="mt-3 space-y-1">
+                {files.map((f) => (
+                  <li key={f.uid} className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-1.5 text-xs">
+                    <span className="min-w-0 truncate text-slate-700">{f.file.name} <span className="text-slate-400">({fmtSize(f.file.size)})</span></span>
+                    <button type="button" onClick={() => setFiles((p) => p.filter((x) => x.uid !== f.uid))} className="shrink-0 rounded-lg border border-slate-200 px-2 py-0.5 text-slate-500 transition hover:border-red-300 hover:text-red-600">移除</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button type="button" onClick={onParse} disabled={parsing || !files.length} className="rounded-xl bg-slate-900 px-5 py-2 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:opacity-50">
+                {parsing ? "识别中…(几十笔可能要 1 分钟)" : "🔍 识别多笔"}
+              </button>
+              {(rows.length > 0 || files.length > 0) && (
+                <button type="button" onClick={clearAll} disabled={parsing || saving} className="text-xs text-slate-400 transition hover:text-slate-600 disabled:opacity-50">清空</button>
+              )}
+            </div>
+          </div>
+
+          {reports.length > 0 && (
+            <ul className="space-y-1 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">
+              {reports.map((r) => (
+                <li key={r.name} className={r.error ? "text-red-600" : undefined}>
+                  {r.error ? `✕ ${r.error}` : `✓ ${r.name}:识别出 ${r.count} 笔`}
+                </li>
+              ))}
+              {truncated && <li className="text-amber-600">⚠ 交易过多,本次只保留了前 200 笔,请分批导入剩余部分。</li>}
+            </ul>
+          )}
+
+          {errors.length > 0 && (
+            <ul className="space-y-1 rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+              {errors.map((e) => <li key={e}>• {e}</li>)}
+            </ul>
+          )}
+
+          {rows.length > 0 && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                <span className="text-slate-500">
+                  识别 {rows.length} 笔 · 已选 <b className="text-slate-900">{selectedRows.length}</b> 笔 ·
+                  <span className="ml-1 text-rose-700">支出 {usd(totals.expense)}</span> /
+                  <span className="ml-1 text-emerald-700">收入 {usd(totals.income)}</span>
+                </span>
+                <button type="button" onClick={() => setAllSelected(true)} className="rounded-lg border border-slate-200 px-2 py-1 text-slate-600 transition hover:border-sky-400">全选</button>
+                <button type="button" onClick={() => setAllSelected(false)} className="rounded-lg border border-slate-200 px-2 py-1 text-slate-600 transition hover:border-sky-400">全不选</button>
+                {dupCount > 0 && <span className="text-amber-600">⚠ {dupCount} 笔与账本里已有记录同日同额,已默认不勾选</span>}
+              </div>
+
+              {/* 批量改:AI 留空的类别(必填)靠它一次补齐,不用逐行敲 */}
+              <div className="flex flex-wrap items-center gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs">
+                <span className="text-slate-500">批量改选中行:</span>
+                <input list="expense-categories" value={bulkCategory} onChange={(e) => setBulkCategory(e.target.value)} placeholder="类别" className="w-28 rounded-lg border border-slate-200 px-2 py-1 outline-none focus:border-slate-400" />
+                <button type="button" onClick={() => { if (bulkCategory.trim()) applyToSelected({ category: bulkCategory.trim() }); }} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-slate-600 transition hover:border-sky-400">填类别</button>
+                <input list="expense-payments" value={bulkPayment} onChange={(e) => setBulkPayment(e.target.value)} placeholder="付款方式" className="w-28 rounded-lg border border-slate-200 px-2 py-1 outline-none focus:border-slate-400" />
+                <button type="button" onClick={() => { if (bulkPayment.trim()) applyToSelected({ paymentMethod: bulkPayment.trim() }); }} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-slate-600 transition hover:border-sky-400">填付款方式</button>
+                <button type="button" onClick={() => applyToSelected({ type: "expense" })} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-rose-700 transition hover:border-rose-300">全设为支出</button>
+                <button type="button" onClick={() => applyToSelected({ type: "income" })} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-emerald-700 transition hover:border-emerald-300">全设为收入</button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1080px] text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-left text-slate-500">
+                      <th className="w-8 px-2 py-2 font-medium">
+                        <input type="checkbox" checked={rows.every((r) => r.selected)} onChange={(e) => setAllSelected(e.target.checked)} title="全选 / 全不选" />
+                      </th>
+                      {["#", "日期", "类型", "金额", "类别", "对方", "付款方式", "备注", "状态", ""].map((h, i) => (
+                        <th key={i} className="whitespace-nowrap px-2 py-2 font-medium">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, i) => {
+                      const rowErrs = businessId ? validateExpense(toExpenseInput(r, businessId)) : [];
+                      const bad = r.selected && rowErrs.length > 0;
+                      return (
+                        <tr key={r.uid} className={`border-b border-slate-100 ${bad ? "bg-red-50" : r.duplicate ? "bg-amber-50/60" : ""}`}>
+                          <td className="px-2 py-1.5"><input type="checkbox" checked={r.selected} onChange={(e) => patchRow(r.uid, { selected: e.target.checked })} /></td>
+                          <td className="px-2 py-1.5 text-slate-400">{i + 1}</td>
+                          <td className="px-2 py-1.5">
+                            <input type="date" value={r.spentOn} onChange={(e) => patchRow(r.uid, { spentOn: e.target.value })} className={`${cellCls} w-[130px]`} />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <select value={r.type} onChange={(e) => patchRow(r.uid, { type: e.target.value as ExpenseType })} className={`${cellCls} w-[68px] ${r.type === "income" ? "text-emerald-700" : "text-rose-700"}`}>
+                              <option value="expense">支出</option>
+                              <option value="income">收入</option>
+                            </select>
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input type="text" inputMode="decimal" value={r.amount} onChange={(e) => patchRow(r.uid, { amount: e.target.value })} className={`${cellCls} w-[86px] text-right font-medium`} />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input type="text" list={r.type === "income" ? "income-categories" : "expense-categories"} value={r.category} onChange={(e) => patchRow(r.uid, { category: e.target.value })} placeholder="必填" className={`${cellCls} w-[110px]`} />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input type="text" value={r.vendor} onChange={(e) => patchRow(r.uid, { vendor: e.target.value })} className={`${cellCls} w-[150px]`} />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input type="text" list="expense-payments" value={r.paymentMethod} onChange={(e) => patchRow(r.uid, { paymentMethod: e.target.value })} className={`${cellCls} w-[100px]`} />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input type="text" value={r.note} onChange={(e) => patchRow(r.uid, { note: e.target.value })} title={r.note} className={`${cellCls} w-[180px]`} />
+                          </td>
+                          <td className="whitespace-nowrap px-2 py-1.5">
+                            {bad ? (
+                              <span className="text-red-600" title={rowErrs.join(" ")}>✕ {rowErrs[0]}</span>
+                            ) : r.duplicate ? (
+                              <span className="text-amber-600" title="账本里已有同日同额的记录">⚠ 可能重复</span>
+                            ) : (
+                              <span className="text-slate-300" title={r.sourceName}>{r.sourceName.length > 12 ? `${r.sourceName.slice(0, 12)}…` : r.sourceName}</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <button type="button" onClick={() => setRows((list) => list.filter((x) => x.uid !== r.uid))} className="rounded-lg border border-slate-200 px-2 py-0.5 text-slate-500 transition hover:border-red-300 hover:text-red-600">✕</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button type="button" onClick={onSaveBatch} disabled={saving || !selectedRows.length} className="rounded-xl bg-sky-600 px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:opacity-50">
+                  {saving ? "保存中…" : `记入选中的 ${selectedRows.length} 笔`}
+                </button>
+                <span className="text-xs text-slate-400">保存后不会附带凭证文件;需要附发票时,可在明细里编辑对应记录再上传。</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1201,6 +1599,10 @@ function BusinessManagerModal({
 
 const inputCls =
   "w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:ring-1 focus:ring-slate-300";
+
+/** 批量复核表里的紧凑单元格输入框 */
+const cellCls =
+  "rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-900 outline-none transition focus:border-slate-400";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

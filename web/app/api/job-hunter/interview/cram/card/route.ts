@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 
 import { addCramCard, deleteCramCard, listCramCards, updateCramCard, type CramCardKind } from "@/lib/job-hunter/interview/cram";
+import { parseFollowups } from "@/lib/job-hunter/interview/followups";
 import { srStateFromStability } from "@/lib/job-hunter/interview/fsrs";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
 
@@ -37,6 +38,7 @@ export async function GET(req: NextRequest) {
       svg: c.svg ?? "",
       extra: parseExtra(c.extra_json),
       projectAnswer: c.project_answer ?? "", // 「结合我的项目」的简历版回答(空 = 还没生成)
+      followups: parseFollowups(c.followups_json), // 就地追问的问答,跟卡一起复习
       state: srStateFromStability(c.last_reviewed_at != null, c.fsrs_stability ?? 0),
       isDue: c.is_due === 1,
       dueAt: c.due_at,

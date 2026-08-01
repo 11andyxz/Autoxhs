@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.4.4</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.adxztech.pts</groupId>
+  <artifactId>payment-token-service</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <name>payment-token-service</name>
+  <description>
+    Network payment tokenization reference implementation: EMVCo-style provisioning, lifecycle and
+    in-authorization-path detokenization, built only on publicly documented standards.
+  </description>
+
+  <properties>
+    <java.version>17</java.version>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <hazelcast.version>5.5.0</hazelcast.version>
+    <jpos.version>2.1.8</jpos.version>
+    <ojdbc.version>23.6.0.24.10</ojdbc.version>
+    <spring-cloud.version>2024.0.1</spring-cloud.version>
+  </properties>
+
+  <modules>
+    <module>common</module>
+    <module>config-server</module>
+    <module>hazelcast-member</module>
+    <module>issuer-simulator</module>
+    <module>token-controls-service</module>
+    <module>token-provisioning-service</module>
+    <module>detokenization-service</module>
+    <module>auth-switch-simulator</module>
+    <module>issuer-notification-sim</module>
+    <module>cert-harness</module>
+    <module>loadtest</module>
+    <module>integration-tests</module>
+  </modules>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-dependencies</artifactId>
+        <version>${spring-cloud.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>com.hazelcast</groupId>
+        <artifactId>hazelcast</artifactId>
+        <version>${hazelcast.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.jpos</groupId>
+        <artifactId>jpos</artifactId>
+        <version>${jpos.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.oracle.database.jdbc</groupId>
+        <artifactId>ojdbc11</artifactId>
+        <version>${ojdbc.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.adxztech.pts</groupId>
+        <artifactId>common</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.adxztech.pts</groupId>
+        <artifactId>hazelcast-member</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.adxztech.pts</groupId>
+        <artifactId>issuer-simulator</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.adxztech.pts</groupId>
+        <artifactId>token-controls-service</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.adxztech.pts</groupId>
+        <artifactId>token-provisioning-service</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.adxztech.pts</groupId>
+        <artifactId>detokenization-service</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.adxztech.pts</groupId>
+        <artifactId>auth-switch-simulator</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.adxztech.pts</groupId>
+        <artifactId>issuer-notification-sim</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.adxztech.pts</groupId>
+        <artifactId>cert-harness</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.adxztech.pts</groupId>
+        <artifactId>loadtest</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <configuration>
+            <!-- Hazelcast members bind sockets; keep the JVM predictable and quiet. -->
+            <argLine>-Xmx1g -Dhazelcast.phone.home.enabled=false -Dhazelcast.logging.type=slf4j
+              -Djava.net.preferIPv4Stack=true</argLine>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-failsafe-plugin</artifactId>
+          <configuration>
+            <argLine>-Xmx1500m -Dhazelcast.phone.home.enabled=false -Dhazelcast.logging.type=slf4j
+              -Djava.net.preferIPv4Stack=true</argLine>
+          </configuration>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+
+  <profiles>
+    <!-- Oracle JDBC driver is only needed when running against a real Oracle instance
+         (docker-compose). The default (H2) build stays lean. -->
+    <profile>
+      <id>oracle</id>
+      <dependencies>
+        <dependency>
+          <groupId>com.oracle.database.jdbc</groupId>
+          <artifactId>ojdbc11</artifactId>
+          <scope>runtime</scope>
+        </dependency>
+      </dependencies>
+    </profile>
+  </profiles>
+</project>

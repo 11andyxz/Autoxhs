@@ -1,0 +1,210 @@
+# =====================================================================================
+# Certification suite: ISSA, a TOKEN-UNAWARE (legacy) issuer processor.
+#
+# This is the artefact that replaces a round of manual test transactions per issuer
+# (S10.5). Onboarding ISSA means: a token BIN block, token_aware=false, and this file.
+#
+# What it proves end to end:
+#   * green-path provisioning, and that the token authorizes
+#   * the switch fully detokenizes for a legacy issuer: DE 2 swapped, DE 55 and DE 48
+#     stripped, so the issuer receives a message indistinguishable from a plain card
+#     transaction
+#   * the 0110 returned to the acquirer still carries the TOKEN, not the funding PAN
+#   * replay of a used ATC is rejected
+#   * a tampered cryptogram is rejected
+#   * suspend stops authorization within milliseconds, and resume restores it
+#   * a card reissue keeps the same token working against the new funding PAN
+# =====================================================================================
+
+name: "ISSA legacy issuer certification"
+issuerId: "ISSA"
+description: >
+  Token-unaware issuer processor. Asserts full detokenization, field stripping, replay and
+  cryptogram rejection, lifecycle propagation, and reissue continuity.
+
+steps:
+  - id: capability-legacy
+    action: set-token-aware
+    description: "ISSA is a legacy processor: it cannot validate token cryptograms"
+    request:
+      issuerId: "ISSA"
+      enabled: false
+    expect:
+      status: 200
+      tokenAware: false
+
+  - id: provision-green
+    action: provision
+    description: "Green-path ID&V (risk 25) provisions immediately"
+    request:
+      fundingPan: "4111100000000725"
+      expiry: "2812"
+      cardholderName: "A XIONG"
+      requestorId: "40010030001"
+      domainType: "ECOM"
+      deviceId: "cert-device-01"
+    expect:
+      status: 201
+      decision: "APPROVE"
+      tokenStatus: "ACTIVE"
+    capture:
+      tokenRef: tokenRef
+
+  - id: authorize-approved
+    action: iso-authorize
+    description: "Valid cryptogram authorizes; the switch swaps DE 2 and strips token fields"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 4999
+      atc: 1
+    expect:
+      de39: "00"
+      approved: true
+      responseDe2IsToken: true
+      forwardedDe2IsToken: false
+      forwardedStripped: [55, 48]
+      issuerTokenAware: false
+
+  - id: authorize-replay
+    action: iso-authorize
+    description: "Re-presenting a used ATC is rejected as a replay (DE 39 59)"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 4999
+      atc: 1
+    expect:
+      de39: "59"
+      approved: false
+
+  - id: authorize-tampered-cryptogram
+    action: iso-authorize
+    description: "A cryptogram that does not verify is rejected, and the ATC is not consumed"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 4999
+      atc: 2
+      cryptogram: "0000000000000000"
+    expect:
+      de39: "59"
+      approved: false
+
+  - id: authorize-after-tamper
+    action: iso-authorize
+    description: "The genuine device can still use ATC 2: a forged attempt did not burn the counter"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 1000
+      atc: 2
+    expect:
+      de39: "00"
+      approved: true
+
+  - id: authorize-wrong-requestor
+    action: iso-authorize
+    description: "Domain restriction: another requestor presenting this token is declined"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 1000
+      atc: 3
+      requestorId: "60030050003"
+    expect:
+      de39: "05"
+      approved: false
+
+  - id: suspend
+    action: suspend
+    description: "Issuer suspends the token"
+    request:
+      tokenRef: "${tokenRef}"
+    expect:
+      status: 200
+      tokenStatus: "SUSPENDED"
+
+  - id: authorize-while-suspended
+    action: iso-authorize
+    description: "The suspension is visible to the authorization path immediately"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 1000
+      atc: 4
+    expect:
+      de39: "05"
+      approved: false
+
+  - id: suspend-again-is-conflict
+    action: suspend
+    description: "An illegal transition is a 409 from the state machine, not a silent no-op"
+    request:
+      tokenRef: "${tokenRef}"
+    expect:
+      status: 409
+
+  - id: resume
+    action: resume
+    request:
+      tokenRef: "${tokenRef}"
+    expect:
+      status: 200
+      tokenStatus: "ACTIVE"
+
+  - id: authorize-after-resume
+    action: iso-authorize
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 1000
+      atc: 5
+    expect:
+      de39: "00"
+      approved: true
+
+  - id: reissue-card
+    action: card-update
+    description: "The cardholder is issued a new PAN and expiry after loss"
+    request:
+      oldFundingPan: "4111100000000725"
+      newFundingPan: "4111100000002325"
+      newExpiry: "3012"
+    expect:
+      status: 200
+      tokensUpdated: 1
+
+  - id: token-reflects-new-card
+    action: get-token
+    description: "Same token, new funding card underneath"
+    request:
+      tokenRef: "${tokenRef}"
+    expect:
+      status: 200
+      tokenStatus: "ACTIVE"
+      fundingLast4: "2325"
+      fundingExpiry: "3012"
+
+  - id: authorize-after-reissue
+    action: iso-authorize
+    description: "The merchant changed nothing and the same token still authorizes"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 2500
+      atc: 6
+    expect:
+      de39: "00"
+      approved: true
+
+  - id: delete
+    action: delete
+    description: "Domain delete: terminal, tombstoned for audit"
+    request:
+      tokenRef: "${tokenRef}"
+    expect:
+      status: 200
+      tokenStatus: "DELETED"
+
+  - id: authorize-after-delete
+    action: iso-authorize
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 1000
+      atc: 7
+    expect:
+      de39: "05"
+      approved: false

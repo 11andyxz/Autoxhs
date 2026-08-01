@@ -1,0 +1,136 @@
+# =====================================================================================
+# Certification suite: ISSB, a TOKEN-AWARE issuer processor.
+#
+# Same inbound authorization as the ISSA suite, different outbound message. This pair of
+# suites is the concrete meaning of "field-level handling preserving backward compatibility
+# across issuer processors" (S6.2): one capability flag, two genuinely different messages,
+# both certified.
+#
+# For ISSB the switch does NOT strip the token data:
+#   * DE 2 keeps the network token
+#   * DE 55 (cryptogram TLV) and DE 48 (requestor/domain markers) are forwarded
+#
+# Also covers the yellow ID&V path: a wallet enrolling a mid-risk card must complete an
+# OTP step-up before the token can authorize.
+# =====================================================================================
+
+name: "ISSB token-aware issuer certification"
+issuerId: "ISSB"
+description: >
+  Token-aware issuer processor. Asserts that token data is forwarded rather than stripped, and
+  that OTP step-up gates activation for a wallet on the yellow ID&V path.
+
+steps:
+  - id: capability-token-aware
+    action: set-token-aware
+    description: "ISSB validates token cryptograms itself"
+    request:
+      issuerId: "ISSB"
+      enabled: true
+    expect:
+      status: 200
+      tokenAware: true
+
+  - id: provision-step-up
+    action: provision
+    description: "Risk 45 from a wallet: yellow band, so OTP step-up is required"
+    request:
+      fundingPan: "4222200000000745"
+      expiry: "2812"
+      requestorId: "40010030001"
+      domainType: "CONTACTLESS"
+      deviceId: "cert-device-02"
+      idvChannel: "SMS"
+    expect:
+      status: 202
+      decision: "STEP_UP"
+      tokenStatus: "PENDING_IDV"
+    capture:
+      tokenRef: tokenRef
+      idvSessionId: idvSessionId
+
+  - id: authorize-before-otp
+    action: iso-authorize
+    description: "A PENDING_IDV token cannot authorize"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 1500
+      atc: 1
+    expect:
+      de39: "05"
+      approved: false
+
+  - id: complete-otp
+    action: verify-otp
+    description: "Correct OTP promotes PENDING_IDV to ACTIVE"
+    request:
+      tokenRef: "${tokenRef}"
+      idvSessionId: "${idvSessionId}"
+    expect:
+      status: 200
+      tokenStatus: "ACTIVE"
+
+  - id: authorize-token-forwarded
+    action: iso-authorize
+    description: "Token and cryptogram are forwarded intact to a token-aware issuer"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 1500
+      atc: 2
+      domainType: "CONTACTLESS"
+    expect:
+      de39: "00"
+      approved: true
+      responseDe2IsToken: true
+      forwardedDe2IsToken: true
+      forwardedStripped: []
+      issuerTokenAware: true
+
+  - id: authorize-wrong-domain
+    action: iso-authorize
+    description: "A CONTACTLESS-bound token presented as ECOM is outside its domain"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 1500
+      atc: 3
+      domainType: "ECOM"
+    expect:
+      de39: "05"
+      approved: false
+
+  - id: authorize-above-issuer-limit
+    action: iso-authorize
+    description: "Detokenization succeeds and the issuer declines on its own rules (DE 39 51)"
+    request:
+      tokenRef: "${tokenRef}"
+      amountMinor: 900000
+      atc: 4
+      domainType: "CONTACTLESS"
+    expect:
+      de39: "51"
+      approved: false
+
+  - id: provision-declined
+    action: provision
+    description: "Red-path ID&V (risk 85) persists no token"
+    request:
+      fundingPan: "4222200000000885"
+      expiry: "2812"
+      requestorId: "40010030001"
+      domainType: "ECOM"
+    expect:
+      status: 200
+      decision: "DECLINE"
+
+  - id: provision-blocked-bin
+    action: provision
+    description: "A blocklisted funding BIN is declined even with a clean risk score"
+    request:
+      fundingPan: "4333300000000525"
+      expiry: "2812"
+      requestorId: "40010030001"
+      domainType: "ECOM"
+    expect:
+      status: 200
+      decision: "DECLINE"
+      reason: "FUNDING_BIN_BLOCKED"

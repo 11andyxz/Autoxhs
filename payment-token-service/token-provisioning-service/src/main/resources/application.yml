@@ -1,0 +1,123 @@
+spring:
+  application:
+    name: token-provisioning-service
+  config:
+    import: "classpath:config/pts-defaults.yml"
+  cloud:
+    config:
+      # No config server in the local stack. The Spring Cloud Config client refuses to start unless
+      # spring.config.import names configserver:, so it is explicitly disabled here and enabled with a
+      # real import in the compose profile below.
+      enabled: false
+  datasource:
+    url: "jdbc:h2:file:./target/pts-local;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1"
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 20
+      pool-name: provisioning-pool
+  sql:
+    init:
+      mode: always
+      schema-locations: "classpath:db/h2/schema.sql"
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      acks: all
+      properties:
+        # The two settings that carry the no-duplicate-notification guarantee (S10.2).
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+server:
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+pts:
+  bins:
+    # Provisioning owns reference data: it is the service that seeds the BIN maps and bootstraps the DEK.
+    seed-on-startup: true
+  hazelcast:
+    # Write-through to the cluster so a lifecycle change reaches the authorization path in
+    # milliseconds. DISABLED here means the pure-JVM stack still works with no cache tier at all.
+    mode: DISABLED
+
+provisioning:
+  issuer-sim-url: "http://localhost:8085"
+  idv:
+    approve-below-score: 30
+    decline-at-score: 70
+    trusted-requestors:
+      - "50020040002"   # DemoCards.TRUSTED_MERCHANT_REQUESTOR: yellow band approved without OTP
+    otp-length: 6
+    otp-ttl-seconds: 300
+    otp-max-attempts: 3
+    expose-otp-for-demo: true    # simulator affordance; see TokenController.peekOtp
+  outbox:
+    enabled: true
+    poll-interval-ms: 250
+    batch-size: 50
+  events:
+    transport: IN_MEMORY
+    notification-url: "http://localhost:8086"
+    kafka-topic: token.lifecycle
+    deliveries-per-event: 1
+  reconciliation:
+    enabled: true
+    interval-ms: 60000
+
+---
+# Local multi-process stack: HTTP event delivery (no Kafka) and a Hazelcast client.
+spring:
+  config:
+    activate:
+      on-profile: local-stack
+pts:
+  hazelcast:
+    mode: CLIENT
+    members:
+      - "127.0.0.1:5701"
+provisioning:
+  events:
+    transport: HTTP
+
+---
+# Docker Compose stack: Oracle, Kafka, Hazelcast members, Toxiproxy.
+spring:
+  config:
+    activate:
+      on-profile: compose
+    import: "classpath:config/pts-defaults.yml,optional:configserver:http://config-server:8888"
+  cloud:
+    config:
+      enabled: true
+      uri: "http://config-server:8888"
+  datasource:
+    url: "jdbc:oracle:thin:@//toxiproxy:21521/FREEPDB1"
+    username: pts
+    password: pts
+    driver-class-name: oracle.jdbc.OracleDriver
+  sql:
+    init:
+      mode: never          # Oracle schema is applied by db/oracle/*.sql at container init
+pts:
+  hazelcast:
+    mode: CLIENT
+    members:
+      - "hazelcast-member-1:5701"
+      - "hazelcast-member-2:5701"
+provisioning:
+  issuer-sim-url: "http://issuer-simulator:8085"
+  events:
+    transport: KAFKA

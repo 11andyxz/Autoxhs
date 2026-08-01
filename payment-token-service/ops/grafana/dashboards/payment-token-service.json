@@ -1,0 +1,254 @@
+{
+  "title": "payment-token-service",
+  "uid": "pts-main",
+  "tags": ["payment-token-service"],
+  "timezone": "browser",
+  "editable": true,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "description": "Every panel here exists to make one resume claim observable rather than asserted. The row titles name the claim.",
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "detok replica",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(pts_detok_stage_seconds_count, instance)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Detokenization latency - the 38ms to 22ms story (S8, claim 6)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Total detokenization latency percentiles",
+      "description": "The headline curve. Compare the same panel across the four flag combinations; each optimization should remove roughly one round trip's worth of latency.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.022 },
+              { "color": "red", "value": 0.025 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(pts_detok_stage_seconds_bucket{stage=\"total\", instance=~\"$instance\"}[1m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(pts_detok_stage_seconds_bucket{stage=\"total\", instance=~\"$instance\"}[1m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(pts_detok_stage_seconds_bucket{stage=\"total\", instance=~\"$instance\"}[1m])) by (le))",
+          "legendFormat": "p99"
+        },
+        {
+          "expr": "histogram_quantile(0.999, sum(rate(pts_detok_stage_seconds_bucket{stage=\"total\", instance=~\"$instance\"}[1m])) by (le))",
+          "legendFormat": "p99.9"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Per-stage p99 - the S8.1 latency budget, made observable",
+      "description": "This is the panel that turns the budget from an estimate into a measurement: resolve, controls, cryptogram, atc and decrypt are timed separately, so a regression can be attributed to a stage instead of guessed at. It is also the mechanical basis for latency RCA on call (S13).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(pts_detok_stage_seconds_bucket{stage!=\"total\", instance=~\"$instance\"}[1m])) by (le, stage))",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Authorization rate and rejections by reason",
+      "description": "Reject reasons are a closed enum and therefore a metric dimension, not log text. A spike in one reason is visible here without log diving - which is the difference between a five-minute diagnosis and an hour of grep.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "expr": "sum(rate(pts_detok_stage_seconds_count{stage=\"total\", instance=~\"$instance\"}[1m]))",
+          "legendFormat": "authorizations/s"
+        },
+        {
+          "expr": "sum(rate(pts_detok_reject_total{instance=~\"$instance\"}[1m])) by (reason)",
+          "legendFormat": "reject: {{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Where vault reads are served from - why the latency dropped",
+      "description": "The latency panel shows THAT it got faster; this shows WHY. In NEAR_CACHE mode reads are served by the cache tier and the DATABASE series should fall to near zero. Client-side near-cache hit ratio itself is a Hazelcast client statistic (visible in Management Center); what is unambiguous from here is that the JDBC path is no longer being used.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "expr": "sum(rate(pts_detok_vault_read_total{instance=~\"$instance\"}[1m])) by (source)",
+          "legendFormat": "{{source}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "JVM and GC - the p99.9 pause story (S9, claim 7)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "GC pause time by cause",
+      "description": "Watch for a step change rather than a trend: the outliers this tuning targets are evacuation failures, which appear as isolated long pauses rather than as gradually rising pause time. Pair with ops/gc-log-summarize.py, which counts to-space exhaustion events directly.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 19 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "sum(rate(jvm_gc_pause_seconds_sum{instance=~\"$instance\"}[1m])) by (cause)",
+          "legendFormat": "{{cause}}"
+        },
+        {
+          "expr": "max(jvm_gc_pause_seconds_max{instance=~\"$instance\"}) by (action)",
+          "legendFormat": "max: {{action}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Heap occupancy",
+      "description": "With -Xms equal to -Xmx there should be no resizing. A rising floor across a load run means something is being retained that should not be.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 19 },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "targets": [
+        {
+          "expr": "sum(jvm_memory_used_bytes{area=\"heap\", instance=~\"$instance\"})",
+          "legendFormat": "heap used"
+        },
+        {
+          "expr": "sum(jvm_memory_committed_bytes{area=\"heap\", instance=~\"$instance\"})",
+          "legendFormat": "heap committed"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Connection-pool saturation",
+      "description": "The honest explanation for a latency tail that GC does not account for. Pending acquires above zero mean requests are queueing for a connection, and that wait lands in the p99 as surely as a slow query does.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 19 },
+      "targets": [
+        {
+          "expr": "sum(hikaricp_connections_active{instance=~\"$instance\"})",
+          "legendFormat": "active"
+        },
+        {
+          "expr": "sum(hikaricp_connections_pending{instance=~\"$instance\"})",
+          "legendFormat": "pending acquires"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Provisioning, events and cache integrity (claims 1, 2, 9)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "ID&V decision mix",
+      "description": "APPROVE / STEP_UP / DECLINE over time. A sudden shift means either the issuer risk signal or the local rules changed - and the demo cards are deterministic, so it should be flat for a given traffic mix.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 28 },
+      "targets": [
+        {
+          "expr": "sum(rate(pts_provisioning_decision_total[5m])) by (decision)",
+          "legendFormat": "{{decision}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox backlog and notification dedupe",
+      "description": "A growing outbox backlog means the poller cannot keep up or the broker is rejecting - either way events are late, not lost, which is the whole point of the outbox. suppressed_duplicates rising is NORMAL and healthy: it is the consumer dedupe absorbing at-least-once redelivery.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 28 },
+      "targets": [
+        { "expr": "max(pts_outbox_pending)", "legendFormat": "outbox pending" },
+        { "expr": "sum(rate(pts_outbox_published_total[1m]))", "legendFormat": "published/s" },
+        { "expr": "sum(rate(pts_outbox_publish_failures_total[1m]))", "legendFormat": "publish failures/s" },
+        { "expr": "sum(rate(pts_notifications_delivered_total[1m]))", "legendFormat": "notified/s" },
+        { "expr": "sum(rate(pts_notifications_suppressed_duplicates_total[1m]))", "legendFormat": "duplicates suppressed/s" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache/vault drift repaired - ALERT ON ANY NON-ZERO VALUE",
+      "description": "The single most important correctness signal in this system. Write-through plus invalidation should make this permanently zero; a non-zero value means a cached status disagreed with the vault, which in the worst case is a suspended token still authorizing (S16). It is measured rather than assumed precisely because 'should not happen' is not a guarantee.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 28 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        { "expr": "sum(increase(pts_cache_drift_repaired_total[5m]))", "legendFormat": "drift repaired (5m)" },
+        { "expr": "sum(rate(pts_cache_reconciliation_checked_total[1m]))", "legendFormat": "rows checked/s" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "ISO 8583 switch (claim 4)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Switch response codes and end-to-end authorization latency",
+      "description": "DE 39 by value: 00 approved, 05 do-not-honor, 51 insufficient funds, 59 suspected fraud (replay or bad cryptogram), 96 malformed. The switch timer covers the whole hop chain, so it sits above the detokenization total by the issuer round trip.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 37 },
+      "targets": [
+        {
+          "expr": "sum(rate(pts_switch_response_total[1m])) by (de39)",
+          "legendFormat": "DE 39 {{de39}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(pts_switch_authorization_seconds_bucket[1m])) by (le))",
+          "legendFormat": "switch p99"
+        }
+      ]
+    }
+  ]
+}

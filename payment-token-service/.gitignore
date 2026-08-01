@@ -1,0 +1,10 @@
+target/
+*.log
+gc*.log
+.idea/
+*.iml
+.vscode/
+.DS_Store
+# H2 databases created by the local stack and the benchmarks
+*.mv.db
+*.trace.db

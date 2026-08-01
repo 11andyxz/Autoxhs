@@ -266,6 +266,22 @@ export async function insertExpense(conn: PoolConnection, e: ExpenseInput): Prom
   return res.insertId;
 }
 
+/**
+ * 批量导入用:查这些日期下该 business 已有的「日期|金额」键(键的构造见 batch.ts 的 dupKey),
+ * 供前端把可能重复的行标出来并默认不勾选。dates 为空直接返回空数组(不发查询)。
+ */
+export async function findExistingExpenseKeys(businessId: number, dates: string[]): Promise<string[]> {
+  const uniq = Array.from(new Set(dates.filter((d) => !!d))).slice(0, 400);
+  if (!uniq.length) return [];
+  const p = getPool();
+  // 注意:数组展开只在 query() 生效(execute() 的预处理不会展开),这里必须用 query。
+  const [rows] = await p.query<RowDataPacket[]>(
+    "SELECT spent_on, amount FROM exp_expense WHERE business_id = ? AND spent_on IN (?)",
+    [businessId, uniq],
+  );
+  return rows.map((r) => `${r.spent_on as string}|${Number(r.amount).toFixed(2)}`);
+}
+
 export async function updateExpenseById(conn: PoolConnection, id: number, e: ExpenseInput): Promise<void> {
   const amount = parseAmount(e.amount);
   if (amount === null) throw new Error("金额非法");

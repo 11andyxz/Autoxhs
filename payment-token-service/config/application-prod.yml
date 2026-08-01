@@ -1,0 +1,48 @@
+# =====================================================================================
+# prod zone (S12). Present to make the shape of the difference explicit, not because this
+# repository is deployable to production -- see docs/SIMPLIFICATIONS.md.
+#
+# Note what changes and what does not: the detokenization flags are the same as cert,
+# because cert exists to validate exactly this configuration. What changes is that every
+# demo affordance is off and key custody moves into a real HSM.
+# =====================================================================================
+
+pts:
+  hsm:
+    # No shared seed exists in production: keys live in the HSM and are never derivable
+    # from configuration.
+    mode: PKCS11
+    pkcs11:
+      config-path: "/etc/pts/hsm-pkcs11.cfg"
+      kek-alias: "pts-kek"
+      cryptogram-alias: "pts-cryptogram-key"
+      fingerprint-alias: "pts-fingerprint-key"
+  sim:
+    # No injected latency in production: the network provides its own.
+    hop-latency-ms: 0
+
+detok:
+  cache-mode: NEAR_CACHE
+  atc-mode: CLUSTER
+  controls:
+    inline: true
+
+provisioning:
+  idv:
+    expose-otp-for-demo: false     # the OTP peek endpoint must be inert
+  events:
+    transport: KAFKA
+  reconciliation:
+    enabled: true
+    interval-ms: 30000             # tighter drift detection than dev/cert
+
+auth-switch:
+  record-forwarded-messages: false # the demo assertion hook is off
+
+issuer-sim:
+  approve-everything: false
+
+logging:
+  level:
+    com.adxztech.pts: INFO
+    root: WARN

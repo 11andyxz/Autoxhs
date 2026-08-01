@@ -1,0 +1,125 @@
+spring:
+  application:
+    name: detokenization-service
+  config:
+    import: "classpath:config/pts-defaults.yml"
+  datasource:
+    url: "jdbc:h2:file:./target/pts-local;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1"
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+    hikari:
+      # Sized for the authorization path: enough to absorb a burst, small enough that a slow database
+      # shows up as connection-pool wait in the p99 rather than as unbounded queueing.
+      maximum-pool-size: 40
+      connection-timeout: 2000
+      pool-name: detok-pool
+  sql:
+    init:
+      mode: always
+      schema-locations: "classpath:db/h2/schema.sql"
+
+server:
+  port: 8082
+  tomcat:
+    threads:
+      max: 200
+    accept-count: 200
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        pts.detok.stage: true
+      slo:
+        pts.detok.stage: 5ms,10ms,15ms,22ms,25ms,50ms,100ms
+
+pts:
+  bins:
+    seed-on-startup: false
+  hazelcast:
+    mode: DISABLED
+
+detok:
+  # ---- the A/B matrix (S8.2) --------------------------------------------------------------
+  # Default is the BASELINE: every read is a database round trip and controls are a second hop.
+  cache-mode: DIRECT
+  atc-mode: DB
+  atc-order: AFTER_CRYPTOGRAM
+  controls:
+    inline: false
+    url: "http://localhost:8084"
+
+---
+# Optimization A only: near-cache reads, controls still remote.
+spring:
+  config:
+    activate:
+      on-profile: opt-cache
+pts:
+  hazelcast:
+    mode: CLIENT
+detok:
+  cache-mode: NEAR_CACHE
+  atc-mode: DB
+
+---
+# Optimization B only: direct reads, controls inlined and ATC moved into the cluster.
+spring:
+  config:
+    activate:
+      on-profile: opt-inline
+pts:
+  hazelcast:
+    mode: CLIENT
+detok:
+  cache-mode: DIRECT
+  atc-mode: CLUSTER
+  controls:
+    inline: true
+
+---
+# Both optimizations: the "after" world (~22 ms p99).
+spring:
+  config:
+    activate:
+      on-profile: optimized
+pts:
+  hazelcast:
+    mode: CLIENT
+detok:
+  cache-mode: NEAR_CACHE
+  atc-mode: CLUSTER
+  controls:
+    inline: true
+
+---
+spring:
+  config:
+    activate:
+      on-profile: compose
+    import: "classpath:config/pts-defaults.yml,optional:configserver:http://config-server:8888"
+  cloud:
+    config:
+      enabled: true
+      uri: "http://config-server:8888"
+  datasource:
+    url: "jdbc:oracle:thin:@//toxiproxy:21521/FREEPDB1"
+    username: pts
+    password: pts
+    driver-class-name: oracle.jdbc.OracleDriver
+  sql:
+    init:
+      mode: never
+pts:
+  hazelcast:
+    members:
+      - "hazelcast-member-1:5701"
+      - "hazelcast-member-2:5701"
+detok:
+  controls:
+    url: "http://toxiproxy:28084"

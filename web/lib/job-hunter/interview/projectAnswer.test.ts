@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_PREFERRED_PROJECT,
   MAX_PROJECT_ANSWER,
   MAX_QUESTION,
   MAX_RESUME_CHARS,
   cleanProjectAnswer,
   clipResumeForPrompt,
   hasUsableResume,
+  normalizePreferredProject,
   projectAnswerInputs,
   resumeTextFromHtml,
+  splitFencedBlocks,
 } from "./projectAnswer";
 
 /**
@@ -92,6 +95,25 @@ describe("clipResumeForPrompt / hasUsableResume", () => {
   });
 });
 
+describe("normalizePreferredProject", () => {
+  it("压掉换行和多余空格(它会作为一条数据块喂给模型,别撑破提示词分块)", () => {
+    expect(normalizePreferredProject(" Visa Token\n Service  (VTS) ")).toBe("Visa Token Service (VTS)");
+  });
+
+  it("空白 / 非字符串 → 空串(= 不指定,交给模型按题挑)", () => {
+    expect(normalizePreferredProject("")).toBe("");
+    expect(normalizePreferredProject("   \n ")).toBe("");
+    expect(normalizePreferredProject(null)).toBe("");
+    expect(normalizePreferredProject(undefined)).toBe("");
+    expect(normalizePreferredProject(123)).toBe("");
+    expect(normalizePreferredProject({ toString: () => "Visa" })).toBe("");
+  });
+
+  it("按列宽截断(preferred_project VARCHAR(120))", () => {
+    expect(normalizePreferredProject("v".repeat(MAX_PREFERRED_PROJECT + 40))).toHaveLength(MAX_PREFERRED_PROJECT);
+  });
+});
+
 describe("cleanProjectAnswer", () => {
   it("去掉整段的 ``` 围栏(带/不带语言标记)", () => {
     expect(cleanProjectAnswer("```\nIn my project we ...\n```")).toBe("In my project we ...");
@@ -113,5 +135,53 @@ describe("cleanProjectAnswer", () => {
 
   it("超长按入库上限截断", () => {
     expect(cleanProjectAnswer("y".repeat(MAX_PROJECT_ANSWER + 1000))).toHaveLength(MAX_PROJECT_ANSWER);
+  });
+
+  it("回答里带多个代码块时,别把首尾两个围栏当成「整段被包起来」剥掉", () => {
+    const withCode = [
+      "```java",
+      "int a = 1;",
+      "```",
+      "中间这段是要说的话。",
+      "```yaml",
+      "ttl: 30s",
+      "```",
+    ].join("\n");
+    const out = cleanProjectAnswer(withCode);
+    expect(out).toBe(withCode); // 一个字都不能动
+    expect(out).toContain("中间这段是要说的话。");
+  });
+});
+
+describe("splitFencedBlocks", () => {
+  it("散文/代码交替拆开,语言标记归一化成小写", () => {
+    const text = "先说结论。\n\n```Java\nint a = 1;\n```\n\n这段代码说明 X。";
+    expect(splitFencedBlocks(text)).toEqual([
+      { kind: "text", lang: "", body: "先说结论。" },
+      { kind: "code", lang: "java", body: "int a = 1;" },
+      { kind: "text", lang: "", body: "这段代码说明 X。" },
+    ]);
+  });
+
+  it("没有代码块 → 原样一段散文", () => {
+    expect(splitFencedBlocks("就是一段话")).toEqual([{ kind: "text", lang: "", body: "就是一段话" }]);
+  });
+
+  it("多个代码块都能拆出来", () => {
+    const b = splitFencedBlocks("a\n```java\nx\n```\nb\n```sql\nSELECT 1\n```\nc");
+    expect(b.map((x) => x.kind)).toEqual(["text", "code", "text", "code", "text"]);
+    expect(b[3]).toEqual({ kind: "code", lang: "sql", body: "SELECT 1" });
+  });
+
+  it("围栏没闭合(被 8000 字截断)也当代码块收尾,不吞掉内容", () => {
+    const b = splitFencedBlocks("说明\n```java\nint a = 1;\nint b = 2;");
+    expect(b).toEqual([
+      { kind: "text", lang: "", body: "说明" },
+      { kind: "code", lang: "java", body: "int a = 1;\nint b = 2;" },
+    ]);
+  });
+
+  it("空串 → 空数组", () => {
+    expect(splitFencedBlocks("")).toEqual([]);
   });
 });

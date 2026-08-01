@@ -1,0 +1,28 @@
+spring:
+  application:
+    name: issuer-simulator
+  config:
+    import: "classpath:config/pts-defaults.yml"
+
+server:
+  port: 8085
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+issuer-sim:
+  # $5000 -- above this the issuer answers 51 insufficient funds.
+  decline-above-amount-minor: 500000
+  hard-decline-pans: []
+  idv-blocked-pans: []
+  approve-everything: false
+
+logging:
+  level:
+    com.adxztech.pts: INFO

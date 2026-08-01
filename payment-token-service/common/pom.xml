@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.adxztech.pts</groupId>
+    <artifactId>payment-token-service</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>common</artifactId>
+  <name>common</name>
+  <description>Shared domain model, cryptography, ISO 8583 codec, persistence and cache plumbing.</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.hazelcast</groupId>
+      <artifactId>hazelcast</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.jpos</groupId>
+      <artifactId>jpos</artifactId>
+      <exclusions>
+        <!-- jPOS drags in a scripting/CLI/JMX toolchain we do not use; the ISO 8583
+             codec and channels are self-contained. -->
+        <exclusion><groupId>org.apache.bsf</groupId><artifactId>bsf-api</artifactId></exclusion>
+        <exclusion><groupId>org.jline</groupId><artifactId>jline</artifactId></exclusion>
+        <exclusion><groupId>org.apache.sshd</groupId><artifactId>sshd-core</artifactId></exclusion>
+        <exclusion><groupId>org.apache.sshd</groupId><artifactId>sshd-scp</artifactId></exclusion>
+        <exclusion><groupId>org.apache.sshd</groupId><artifactId>sshd-sftp</artifactId></exclusion>
+      </exclusions>
+    </dependency>
+
+    <!-- Optional: not every consumer of this library is a servlet application
+         (the load driver and the cert harness are plain JVM processes). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

@@ -7,6 +7,7 @@ import {
   CODING_TRACE_SYSTEM,
   CRAM_ASK_SYSTEM,
   CRAM_CARDS_SYSTEM,
+  CRAM_CARD_ASK_SYSTEM,
   CRAM_PROJECT_ANSWER_SYSTEM,
   CUSTOM_ANSWER_SYSTEM,
   DIAGRAM_ASK_SYSTEM,
@@ -470,13 +471,27 @@ export async function answerFromMyProjects(args: {
   question: string;
   baseAnswer: string;
   resumeText: string;
+  /** 这份简历的「默认项目」:能答得上就用它讲(空 = 让模型按题自己挑)。 */
+  preferProject?: string;
+  /** 代码佐证:自己仓库里挑出来的真实代码(空 = 回答里不带代码)。 */
+  codeTree?: string;
+  codeExcerpts?: string;
 }): Promise<string> {
   // 压在路由 maxDuration=60 内,慢调用被客户端中止走优雅报错,而不是被 Vercel 硬杀成 504。
   const client = getClient(52_000);
   const content = dataBlock([
     { label: "QUESTION (answer THIS)", body: args.question },
     { label: "GENERIC ANSWER (already on the card; theory reference, do not repeat it)", body: args.baseAnswer },
+    {
+      label: "PREFERRED PROJECT (default to this project when it can answer the question)",
+      body: args.preferProject ?? "",
+    },
     { label: "CANDIDATE RESUME (the ONLY source of projects/facts you may use)", body: args.resumeText },
+    { label: "CODEBASE FILE TREE (the candidate's own repo for this project)", body: args.codeTree ?? "" },
+    {
+      label: "CODEBASE EXCERPTS (real code — the ONLY code you may quote, verbatim)",
+      body: args.codeExcerpts ?? "",
+    },
   ]);
   const response = await client.responses.create({
     model: getModel(),
@@ -487,6 +502,42 @@ export async function answerFromMyProjects(args: {
   });
   const text = (response.output_text ?? "").trim();
   if (!text) throw new SchemaValidationError("简历版回答为空");
+  return text;
+}
+
+/**
+ * 卡片上的「就地追问」:针对这张卡(常常是回答里贴的某段代码)回答一个追问。
+ * 中文、简洁,可回引几行代码。返回纯文本(可含 ```代码块```)。
+ */
+export async function answerCardFollowup(args: {
+  question: string;
+  cardQuestion: string;
+  cardAnswer: string;
+  projectAnswer?: string;
+  snippet?: string;
+  snippetRef?: string;
+  codeTree?: string;
+  codeExcerpts?: string;
+}): Promise<string> {
+  const client = getClient(52_000);
+  const content = dataBlock([
+    { label: "CARD QUESTION", body: args.cardQuestion },
+    { label: "CARD ANSWER", body: args.cardAnswer },
+    { label: "CANDIDATE'S OWN PROJECT ANSWER (may contain the code they are asking about)", body: args.projectAnswer ?? "" },
+    { label: `CODE SNIPPET THEY ARE POINTING AT${args.snippetRef ? ` (${args.snippetRef})` : ""}`, body: args.snippet ?? "" },
+    { label: "REPO EXCERPTS (real code from their own repo, for grounding)", body: args.codeExcerpts ?? "" },
+    { label: "REPO FILE TREE", body: args.codeTree ?? "" },
+    { label: "FOLLOW-UP (answer THIS)", body: args.question },
+  ]);
+  const response = await client.responses.create({
+    model: getModel(),
+    input: [
+      { role: "system", content: CRAM_CARD_ASK_SYSTEM },
+      { role: "user", content },
+    ],
+  });
+  const text = (response.output_text ?? "").trim();
+  if (!text) throw new SchemaValidationError("回答为空");
   return text;
 }
 

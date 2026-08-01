@@ -1,0 +1,20 @@
+# dev zone: everything local, no calibrated latency, baseline detokenization flags (S12).
+pts:
+  sim:
+    hop-latency-ms: 0
+
+detok:
+  cache-mode: DIRECT
+  atc-mode: DB
+  controls:
+    inline: false
+
+provisioning:
+  idv:
+    expose-otp-for-demo: true
+  events:
+    transport: IN_MEMORY
+
+logging:
+  level:
+    com.adxztech.pts: DEBUG

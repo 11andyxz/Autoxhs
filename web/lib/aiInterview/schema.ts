@@ -75,7 +75,18 @@ export type SourceKind = (typeof SOURCE_KINDS)[number];
 /* ============================ 限额 ============================ */
 
 export const LIMITS = {
-  resume: 12_000,
+  /**
+   * 简历字数上限。**这个值会静默截断,别当成"随便设个大点的数"**。
+   *
+   * 2026-07-31:桌面端结构化出来的简历 `education: []`、experience 只有 2 段,查到根因是
+   * 这里 —— 用户 6 页的简历提取出来 24,234 字,经 `/resume-text` 和快照 clip 到 12,000 后
+   * 同步给桌面端,后半截(含 EDUCATION 整节、以及 Anthropic / Claude / vector 这些正好被
+   * 面试官问到的词)从来没有到过模型面前。截断点在词中间,两端都没有任何提示。
+   *
+   * 和桌面端 `profileStore.MAX_RESUME_CHARS` 保持一致 —— 两边不一致时,小的那个会悄悄
+   * 决定另一边能看到多少。40k ≈ 10 页密排文本,真实简历不会触发;它防的是整本书粘进来。
+   */
+  resume: 40_000,
   jd: 8_000,
   notes: 2_000,
   company: 120,

@@ -1,0 +1,34 @@
+# =====================================================================================
+# Overlay: tuned G1 flags on the detokenization replicas (S9).
+#
+#   docker compose -f docker-compose.yml up -d                                  # baseline JVM
+#   docker compose -f docker-compose.yml -f docker-compose.tuned.yml up -d       # tuned JVM
+#
+# Run the same Gatling or ops/bench-ab.sh profile against both and compare the GC-pause panel with
+# the request p99.9 panel. The flags are explained line by line in ops/jvm/tuned.env; the mechanism
+# that matters is the IHOP + G1ReservePercent pair, which prevents the to-space exhaustion that
+# produces "everything was fine, then 200 ms" outliers.
+#
+# Deliberately an OVERLAY rather than an edit: the two arms must differ in nothing but these flags,
+# and a diffable overlay makes that reviewable.
+# =====================================================================================
+
+name: payment-token-service
+
+services:
+
+  detokenization-service-1: &tuned-detok
+    environment:
+      JAVA_OPTS: >-
+        -Xms4g -Xmx4g
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=15
+        -XX:G1HeapRegionSize=8m
+        -XX:InitiatingHeapOccupancyPercent=35
+        -XX:G1ReservePercent=15
+        -XX:+ParallelRefProcEnabled
+        -XX:+AlwaysPreTouch
+        -Xlog:gc*,safepoint:file=/var/log/pts/gc-tuned.log:t,uptime,level,tags
+
+  detokenization-service-2:
+    <<: *tuned-detok

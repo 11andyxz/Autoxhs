@@ -1,0 +1,59 @@
+spring:
+  application:
+    name: cert-harness
+  config:
+    import: "classpath:config/pts-defaults.yml"
+  datasource:
+    # The harness reads token PANs from the vault: it stands in for the token requestor's device,
+    # which legitimately holds the token. See HttpStepExecutor for why this is not an API concern.
+    url: "jdbc:h2:file:./target/pts-local;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1"
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 5
+      pool-name: cert-pool
+  sql:
+    init:
+      mode: never          # provisioning owns schema creation in the local stack
+
+server:
+  port: 8087
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+pts:
+  bins:
+    seed-on-startup: false
+
+cert:
+  provisioning-url: "http://localhost:8081"
+  auth-switch-url: "http://localhost:8083"
+  iso-host: "127.0.0.1"
+  iso-port: 8583
+  report-directory: "target/cert-reports"
+  suites: []
+  exit-on-completion: false
+
+---
+spring:
+  config:
+    activate:
+      on-profile: compose
+  datasource:
+    url: "jdbc:oracle:thin:@//oracle:1521/FREEPDB1"
+    username: pts
+    password: pts
+    driver-class-name: oracle.jdbc.OracleDriver
+cert:
+  provisioning-url: "http://token-provisioning-service:8081"
+  auth-switch-url: "http://auth-switch-simulator:8083"
+  iso-host: "auth-switch-simulator"
+  suites:
+    - "suites/issuer-a-legacy.yml"
+    - "suites/issuer-b-token-aware.yml"
+  exit-on-completion: true
