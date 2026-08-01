@@ -188,3 +188,28 @@ describe("错误通道 —— 手机必须知道为什么不动了", () => {
     expect(parseLiveState({ questionKind: "" }).questionKind).toBe("");
   });
 });
+
+describe("两阶段回答的字段契约", () => {
+  // 桌面端把 Quick Draft 显形之后,手机靠这两个字段决定「这版还会不会变」。
+  // 字段静默丢失过一次(ISSUE-002:frame() 少发三个键,两端代码都对,中间变默认值),
+  // 所以这里把语义也钉住,不只是键存在。
+  it("answerStage 只认 draft / final,其余一律归零", () => {
+    expect(parseLiveState({ answerStage: "draft" }).answerStage).toBe("draft");
+    expect(parseLiveState({ answerStage: "final" }).answerStage).toBe("final");
+    // 拼错、旧版桌面端没这个字段、或者被注入了别的值 —— 都不能让手机显示错误的阶段标
+    expect(parseLiveState({ answerStage: "DRAFT" }).answerStage).toBe("");
+    expect(parseLiveState({ answerStage: "tentative" }).answerStage).toBe("");
+    expect(parseLiveState({}).answerStage).toBe("");
+    expect(parseLiveState({ answerStage: 1 }).answerStage).toBe("");
+  });
+
+  it("partial 和 question 是两条独立的路", () => {
+    // question 必须稳定(答案是针对它生成的),partial 一直在变(对方此刻在说什么)。
+    // 混成一个字段的后果:一个清嗓子就把「听到的问题」冲掉,人对着答案不知道在答什么。
+    const s = parseLiveState({ question: "已定稿的问题?", partial: "对方正在说的半句" });
+    expect(s.question).toBe("已定稿的问题?");
+    expect(s.partial).toBe("对方正在说的半句");
+    // 桌面端没送 partial(比如浏览器版)时不能污染 question
+    expect(parseLiveState({ question: "只有问题" }).partial).toBe("");
+  });
+});

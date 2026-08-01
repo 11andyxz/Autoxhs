@@ -407,12 +407,35 @@ export default function LiveViewPage() {
             <p className="mt-1 text-[15px] leading-relaxed text-slate-300">
               {state.question || "等对方提问…"}
             </p>
+            {/*
+              实时字幕:对方此刻正在说的那句。和上面那行是两件事 ——
+              上面是「这个答案是针对哪一问生成的」(必须稳定),这里是「现在在说什么」(一直变)。
+              桌面端的悬浮窗本来就这么分,手机上以前没有,所以对方说话的那十几秒屏幕是死的,
+              人不知道是没听见还是还没说完。斜体 + 暗一档,视觉上和已定稿的问题区分开。
+            */}
+            {state.partial && state.partial !== state.question && (
+              <p className="mt-1.5 flex items-start gap-1.5 text-[13px] italic leading-relaxed text-slate-500">
+                <span className="mt-1 inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500" />
+                <span>{state.partial}</span>
+              </p>
+            )}
           </div>
 
           {/* 该说的话 */}
           <div className="flex min-h-0 flex-1 flex-col px-4 py-3">
             <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wide text-slate-500">
               <span>{showPerfect ? "完美答案" : state.label || "建议这样说"}</span>
+              {/*
+                两阶段回答的阶段标。上游本来就在面试官说完之前先算一版(maybeSpeculate),
+                只是结果进了缓存不给人看 —— 现在显形了,就必须让人**一眼看出这版还会变**,
+                否则照着念到一半被换掉比不给还糟。
+                正式答案不加标:没有标记 = 这就是最终版。
+              */}
+              {!showPerfect && state.answerStage === "draft" && (
+                <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold normal-case text-amber-400 ring-1 ring-amber-500/30">
+                  临时 · 还在听
+                </span>
+              )}
               {state.streaming && <span className="text-emerald-400">生成中</span>}
 
               {/*
@@ -461,7 +484,9 @@ export default function LiveViewPage() {
                 const el = e.currentTarget;
                 stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
               }}
-              className="flex-1 overflow-y-auto pb-4 font-medium leading-[1.6] text-white"
+              className={`flex-1 overflow-y-auto pb-4 font-medium leading-[1.6] ${
+                !showPerfect && state.answerStage === "draft" ? "text-slate-400" : "text-white"
+              }`}
               style={{ fontSize: `${font}px` }}
             >
               {/* 中文速读放在最上面:扫一眼抓逻辑,再看下面的英文照着说 */}

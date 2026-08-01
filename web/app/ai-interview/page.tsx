@@ -931,6 +931,10 @@ export default function AiInterviewPage() {
       mode,
       elapsedMs: Math.round(capRef.current?.elapsed ?? elapsed),
       question,
+      // 浏览器版没有独立的 interim 通道(它按 VAD 切段后整段转写),所以这里恒空。
+      // 这个字段是给桌面端用的:那边的实时 WS 会边说边吐 partial。
+      partial: "",
+      answerStage: "",
       questionKind: detected?.kind ?? "",
       confidence: detected?.confidence ?? 0,
       // 浏览器版没有沙箱跑用例那一套(那是桌面端 natively 自带的代码验证),

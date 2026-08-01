@@ -237,9 +237,24 @@ export type LiveState = {
   elapsedMs: number;
   question: string;
   questionKind: string;
+  /**
+   * 正在说、还没定稿的那句(interim)。和 `question` 分开:`question` 是「当前这个答案
+   * 是针对哪一问生成的」,必须稳定;`partial` 是「对方此刻正在说什么」,一直在变。
+   * 桌面端的悬浮窗本来就是这么分的(上游 sendThrottledTranscript 送的就是它),
+   * 手机上以前没有,所以对方说话时那半分钟屏幕是死的。
+   */
+  partial: string;
   confidence: number;
   /** 面板标题:建议这样说 / 说得更细 / 截屏解题 … */
   label: string;
+  /**
+   * 这版答案处于哪个阶段。两阶段回答(Quick Draft → Final Answer):
+   *   'draft' —— 面试官还没说完时先算的一版,只有核心思路,**会被顶掉**
+   *   'final' —— 用完整问题 + 简历生成的正式答案
+   * 上游本来就在算 draft(IntelligenceEngine.maybeSpeculate),只是结果进了缓存不给人看;
+   * 这个字段把它显形,让人一眼知道屏幕上这版还会不会变。
+   */
+  answerStage: "" | "draft" | "final";
   answer: string;
   streaming: boolean;
   /** 采集是否中断了(辅助程序被系统掐断 / 共享被停) —— 副屏要看得见,别以为一切正常 */
@@ -290,8 +305,10 @@ export const EMPTY_LIVE_STATE: LiveState = {
   mode: "tech",
   elapsedMs: 0,
   question: "",
+  partial: "",
   questionKind: "",
   confidence: 0,
+  answerStage: "",
   label: "",
   answer: "",
   streaming: false,
@@ -324,6 +341,7 @@ export function parseLiveState(v: unknown): Omit<LiveState, "v" | "at"> {
     question: clip(b.question, LIMITS.question),
     // 白名单而不是 clip:这个值在手机上被当作对象 key 查表(KIND_LABEL[kind]),
     // 一个 "__proto__" 之类的字符串取出来的是函数/对象,渲染成 React 子节点会抛。
+    partial: clip(b.partial, LIMITS.question),
     questionKind: KNOWN_QUESTION_KINDS.has(String(b.questionKind ?? ""))
       ? String(b.questionKind)
       : "",
@@ -332,6 +350,7 @@ export function parseLiveState(v: unknown): Omit<LiveState, "v" | "at"> {
         ? Math.min(1, Math.max(0, b.confidence))
         : 0,
     label: clip(b.label, 32),
+    answerStage: b.answerStage === "draft" || b.answerStage === "final" ? b.answerStage : "",
     answer: clip(b.answer, LIMITS.prevAnswer),
     streaming: b.streaming === true,
     sourceDown: b.sourceDown === true,
