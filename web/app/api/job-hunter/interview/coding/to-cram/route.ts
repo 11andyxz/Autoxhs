@@ -55,6 +55,7 @@ export async function POST(req: NextRequest) {
       kind: "block",
       front,
       content,
+      source: "coding",
       extra: { source: "coding", problemId },
     });
     return NextResponse.json({ success: true, duplicate: false, cardId, sessionTitle: session.title });

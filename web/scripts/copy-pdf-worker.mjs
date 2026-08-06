@@ -36,6 +36,20 @@ try {
       copied++;
     }
   }
+  // 「编辑 PDF 内容」写中文时要在浏览器里嵌入字体(pdf-lib + fontkit 子集),
+  // 字体源文件在 lib/job-hunter/assets/fonts/(服务端用),这里复制一份给前端按 URL 取。
+  const fontSrcDir = join(here, "..", "lib", "job-hunter", "assets", "fonts");
+  const fontOutDir = join(out, "fonts");
+  mkdirSync(fontOutDir, { recursive: true });
+  for (const name of ["NotoSansSC-Regular.otf", "NotoSansSC-Bold.otf"]) {
+    const src = join(fontSrcDir, name);
+    const dest = join(fontOutDir, name);
+    if (!newer(src, dest)) {
+      copyFileSync(src, dest);
+      copied++;
+    }
+  }
+
   if (copied > 0) console.log("[copy-pdf-worker] 已同步 pdfjs 静态资源 → public/pdfjs/");
 } catch (err) {
   console.error("[copy-pdf-worker] 复制失败(PDF 工具箱前端将无法渲染 PDF):", err?.message);

@@ -32,6 +32,7 @@ export async function POST(req: NextRequest) {
     .filter((it): it is { front?: unknown; content?: unknown } => !!it && typeof it === "object")
     .map((it) => ({
       kind: "block" as const,
+      source: "import" as const, // 复习时能按「题库导入」单独挑出来
       front: typeof it.front === "string" ? it.front.trim() : "",
       content: typeof it.content === "string" ? it.content.trim() : "",
     }))

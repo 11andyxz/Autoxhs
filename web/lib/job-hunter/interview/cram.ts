@@ -1,5 +1,11 @@
 import type { RowDataPacket, ResultSetHeader } from "mysql2";
 
+import {
+  ASK_MARK,
+  type CramCategory,
+  defaultCramSource,
+  guessLegacyCramSource,
+} from "@/lib/job-hunter/interview/cramCategory";
 import { frontKey } from "@/lib/job-hunter/interview/frontKey";
 import { getPool } from "@/lib/serviceFee/db";
 
@@ -82,11 +88,67 @@ export function ensureCramSchema(): Promise<void> {
         WHERE fsrs_stability IS NULL AND last_reviewed_at IS NOT NULL`,
       [],
     );
+    // 来源分类(追问 / 题库导入 / 划词块 / Coding;word、svg 由 kind 决定)。
+    // 新卡由各写入口显式带上;历史卡片(NULL)一次性推断回填,见 backfillCramSources()。
+    await execIgnoring("ALTER TABLE ip_cram_card ADD COLUMN source VARCHAR(16) NULL", ["ER_DUP_FIELDNAME"]);
+    await backfillCramSources();
   })().catch((err) => {
     cramSchemaReady = null; // 失败不缓存,下次重试
     throw err;
   });
   return cramSchemaReady;
+}
+
+/**
+ * 给历史卡片(`source IS NULL`)回填来源分类。判据是纯函数 `guessLegacyCramSource()`(有单测),
+ * 这里只负责取信号、算「同一秒有几张」、写回。
+ *
+ * 幂等靠**行为**而不是 information_schema(Aiven 上它会滞后,见 CLAUDE 记忆):回填后没有 NULL 行,
+ * 下次进来第一条 SELECT 就空手而归。新卡各写入口都显式带 source,也不会再产生 NULL。
+ */
+export async function backfillCramSources(): Promise<number> {
+  const p = getPool();
+  // 只有历史卡片会命中(全表也就几百行);front 要整条读 —— ❓ 标记在选中的原文后面,截断会漏判。
+  const [rows] = await p.query<RowDataPacket[]>(
+    `SELECT id, session_id, kind, created_at, front, LEFT(COALESCE(extra_json, ''), 200) AS extra_head
+       FROM ip_cram_card WHERE source IS NULL`,
+  );
+  if (!rows.length) return 0;
+
+  type LegacyRow = { id: number; session_id: number; kind: string; created_at: string; front: string | null; extra_head: string };
+  const legacy = rows as LegacyRow[];
+  // 「同一 session + 同一秒」的张数:批量导入是一条 INSERT 多行,整批共用同一个 NOW()。
+  const cluster = new Map<string, number>();
+  const keyOf = (r: LegacyRow) => `${r.session_id}|${r.created_at}`;
+  for (const r of legacy) cluster.set(keyOf(r), (cluster.get(keyOf(r)) ?? 0) + 1);
+
+  const bySource = new Map<string, number[]>();
+  for (const r of legacy) {
+    const front = r.front ?? "";
+    const src = guessLegacyCramSource({
+      kind: r.kind,
+      hasQuestionMark: front.includes(ASK_MARK),
+      hasFront: front.trim() !== "",
+      isCoding: r.extra_head.includes('"source":"coding"'),
+      sameSecondCount: cluster.get(keyOf(r)) ?? 1,
+    });
+    const bucket = bySource.get(src);
+    if (bucket) bucket.push(r.id);
+    else bySource.set(src, [r.id]);
+  }
+
+  let updated = 0;
+  for (const [src, ids] of bySource) {
+    for (let i = 0; i < ids.length; i += 200) {
+      const chunk = ids.slice(i, i + 200);
+      const [res] = await p.query<ResultSetHeader>(
+        `UPDATE ip_cram_card SET source = ? WHERE source IS NULL AND id IN (${chunk.map(() => "?").join(",")})`,
+        [src, ...chunk],
+      );
+      updated += res.affectedRows || 0;
+    }
+  }
+  return updated;
 }
 
 /* ---------------- session(一份简历) ---------------- */
@@ -215,6 +277,8 @@ export type CramCardRow = {
   id: number;
   session_id: number;
   kind: string;
+  /** 来源分类(ask/import/note/coding/word/svg);历史卡片回填,新卡写入时带上。 */
+  source: string | null;
   front: string | null;
   content: string;
   svg: string | null;
@@ -255,12 +319,14 @@ export async function addCramCard(v: {
   content: string;
   svg?: string;
   extra?: unknown;
+  /** 来源分类(追问 / 题库导入 / 划词块 / Coding…);不传按 kind 兜底。 */
+  source?: CramCategory;
 }): Promise<number> {
   await ensureCramSchema();
   const p = getPool();
   const extra = v.extra != null ? JSON.stringify(v.extra).slice(0, 4000) : null;
   const [res] = await p.execute<ResultSetHeader>(
-    "INSERT INTO ip_cram_card (session_id, kind, front, content, svg, extra_json, due_at) VALUES (?, ?, ?, ?, ?, ?, NOW())",
+    "INSERT INTO ip_cram_card (session_id, kind, front, content, svg, extra_json, source, due_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())",
     [
       v.sessionId,
       v.kind,
@@ -268,6 +334,7 @@ export async function addCramCard(v: {
       v.content.slice(0, 8000),
       (v.svg ?? "").slice(0, 20000) || null,
       extra,
+      v.source ?? defaultCramSource(v.kind),
     ],
   );
   return res.insertId;
@@ -295,7 +362,7 @@ export async function listCramFrontKeys(sessionId: number, kind: CramCardKind = 
 /** 批量加入复习卡(题库导入用)。分批(每批 100)一条 INSERT ... VALUES 多行,due_at=NOW()。 */
 export async function addCramCardsBulk(
   sessionId: number,
-  items: Array<{ kind: CramCardKind; front: string; content: string; svg?: string; extra?: unknown }>,
+  items: Array<{ kind: CramCardKind; front: string; content: string; svg?: string; extra?: unknown; source?: CramCategory }>,
 ): Promise<number> {
   await ensureCramSchema();
   const p = getPool();
@@ -303,7 +370,7 @@ export async function addCramCardsBulk(
   let total = 0;
   for (let i = 0; i < items.length; i += CHUNK) {
     const chunk = items.slice(i, i + CHUNK);
-    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, NOW())").join(", ");
+    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, NOW())").join(", ");
     const params: unknown[] = [];
     for (const it of chunk) {
       params.push(
@@ -313,10 +380,11 @@ export async function addCramCardsBulk(
         (it.content ?? "").slice(0, 8000),
         (it.svg ?? "").slice(0, 20000) || null,
         it.extra != null ? JSON.stringify(it.extra).slice(0, 4000) : null,
+        it.source ?? defaultCramSource(it.kind),
       );
     }
     const [res] = await p.query<ResultSetHeader>(
-      `INSERT INTO ip_cram_card (session_id, kind, front, content, svg, extra_json, due_at) VALUES ${placeholders}`,
+      `INSERT INTO ip_cram_card (session_id, kind, front, content, svg, extra_json, source, due_at) VALUES ${placeholders}`,
       params,
     );
     total += res.affectedRows || 0;
@@ -325,7 +393,7 @@ export async function addCramCardsBulk(
 }
 
 const CARD_COLS =
-  `id, session_id, kind, front, content, svg, extra_json, project_answer, followups_json,
+  `id, session_id, kind, source, front, content, svg, extra_json, project_answer, followups_json,
    ease_factor, interval_days, repetitions, lapses,
    fsrs_difficulty, fsrs_stability, fsrs_state, due_at, last_reviewed_at, last_grade`;
 
@@ -363,8 +431,14 @@ export async function getCramCard(id: number): Promise<CramCardRow | null> {
   return r ? numify(r) : null;
 }
 
-/** 手动修改卡片正面/背面文字(题库答案不准时改)。只更新传了的字段,不动 SM-2 进度。 */
-export async function updateCramCard(id: number, patch: { front?: string; content?: string }): Promise<void> {
+/**
+ * 手动修改卡片正面/背面文字(题库答案不准时改)或来源分类(自动归类归错时改)。
+ * 只更新传了的字段,不动 SM-2/FSRS 进度。
+ */
+export async function updateCramCard(
+  id: number,
+  patch: { front?: string; content?: string; source?: CramCategory },
+): Promise<void> {
   await ensureCramSchema();
   const p = getPool();
   const sets: string[] = [];
@@ -376,6 +450,10 @@ export async function updateCramCard(id: number, patch: { front?: string; conten
   if (patch.content !== undefined) {
     sets.push("content = ?");
     params.push(patch.content.slice(0, 8000));
+  }
+  if (patch.source !== undefined) {
+    sets.push("source = ?");
+    params.push(patch.source);
   }
   if (!sets.length) return;
   params.push(id);

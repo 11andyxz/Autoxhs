@@ -4,6 +4,14 @@ import Link from "next/link";
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import {
+  CRAM_BLOCK_CATEGORIES,
+  CRAM_CATEGORIES,
+  CRAM_CATEGORY_META,
+  isCramBlockCategory,
+  type CramBlockCategory,
+  type CramCategory,
+} from "@/lib/job-hunter/interview/cramCategory";
 import { type Followup } from "@/lib/job-hunter/interview/followups";
 import { frontKey } from "@/lib/job-hunter/interview/frontKey";
 import { splitFencedBlocks } from "@/lib/job-hunter/interview/projectAnswer";
@@ -35,6 +43,8 @@ type WordExtra = { en?: string; ipa?: string; zh?: string; note?: string };
 type CramCard = {
   id: number;
   kind: CramCardKind;
+  /** 来源分类:追问 / 题库导入 / 单词 / 划词知识块 / Coding 题 / 记忆图卡。 */
+  category: CramCategory;
   front: string;
   content: string;
   svg: string;
@@ -456,6 +466,10 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [speaking, setSpeaking] = useState(false);
 
+  // 按来源挑一类复习(复习面板 + 卡片清单共用)。刻意不记进 localStorage:
+  // 下次打开还停在某一类上,会让人以为卡片少了。
+  const [category, setCategory] = useState<CatFilter>("all");
+
   // 「学习这张」:清单里点某张卡 → 把它插进复习面板的队列(seq 每次自增,同一张也能再点一次)。
   const [studyReq, setStudyReq] = useState<{ id: number; seq: number } | null>(null);
   const studySeq = useRef(0);
@@ -475,11 +489,25 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
     return s;
   }, [cards]);
 
+  // 上一次加载见过哪些卡:用来发现「刚加进来的卡不在当前筛选里」。
+  const knownIdsRef = useRef<Set<number> | null>(null);
   const loadCards = useCallback(async () => {
     try {
       const res = await fetch(`/api/job-hunter/interview/cram/card?sessionId=${sessionId}`);
       const j = await res.json().catch(() => null);
-      if (j?.success) setCards(j.items as CramCard[]);
+      if (!j?.success) return;
+      const items = j.items as CramCard[];
+      setCards(items);
+      // 正筛着某一类时新加/导入的卡如果不属于这一类,清单和统计都不会动,看着像没保存 ——
+      // 这种时候自动跳回「全部」,让新卡露出来。新卡里有属于当前分类的就不动。
+      const known = knownIdsRef.current;
+      knownIdsRef.current = new Set(items.map((c) => c.id));
+      if (known) {
+        const fresh = items.filter((c) => !known.has(c.id));
+        if (fresh.length) {
+          setCategory((cat) => (cat === "all" || fresh.some((c) => c.category === cat) ? cat : "all"));
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -639,6 +667,8 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
         speak={speak}
         speaking={speaking}
         studyReq={studyReq}
+        category={category}
+        onCategoryChange={setCategory}
       />
 
       {/* 阅读 + 划词 / 编辑 */}
@@ -767,6 +797,8 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
       {/* 卡片清单 */}
       <CramCardList
         cards={cards}
+        category={category}
+        onCategoryChange={setCategory}
         sessionId={sessionId}
         onReload={loadCards}
         speak={speak}
@@ -775,6 +807,149 @@ function CramWorkspace({ sessionId }: { sessionId: number }) {
       />
     </div>
     </CramActions.Provider>
+  );
+}
+
+/* ============================ 分类筛选(来源) ============================ */
+
+/** "all" = 不筛,全部一起复习。 */
+type CatFilter = CramCategory | "all";
+
+type CatStat = { total: number; due: number };
+
+function categoryStats(cards: CramCard[]): Map<CatFilter, CatStat> {
+  const m = new Map<CatFilter, CatStat>();
+  const bump = (k: CatFilter, due: boolean) => {
+    const s = m.get(k) ?? { total: 0, due: 0 };
+    s.total += 1;
+    if (due) s.due += 1;
+    m.set(k, s);
+  };
+  for (const c of cards) {
+    bump("all", c.isDue);
+    bump(c.category, c.isDue);
+  }
+  return m;
+}
+
+/**
+ * 按来源挑一类来复习。只列出真有卡的分类 —— 没导过题库就不该看见「题库导入」这个空标签。
+ * 数字是「到期 / 总数」:一眼看出这一类今天还欠多少。
+ */
+function CategoryFilterBar({
+  cards,
+  value,
+  onChange,
+}: {
+  cards: CramCard[];
+  value: CatFilter;
+  onChange: (v: CatFilter) => void;
+}) {
+  const stats = useMemo(() => categoryStats(cards), [cards]);
+  // 当前选中的那一类**永远**留一枚芯片,哪怕它的卡刚被改分类/删光了 —— 否则筛选还生效着、
+  // 切回「全部」的入口却没了,复习面板就卡在一个空分类上。
+  const shown: CatFilter[] = ["all", ...CRAM_CATEGORIES.filter((c) => (stats.get(c)?.total ?? 0) > 0 || c === value)];
+  if (shown.length <= 2 && value === "all") return null; // 只有一类且没在筛,筛选条纯属噪音
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-1.5">
+      <span className="text-[11px] font-medium text-slate-400">按来源挑：</span>
+      {shown.map((key) => {
+        const s = stats.get(key) ?? { total: 0, due: 0 };
+        const meta = key === "all" ? null : CRAM_CATEGORY_META[key];
+        const active = value === key;
+        return (
+          <button
+            key={key}
+            onClick={() => onChange(key)}
+            title={meta ? `${meta.hint}（到期 ${s.due} / 共 ${s.total}）` : `所有来源一起复习（到期 ${s.due} / 共 ${s.total}）`}
+            className={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
+              active
+                ? "border-emerald-600 bg-emerald-600 text-white"
+                : "border-slate-200 bg-white text-slate-600 hover:border-emerald-300 hover:text-emerald-700"
+            }`}
+          >
+            {meta ? `${meta.icon} ${meta.label}` : "🗂 全部"}
+            <span className={active ? "ml-1 text-emerald-100" : "ml-1 text-slate-400"}>
+              {s.due}/{s.total}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * 改一张卡的来源分类。历史卡片的分类是按形态推断出来的(❓标记 / 有没有题面 / 是不是同一秒批量写入),
+ * 个别会归错 —— 这里给个改的地方,改完立刻按新分类归队。
+ * 单词卡 / 记忆图卡的分类由卡片类型定死(渲染方式不一样),只显示不给改。
+ */
+function CategoryPicker({ card, onChanged }: { card: CramCard; onChanged: () => void }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(false);
+  // 下拉是受控的、值只来自服务端拉回来的 cards。不本地记一份的话,选完会先弹回旧分类,
+  // 等整份卡表(几百张)重新拉回来才跳到新的 —— 中间那段和「压根没点上」看着一模一样。
+  const [pending, setPending] = useState<CramBlockCategory | null>(null);
+  useEffect(() => {
+    if (pending && card.category === pending) setPending(null); // 刷新落地了,交回给服务端的值
+  }, [card.category, pending]);
+
+  if (card.kind !== "block") {
+    return (
+      <p className="mb-2 flex items-center gap-1.5 text-xs text-slate-400">
+        来源分类
+        <CategoryTag category={card.category} />
+        <span>（按卡片类型定，不可改）</span>
+      </p>
+    );
+  }
+
+  const value = pending ?? card.category;
+
+  async function change(next: string) {
+    if (!isCramBlockCategory(next) || next === value) return;
+    setPending(next);
+    setSaving(true);
+    setError(false);
+    const r = await postJson("/api/job-hunter/interview/cram/card", { id: card.id, source: next }, "PUT");
+    setSaving(false);
+    if (r.ok) {
+      onChanged();
+    } else {
+      setPending(null); // 没存上就别显示成已改
+      setError(true);
+    }
+  }
+
+  return (
+    <p className="mb-2 flex items-center gap-1.5 text-xs text-slate-400">
+      来源分类
+      <select
+        value={value}
+        disabled={saving}
+        onChange={(e) => change(e.target.value)}
+        className="rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] text-slate-600 disabled:opacity-60"
+      >
+        {CRAM_BLOCK_CATEGORIES.map((c: CramBlockCategory) => (
+          <option key={c} value={c}>
+            {CRAM_CATEGORY_META[c].icon} {CRAM_CATEGORY_META[c].label}
+          </option>
+        ))}
+      </select>
+      {saving && <span>保存中…</span>}
+      {error && <span className="text-rose-500">改分类失败</span>}
+    </p>
+  );
+}
+
+/** 卡片上的分类小标签。 */
+function CategoryTag({ category, className = "" }: { category: CramCategory; className?: string }) {
+  const meta = CRAM_CATEGORY_META[category];
+  return (
+    <span title={meta.hint} className={`rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 ${className}`}>
+      {meta.icon} {meta.label}
+    </span>
   );
 }
 
@@ -787,6 +962,8 @@ function CramReview({
   speak,
   speaking,
   studyReq,
+  category,
+  onCategoryChange,
 }: {
   sessionId: number;
   cards: CramCard[];
@@ -795,6 +972,9 @@ function CramReview({
   speaking: boolean;
   /** 清单里点「学习」发来的请求(seq 自增)。null = 没点过。 */
   studyReq: { id: number; seq: number } | null;
+  /** 只复习这一类来源("all" = 全部)。和下面的卡片清单共用同一个筛选。 */
+  category: CatFilter;
+  onCategoryChange: (v: CatFilter) => void;
 }) {
   const [queue, setQueue] = useState<CramCard[]>([]);
   const [idx, setIdx] = useState(0);
@@ -807,6 +987,11 @@ function CramReview({
   useEffect(() => {
     idxRef.current = idx;
   }, [idx]);
+  // 「第几轮」的号码牌:开一轮 / 换分类都 +1。自评是 async 的,回来时若号码变了说明这一轮
+  // 已经被作废(换了分类、或又开了新一轮),再按当时的闭包去 setIdx 会把新队列的下标推乱。
+  const roundRef = useRef(0);
+  const queueLenRef = useRef(0);
+  queueLenRef.current = queue.length;
 
   // 清单点「学习」:没在复习就单张开一轮;正在复习就插到当前这张后面(答完立刻轮到它)。
   // 依赖只看 seq —— cards 每次 loadCards 都换新数组,带进依赖会重复插队。
@@ -816,6 +1001,7 @@ function CramReview({
     if (!studyReq) return;
     const card = cardsRef.current.find((c) => c.id === studyReq.id);
     if (!card) return;
+    if (!queueLenRef.current) roundRef.current += 1; // 从空队列开的是新一轮(插队到已有队列里不算)
     setQueue((prev) => {
       if (!prev.length) {
         setIdx(0);
@@ -835,15 +1021,34 @@ function CramReview({
     rootRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [studyReq]);
 
+  // 当前分类下的卡(上面的统计、下面的队列都只认这一批)。
+  const visible = useMemo(
+    () => (category === "all" ? cards : cards.filter((c) => c.category === category)),
+    [cards, category],
+  );
+
   const counts = useMemo(
     () => ({
-      total: cards.length,
-      due: cards.filter((c) => c.isDue).length,
-      fresh: cards.filter((c) => c.state === "new").length,
-      mastered: cards.filter((c) => c.state === "mastered").length,
+      total: visible.length,
+      due: visible.filter((c) => c.isDue).length,
+      fresh: visible.filter((c) => c.state === "new").length,
+      mastered: visible.filter((c) => c.state === "mastered").length,
     }),
-    [cards],
+    [visible],
   );
+
+  // 换分类 = 换一批要背的东西:把没答完的这一轮收掉,重新开(每张的进度在自评时就已落库,不会丢)。
+  const catRef = useRef(category);
+  useEffect(() => {
+    if (catRef.current === category) return; // 队列长度变化也会进来,不是换分类就什么都不做
+    catRef.current = category;
+    if (queue.length) setMsg("已切换分类，点下面重新开始这一类的复习。");
+    roundRef.current += 1; // 作废这一轮:在飞的自评回来后别再去动新队列的下标
+    readerRef.current?.pause(); // 卡片都撤了,别让面试官继续念上一题
+    setQueue([]);
+    setIdx(0);
+    setRevealed(false);
+  }, [category, queue.length]);
 
   /* ---- 面试官念题:换卡自动朗读题面(音频在服务端按文本缓存,同一题只合成一次) ---- */
   const [autoRead, setAutoRead] = useState(true);
@@ -857,7 +1062,10 @@ function CramReview({
     return () => a?.pause();
   }, []);
 
-  const cur = queue.length > 0 ? queue[idx] : null;
+  // queue 是开轮那一刻的快照(loadCards 不会重建它),所以按 id 回 cards 取最新的那一份 ——
+  // 否则本轮中途改了这张卡的来源分类,卡上的分类标签还挂着旧的,和下面清单里自相矛盾。
+  const snap = queue.length > 0 ? queue[idx] : null;
+  const cur = useMemo(() => (snap ? (cards.find((c) => c.id === snap.id) ?? snap) : null), [snap, cards]);
   const curId = cur?.id ?? null;
   const curFront = cur?.front ?? "";
   const nextId = queue[idx + 1]?.id ?? null;
@@ -895,11 +1103,12 @@ function CramReview({
   }, [autoRead, nextId, idx, queue]);
 
   function start() {
-    const q = cards.filter((c) => c.isDue);
+    const q = visible.filter((c) => c.isDue);
     if (!q.length) {
       setMsg("今日没有到期的卡片 🎉");
       return;
     }
+    roundRef.current += 1;
     setQueue(q);
     setIdx(0);
     setRevealed(false);
@@ -913,8 +1122,15 @@ function CramReview({
   async function grade(g: "forgot" | "vague" | "clear") {
     if (!cur) return;
     setGrading(true);
+    const round = roundRef.current;
     const label = cur.kind === "word" ? cur.front || cur.content : cur.front || cur.content.slice(0, 18) || "卡片";
     const r = await postJson<{ nextReviewLabel: string }>("/api/job-hunter/interview/cram/card/review", { id: cur.id, grade: g });
+    // 这次自评在飞的时候换了分类 / 又开了新一轮:成绩已经落库了,但下面那些 idx 是上一轮的,
+    // 照着推会把新队列翻到中间去(甚至把新一轮直接判成「本轮完成」)。到此为止。
+    if (round !== roundRef.current) {
+      setGrading(false);
+      return;
+    }
     setLastLabel(r.ok && r.data ? `${label} → ${r.data.nextReviewLabel}复习` : null);
     setGrading(false);
     if (idx + 1 >= queue.length) {
@@ -951,14 +1167,23 @@ function CramReview({
           >
             {autoRead ? "🔊 自动念题" : "🔇 自动念题"}
           </button>
-          <span className="text-xs text-slate-400">共 {counts.total} 张</span>
+          <span className="text-xs text-slate-400">共 {cards.length} 张</span>
         </div>
       </div>
+
+      <CategoryFilterBar cards={cards} value={category} onChange={onCategoryChange} />
+      {category !== "all" && (
+        <p className="mt-2 text-[11px] text-emerald-700">
+          只复习「{CRAM_CATEGORY_META[category].icon} {CRAM_CATEGORY_META[category].label}」这一类（{counts.total} 张）；
+          下面的卡片清单也只显示这一类。
+        </p>
+      )}
+
       <div className="mt-3 grid grid-cols-4 gap-2 text-center">
         <Stat label="今日到期" value={counts.due} tone="rose" />
         <Stat label="新卡" value={counts.fresh} tone="sky" />
         <Stat label="已掌握" value={counts.mastered} tone="emerald" />
-        <Stat label="总数" value={counts.total} tone="slate" />
+        <Stat label={category === "all" ? "总数" : "本类总数"} value={counts.total} tone="slate" />
       </div>
 
       {msg && <p className="mt-3 rounded-xl bg-emerald-50 px-4 py-2 text-sm text-emerald-700">{msg}</p>}
@@ -982,8 +1207,11 @@ function CramReview({
                 </button>
               )}
             </span>
-            <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SR_STATE_CLASS[cur.state]}`}>
-              {KIND_LABEL[cur.kind]} · {SR_STATE_LABEL[cur.state]}
+            <span className="flex items-center gap-1.5">
+              <CategoryTag category={cur.category} />
+              <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SR_STATE_CLASS[cur.state]}`}>
+                {KIND_LABEL[cur.kind]} · {SR_STATE_LABEL[cur.state]}
+              </span>
             </span>
           </div>
           <CramFlashcard key={cur.id} card={cur} showBack={showBack} sessionId={sessionId} speak={speak} speaking={speaking} onChanged={onReload} />
@@ -1027,7 +1255,13 @@ function CramReview({
           disabled={counts.due === 0}
           className="mt-4 w-full rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {counts.due === 0 ? "今日无到期卡片 🎉" : `开始复习（${counts.due} 张到期）`}
+          {counts.due === 0
+            ? category === "all"
+              ? "今日无到期卡片 🎉"
+              : `「${CRAM_CATEGORY_META[category].label}」今天没有到期的了 🎉`
+            : category === "all"
+              ? `开始复习（${counts.due} 张到期）`
+              : `复习「${CRAM_CATEGORY_META[category].label}」（${counts.due} 张到期）`}
         </button>
       )}
     </div>
@@ -1793,6 +2027,7 @@ const AskPanel = ({
     const r = await postJson<{ id: number }>("/api/job-hunter/interview/cram/card", {
       sessionId,
       kind: "block",
+      source: "ask", // 自己追问追出来的,复习时能单独挑这一类
       front,
       content: answer,
     });
@@ -1866,6 +2101,8 @@ const AskPanel = ({
 
 function CramCardList({
   cards,
+  category,
+  onCategoryChange,
   sessionId,
   onReload,
   speak,
@@ -1873,12 +2110,16 @@ function CramCardList({
   onStudy,
 }: {
   cards: CramCard[];
+  /** 和复习面板共用的来源筛选("all" = 全部)。 */
+  category: CatFilter;
+  onCategoryChange: (v: CatFilter) => void;
   sessionId: number;
   onReload: () => void;
   speak: (t: string) => void;
   speaking: boolean;
   onStudy: (card: CramCard) => void;
 }) {
+  const shown = category === "all" ? cards : cards.filter((c) => c.category === category);
   if (!cards.length) {
     return (
       <div className="rounded-2xl border border-slate-200 bg-white p-5 text-sm text-slate-500 shadow-sm">
@@ -1888,12 +2129,28 @@ function CramCardList({
   }
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <p className="text-sm font-semibold text-slate-800">全部卡片（{cards.length}）</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-semibold text-slate-800">
+          {category === "all"
+            ? `全部卡片（${cards.length}）`
+            : `${CRAM_CATEGORY_META[category].icon} ${CRAM_CATEGORY_META[category].label}（${shown.length} / ${cards.length}）`}
+        </p>
+        {category !== "all" && (
+          <button onClick={() => onCategoryChange("all")} className="text-xs text-emerald-600 hover:underline">
+            显示全部
+          </button>
+        )}
+      </div>
       <p className="mt-0.5 text-xs text-slate-400">
-        点任意一张展开看全文（可划词翻译 / 加词 / 加知识块）；点「学习」把它插进上面的复习队列，答完就进遗忘曲线。
+        点任意一张展开看全文（可划词翻译 / 加词 / 加知识块 / 改来源分类）；点「学习」把它插进上面的复习队列，答完就进遗忘曲线。
       </p>
+      {!shown.length && (
+        <p className="mt-3 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-500">
+          这一类下面还没有卡片。点上面的「🗂 全部」看所有卡。
+        </p>
+      )}
       <div className="mt-3 space-y-1.5">
-        {cards.map((c) => (
+        {shown.map((c) => (
           <CramCardRow
             key={c.id}
             card={c}
@@ -1929,7 +2186,8 @@ function CramCardRow({
     await fetch(`/api/job-hunter/interview/cram/card?id=${card.id}`, { method: "DELETE" });
     onReload();
   }
-  const icon = card.kind === "svg" ? "📊" : card.kind === "word" ? "🔤" : "🧠";
+  const meta = CRAM_CATEGORY_META[card.category];
+  const icon = meta.icon;
   // 一行预览:把 ``` 围栏标记去掉(带代码块的卡不然预览开头是一串 ```java)。
   const label = (card.front || card.content || (card.kind === "svg" ? "（图示）" : "")).replace(/```[\w+#.-]*\n?/g, "");
   return (
@@ -1940,7 +2198,9 @@ function CramCardRow({
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
           title={expanded ? "收起" : "展开看全文"}
         >
-          <span className="shrink-0 text-xs text-slate-400">{icon}</span>
+          <span title={`${meta.label}：${meta.hint}`} className="shrink-0 text-xs text-slate-400">
+            {icon}
+          </span>
           <span className="truncate text-sm text-slate-700">{label}</span>
           <span className="shrink-0 text-[10px] text-slate-300">{expanded ? "▲" : "▼"}</span>
         </button>
@@ -1966,6 +2226,7 @@ function CramCardRow({
       </div>
       {expanded && (
         <div className="border-t border-slate-100 px-3 py-3">
+          <CategoryPicker card={card} onChanged={onReload} />
           <CramFlashcard key={card.id} card={card} showBack sessionId={sessionId} speak={speak} speaking={speaking} onChanged={onReload} />
         </div>
       )}
@@ -2410,6 +2671,7 @@ function CramSelectable({
     const r = await postJson<{ id: number }>("/api/job-hunter/interview/cram/card", {
       sessionId,
       kind: "block",
+      source: "note", // 阅读区划一段直接加进来的要点
       content: pop.term,
     });
     if (r.ok) onChanged?.();

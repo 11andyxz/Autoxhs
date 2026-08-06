@@ -150,7 +150,7 @@ const TOOLS: Array<{
     href: "/pdf-tools",
     name: "PDF 工具箱",
     en: "PDF Toolbox",
-    desc: "PDF 签名编辑:手绘/打字/上传做自己的签名,拖到合同任意位置(每页 Initials 也行),全程浏览器本地合成导出;另有 PDF ⇄ Word 互转(PDF 转可编辑 Word,Word 经本机 Chrome 打印成 PDF)。",
+    desc: "PDF 签名编辑:手绘/打字/上传做自己的签名,拖到合同任意位置(每页 Initials 也行);编辑 PDF 内容:点一下原文就能改字或删掉,还能加文字(支持中文)、涂白、高亮、插图片、删页/旋转/调页序;另有 PDF ⇄ Word 互转。签名与编辑全程浏览器本地合成导出。",
     icon: "🖋️",
     accent: "indigo",
   },

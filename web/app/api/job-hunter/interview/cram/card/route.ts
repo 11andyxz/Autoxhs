@@ -1,6 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server";
 
 import { addCramCard, deleteCramCard, listCramCards, updateCramCard, type CramCardKind } from "@/lib/job-hunter/interview/cram";
+import {
+  cramCategory,
+  defaultCramSource,
+  isCramBlockCategory,
+  isCramCategory,
+  type CramCategory,
+} from "@/lib/job-hunter/interview/cramCategory";
 import { parseFollowups } from "@/lib/job-hunter/interview/followups";
 import { srStateFromStability } from "@/lib/job-hunter/interview/fsrs";
 import { bad, fail, rateLimited, tooMany } from "@/lib/job-hunter/interview/http";
@@ -33,6 +40,7 @@ export async function GET(req: NextRequest) {
     const items = rows.map((c) => ({
       id: c.id,
       kind: c.kind,
+      category: cramCategory(c), // 来源分类:追问 / 题库导入 / 单词 / 划词块 / Coding / 图卡
       front: c.front ?? "",
       content: c.content,
       svg: c.svg ?? "",
@@ -49,7 +57,7 @@ export async function GET(req: NextRequest) {
   }
 }
 
-/** 加入一张复习卡:{sessionId, kind, front?, content?, svg?, extra?}。 */
+/** 加入一张复习卡:{sessionId, kind, front?, content?, svg?, extra?, source?}。 */
 export async function POST(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
   let body: {
@@ -59,6 +67,7 @@ export async function POST(req: NextRequest) {
     content?: unknown;
     svg?: unknown;
     extra?: unknown;
+    source?: unknown;
   };
   try {
     body = await req.json();
@@ -77,19 +86,23 @@ export async function POST(req: NextRequest) {
   if (content.length > MAX_CONTENT) return bad("这块内容太长,请选短一点。");
   const front = typeof body.front === "string" ? body.front.trim().slice(0, MAX_FRONT) : "";
   const extra = body.extra != null && typeof body.extra === "object" ? body.extra : null;
+  // 来源分类:调用方说了算(追问 / 划词块 / …);没说或说了不认识的,按 kind 兜底。
+  // word/svg 的分类由 kind 定死,别让调用方把它标成别的类。
+  const source: CramCategory =
+    kind === "block" && isCramBlockCategory(body.source) ? body.source : defaultCramSource(kind);
 
   try {
-    const id = await addCramCard({ sessionId, kind, front, content, svg, extra });
+    const id = await addCramCard({ sessionId, kind, front, content, svg, extra, source });
     return NextResponse.json({ success: true, id });
   } catch (err) {
     return fail(err, "cram-card-add");
   }
 }
 
-/** 手动修改一张卡的正面/背面文字:{id, front?, content?}。 */
+/** 手动修改一张卡的正面/背面文字或来源分类:{id, front?, content?, source?}。 */
 export async function PUT(req: NextRequest) {
   if (tooMany(req)) return rateLimited();
-  let body: { id?: unknown; front?: unknown; content?: unknown };
+  let body: { id?: unknown; front?: unknown; content?: unknown; source?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -97,10 +110,19 @@ export async function PUT(req: NextRequest) {
   }
   const id = Number(body.id);
   if (!Number.isInteger(id) || id <= 0) return bad("缺少卡片 id。");
-  const patch: { front?: string; content?: string } = {};
+  const patch: { front?: string; content?: string; source?: CramCategory } = {};
   if (typeof body.front === "string") patch.front = body.front.trim().slice(0, MAX_FRONT);
   if (typeof body.content === "string") patch.content = body.content.trim().slice(0, MAX_CONTENT);
-  if (patch.front === undefined && patch.content === undefined) return bad("没有要修改的内容。");
+  if (body.source !== undefined) {
+    // 只认 block 卡的四类;word/svg 由 kind 决定,改了会和渲染方式打架。
+    if (!isCramBlockCategory(body.source)) {
+      return bad(isCramCategory(body.source) ? "单词卡 / 记忆图卡的分类不能改。" : "无效的分类。");
+    }
+    patch.source = body.source;
+  }
+  if (patch.front === undefined && patch.content === undefined && patch.source === undefined) {
+    return bad("没有要修改的内容。");
+  }
   try {
     await updateCramCard(id, patch);
     return NextResponse.json({ success: true });
