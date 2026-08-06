@@ -13,6 +13,7 @@ import {
 } from "react";
 
 import type { CodingTrace } from "@/lib/job-hunter/interview/schema";
+import MockInterview from "./MockInterview";
 import {
   applyInput,
   applyInputIde,
@@ -95,6 +96,9 @@ const DIFFICULTY_LABEL: Record<number, string> = { 1: "简单", 2: "中等", 3: 
 const GRADE_LABEL: Record<RecallGrade, string> = { forgot: "还很生", vague: "凑合", clear: "很顺" };
 
 /** 「IDE 模式(括号自动补全)」开关记在本地,默认开 */
+type PageMode = "drill" | "mock";
+const MODE_KEY = "coding:pageMode";
+
 const IDE_MODE_KEY = "coding:ideMode";
 /** 上次「加入猛攻题库」选的那份简历,下次直接用 */
 const CRAM_SESSION_KEY = "coding:cramSession";
@@ -105,6 +109,17 @@ type CramSummary = { id: number; title: string; total: number; due: number };
 /* ============================ 页面 ============================ */
 
 export default function CodingPage() {
+  // 两种练法:跟打(照着参考答案敲手感)/ 面试(AI 出题、自己写、边写边被追问)。
+  const [mode, setMode] = useState<PageMode>("drill");
+  useEffect(() => {
+    const saved = localStorage.getItem(MODE_KEY);
+    if (saved === "drill" || saved === "mock") setMode(saved);
+  }, []);
+  function switchMode(next: PageMode) {
+    setMode(next);
+    localStorage.setItem(MODE_KEY, next);
+  }
+
   const [problems, setProblems] = useState<Problem[] | null>(null);
   const [filter, setFilter] = useState<string>("");
   const [activeId, setActiveId] = useState<number | null>(null);
@@ -216,21 +231,52 @@ export default function CodingPage() {
         </Link>
         <header className="mt-4 mb-8">
           <span className="inline-flex items-center rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-600">
-            Coding 手感 · Type It Out
+            {mode === "drill" ? "Coding 手感 · Type It Out" : "模拟面试 · Mock Interview"}
           </span>
-          <h1 className="mt-3 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">Coding 跟打训练</h1>
+          <h1 className="mt-3 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
+            {mode === "drill" ? "Coding 跟打训练" : "算法面试模拟"}
+          </h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-500">
-            经典题目(Java Lambda / Stream、MySQL 标准 SQL、MongoDB 查询、程序设计，偶尔来道算法题)的参考答案会以
-            <span className="mx-1 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-400">灰色</span>
-            铺在输入区，你照着一个字一个字敲：敲对了变亮，敲错了不落字只记一次错，缩进自动补。
-            敲完记手速和正确率，并按遗忘曲线安排下次再敲。
+            {mode === "drill" ? (
+              <>
+                经典题目(Java Lambda / Stream、MySQL 标准 SQL、MongoDB 查询、程序设计，偶尔来道算法题)的参考答案会以
+                <span className="mx-1 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-400">灰色</span>
+                铺在输入区，你照着一个字一个字敲：敲对了变亮，敲错了不落字只记一次错，缩进自动补。
+                敲完记手速和正确率，并按遗忘曲线安排下次再敲。
+              </>
+            ) : (
+              <>
+                AI 现出一道 LeetCode 式算法题，你在空白编辑器里自己写。写的过程中面试官会随时插话追问，
+                问题用面试官的声音念出来 —— 你可以打字答，也可以直接说。交卷后 AI 复盘代码、复杂度和每个追问。
+              </>
+            )}
           </p>
+          <div className="mt-4 inline-flex rounded-xl border border-slate-200 bg-white p-1">
+            <button
+              onClick={() => switchMode("drill")}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                mode === "drill" ? "bg-indigo-600 text-white" : "text-slate-500 hover:text-indigo-600"
+              }`}
+            >
+              ⌨️ 跟打模式
+            </button>
+            <button
+              onClick={() => switchMode("mock")}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                mode === "mock" ? "bg-indigo-600 text-white" : "text-slate-500 hover:text-indigo-600"
+              }`}
+            >
+              🎤 面试模式
+            </button>
+          </div>
         </header>
 
         {error && <p className="mb-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-600">{error}</p>}
         {notice && <p className="mb-4 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{notice}</p>}
 
-        {active ? (
+        {mode === "mock" ? (
+          <MockInterview />
+        ) : active ? (
           <Trainer
             key={active.id}
             problem={active}

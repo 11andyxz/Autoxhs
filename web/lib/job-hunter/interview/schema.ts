@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { cleanExampleInput, cleanExampleValue } from "./mockInterview";
 import { normalizeCode } from "./typing";
 
 /**
@@ -855,5 +856,201 @@ export function normalizeCustomAnswer(raw: unknown): CustomAnswer {
     importance: clampImportance(Number(o.importance)),
     referenceAnswer,
     rubric: rubric.length ? rubric : [{ criterion: "覆盖题目核心要点", weight: 1 }],
+  };
+}
+
+/* ---------------- 面试模式:AI 出题 / 追问 / 复盘 ---------------- */
+
+export const MOCK_LANG_VALUES = ["java", "javascript"] as const;
+export type MockLang = (typeof MOCK_LANG_VALUES)[number];
+
+export const MOCK_PROBLEM_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    title: { type: "string", description: "英文标题,LeetCode 风格,例如 Longest Substring Without Repeating Characters" },
+    titleZh: { type: "string", description: "同一道题的中文标题" },
+    difficulty: { type: "integer", description: "1 简单 / 2 中等 / 3 偏难" },
+    lang: { type: "string", enum: MOCK_LANG_VALUES as unknown as string[], description: "候选人要写的语言" },
+    statementEn: { type: "string", description: "英文题干,面试官口径,3~6 句;不要出现示例和约束(它们单独给)" },
+    statementZh: { type: "string", description: "同一道题的中文题干" },
+    examples: {
+      type: "array",
+      description: "1~3 个示例",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          input: { type: "string", description: '只写形如 s = "abcabcbb" 或 nums = [2,7,11,15], target = 9 的赋值,不要加任何说明文字' },
+          output: { type: "string", description: "只写这一个字面量值(如 3 / true / [1,2]),后面不许跟任何文字" },
+          explanation: { type: "string", description: "英文一句说明;没有就空串" },
+        },
+        required: ["input", "output", "explanation"],
+      },
+    },
+    constraints: { type: "array", description: "2~5 条约束,英文,形如 1 <= n <= 10^5", items: { type: "string" } },
+    starterCode: {
+      type: "string",
+      description: "候选人开始写的骨架:类 + 方法签名 + 空方法体。纯 ASCII、4 空格缩进、不超过 12 行、不含题解",
+    },
+    solution: { type: "string", description: "参考解法本体,纯 ASCII、4 空格缩进、不超过 40 行、无代码围栏" },
+    complexity: { type: "string", description: "参考解法的复杂度,例如 Time O(n), Space O(k)" },
+    keyPoints: { type: "string", description: "中文:考点 + 面试官通常会追到哪儿,2~4 句" },
+    topics: { type: "array", description: "2~4 个英文考点标签,例如 sliding window", items: { type: "string" } },
+  },
+  required: [
+    "title", "titleZh", "difficulty", "lang", "statementEn", "statementZh",
+    "examples", "constraints", "starterCode", "solution", "complexity", "keyPoints", "topics",
+  ],
+} as const;
+
+export type MockProblemGen = {
+  title: string;
+  titleZh: string;
+  difficulty: number;
+  lang: MockLang;
+  statementEn: string;
+  statementZh: string;
+  examples: Array<{ input: string; output: string; explanation: string }>;
+  constraints: string[];
+  starterCode: string;
+  solution: string;
+  complexity: string;
+  keyPoints: string;
+  topics: string[];
+};
+
+export function normalizeMockProblem(raw: unknown): MockProblemGen {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const str = (v: unknown, max: number) => t(typeof v === "string" ? v : "", max);
+  const title = str(o.title, 200);
+  const statementEn = str(o.statementEn, 3000);
+  const solution = normalizeCode(typeof o.solution === "string" ? o.solution : "").slice(0, 8000);
+  if (!title || !statementEn) throw new SchemaValidationError("题目缺少标题或英文题干");
+  if (!solution) throw new SchemaValidationError("题目缺少参考解法");
+  const examples = (Array.isArray(o.examples) ? o.examples : [])
+    .map((e) => e as Record<string, unknown>)
+    .map((e) => ({
+      // 模型偶尔会在字面量后面接一串垃圾/指令腔(实测见 cleanExampleValue 的注释),按数据清掉
+      input: cleanExampleInput(typeof e.input === "string" ? e.input : ""),
+      output: cleanExampleValue(typeof e.output === "string" ? e.output : ""),
+      explanation: str(e.explanation, 600),
+    }))
+    .filter((e) => e.input || e.output)
+    .slice(0, 3);
+  return {
+    title,
+    titleZh: str(o.titleZh, 200) || title,
+    difficulty: Math.max(1, Math.min(3, Math.round(Number(o.difficulty)) || 2)),
+    lang: (MOCK_LANG_VALUES as readonly string[]).includes(o.lang as string) ? (o.lang as MockLang) : "java",
+    statementEn,
+    statementZh: str(o.statementZh, 3000) || statementEn,
+    examples,
+    constraints: (Array.isArray(o.constraints) ? o.constraints : [])
+      .filter((c): c is string => typeof c === "string" && !!c.trim())
+      .map((c) => t(c, 200))
+      .slice(0, 6),
+    starterCode: normalizeCode(typeof o.starterCode === "string" ? o.starterCode : "").slice(0, 2000),
+    solution,
+    complexity: str(o.complexity, 200),
+    keyPoints: str(o.keyPoints, 1500),
+    topics: (Array.isArray(o.topics) ? o.topics : [])
+      .filter((s): s is string => typeof s === "string" && !!s.trim())
+      .map((s) => t(s, 60))
+      .slice(0, 5),
+  };
+}
+
+export const MOCK_PROBE_KINDS = ["approach", "complexity", "edge-case", "tradeoff", "followup", "code-detail", "test"] as const;
+export type MockProbeKind = (typeof MOCK_PROBE_KINDS)[number];
+
+export const MOCK_PROBE_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    question: { type: "string", description: "面试官问出口的这一句英文,≤30 词,会被朗读出来" },
+    zh: { type: "string", description: "这句话的中文意思,一句" },
+    kind: { type: "string", enum: MOCK_PROBE_KINDS as unknown as string[], description: "这一问在考什么" },
+  },
+  required: ["question", "zh", "kind"],
+} as const;
+
+export type MockProbe = { question: string; zh: string; kind: MockProbeKind };
+
+export function normalizeMockProbe(raw: unknown): MockProbe {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const question = t(typeof o.question === "string" ? o.question : "", 400);
+  if (!question) throw new SchemaValidationError("追问内容为空");
+  return {
+    question,
+    zh: t(typeof o.zh === "string" ? o.zh : "", 400),
+    kind: (MOCK_PROBE_KINDS as readonly string[]).includes(o.kind as string) ? (o.kind as MockProbeKind) : "followup",
+  };
+}
+
+export const MOCK_VERDICTS = ["strong", "ok", "weak"] as const;
+export type MockVerdict = (typeof MOCK_VERDICTS)[number];
+
+export const MOCK_REVIEW_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    verdict: { type: "string", enum: MOCK_VERDICTS as unknown as string[], description: "整体:能过 / 勉强 / 不行" },
+    correctness: { type: "string", description: "中文:这份代码到底对不对,错在哪(具体到行为/输入),别客套" },
+    complexity: { type: "string", description: "中文:他写的这版的时间/空间复杂度,和最优解差在哪" },
+    issues: { type: "array", description: "中文,最多 5 条具体问题(边界、命名、可读性、隐藏 bug)", items: { type: "string" } },
+    qaComments: {
+      type: "array",
+      description: "对每个追问回答的点评,按提问顺序;没答的也要点评",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          index: { type: "integer", description: "第几个追问,从 1 开始" },
+          comment: { type: "string", description: "中文一两句:答到点没有,漏了什么" },
+        },
+        required: ["index", "comment"],
+      },
+    },
+    nextSteps: { type: "array", description: "中文 2~4 条:下次这类题怎么练", items: { type: "string" } },
+    modelAnswer: { type: "string", description: "英文:这道题从头到尾该怎么口述(思路→复杂度→边界),60~90 秒的量" },
+  },
+  required: ["verdict", "correctness", "complexity", "issues", "qaComments", "nextSteps", "modelAnswer"],
+} as const;
+
+export type MockReview = {
+  verdict: MockVerdict;
+  correctness: string;
+  complexity: string;
+  issues: string[];
+  qaComments: Array<{ index: number; comment: string }>;
+  nextSteps: string[];
+  modelAnswer: string;
+};
+
+export function normalizeMockReview(raw: unknown): MockReview {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const correctness = t(typeof o.correctness === "string" ? o.correctness : "", 3000);
+  if (!correctness) throw new SchemaValidationError("复盘缺少正确性评价");
+  const list = (v: unknown, max: number, len: number) =>
+    (Array.isArray(v) ? v : [])
+      .filter((s): s is string => typeof s === "string" && !!s.trim())
+      .map((s) => t(s, len))
+      .slice(0, max);
+  return {
+    verdict: (MOCK_VERDICTS as readonly string[]).includes(o.verdict as string) ? (o.verdict as MockVerdict) : "ok",
+    correctness,
+    complexity: t(typeof o.complexity === "string" ? o.complexity : "", 1000),
+    issues: list(o.issues, 5, 400),
+    qaComments: (Array.isArray(o.qaComments) ? o.qaComments : [])
+      .map((c) => c as Record<string, unknown>)
+      .filter((c) => typeof c.comment === "string" && c.comment.trim())
+      .map((c, i) => ({
+        index: Number.isFinite(Number(c.index)) ? Math.max(1, Math.round(Number(c.index))) : i + 1,
+        comment: t(String(c.comment), 600),
+      }))
+      .slice(0, 12),
+    nextSteps: list(o.nextSteps, 4, 300),
+    modelAnswer: t(typeof o.modelAnswer === "string" ? o.modelAnswer : "", 4000),
   };
 }

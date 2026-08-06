@@ -18,6 +18,9 @@ import {
   ENGLISH_ANSWER_SYSTEM,
   FUNDAMENTALS_SYSTEM,
   GRADE_SYSTEM,
+  MOCK_PROBE_SYSTEM,
+  MOCK_PROBLEM_SYSTEM,
+  MOCK_REVIEW_SYSTEM,
   QUESTION_SYSTEM,
   REPAIR,
   SKILLS_SYSTEM,
@@ -35,6 +38,9 @@ import {
   CUSTOM_ANSWER_JSON_SCHEMA,
   EXPLAIN_EXTRAS_JSON_SCHEMA,
   GRADE_JSON_SCHEMA,
+  MOCK_PROBE_JSON_SCHEMA,
+  MOCK_PROBLEM_JSON_SCHEMA,
+  MOCK_REVIEW_JSON_SCHEMA,
   QUESTION_JSON_SCHEMA,
   REFINE_JSON_SCHEMA,
   SKILLS_JSON_SCHEMA,
@@ -50,6 +56,9 @@ import {
   normalizeCustomAnswer,
   normalizeExplainExtras,
   normalizeGrade,
+  normalizeMockProbe,
+  normalizeMockProblem,
+  normalizeMockReview,
   normalizeQuestion,
   normalizeRefine,
   normalizeSkills,
@@ -61,6 +70,9 @@ import {
   type CustomAnswer,
   type ExplainExtras,
   type Grade,
+  type MockProbe,
+  type MockProblemGen,
+  type MockReview,
   type QuestionGen,
   type QuestionType,
   type RefineResult,
@@ -291,6 +303,90 @@ export function traceCodingSolution(args: {
     "coding_trace",
     normalizeCodingTrace,
     { timeoutMs: 52_000, maxRetries: 0 }, // 初次+修复共用此预算,给路由的 DB 调用留头(maxDuration 60)
+  );
+}
+
+/* ---------------- 面试模式:出题 / 追问 / 复盘 ---------------- */
+
+/** 面试模式:AI 出一道 LeetCode 式算法题(一次只出一道,现出现用,所以别等太久)。 */
+export function generateMockProblem(args: {
+  lang: string;
+  difficulty: string;
+  topics: string;
+  avoidTitles: string[];
+}): Promise<MockProblemGen> {
+  const content = dataBlock([
+    { label: "LANGUAGE THE CANDIDATE WILL WRITE IN", body: args.lang },
+    { label: "DIFFICULTY", body: args.difficulty },
+    { label: "TOPIC HINTS (optional)", body: args.topics },
+    { label: "AVOID THESE TITLES (already used)", body: args.avoidTitles.join("\n") },
+  ]);
+  return callJson(
+    MOCK_PROBLEM_SYSTEM,
+    content,
+    MOCK_PROBLEM_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "mock_problem",
+    normalizeMockProblem,
+    { timeoutMs: 100_000, maxRetries: 0 },
+  );
+}
+
+/**
+ * 面试模式:看着候选人此刻屏幕上的代码,追问一句。
+ * 这是「边写边问」的主循环,必须快 —— 超时压到 25s,拖久了问题就跟不上他敲的进度了。
+ */
+export function askMockProbe(args: {
+  problem: string;
+  starterCode: string;
+  code: string;
+  transcript: string;
+  elapsedSec: number;
+  codeIsEmpty: boolean;
+}): Promise<MockProbe> {
+  const content = dataBlock([
+    { label: "PROBLEM", body: args.problem },
+    { label: "STARTER SKELETON THEY WERE GIVEN", body: args.starterCode },
+    {
+      label: args.codeIsEmpty
+        ? "CANDIDATE CODE RIGHT NOW (still empty - they have not started typing)"
+        : "CANDIDATE CODE RIGHT NOW (work in progress, may be wrong or half-written)",
+      body: args.code || "(empty)",
+    },
+    { label: "QUESTIONS YOU ALREADY ASKED AND THEIR ANSWERS", body: args.transcript },
+    { label: "MINUTES INTO THE INTERVIEW", body: String(Math.round(args.elapsedSec / 60)) },
+  ]);
+  return callJson(
+    MOCK_PROBE_SYSTEM,
+    content,
+    MOCK_PROBE_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "mock_probe",
+    normalizeMockProbe,
+    { timeoutMs: 25_000, maxRetries: 0 },
+  );
+}
+
+/** 面试模式:交卷后的复盘(代码 + 每个追问答得怎么样 + 口述范本)。 */
+export function reviewMockSession(args: {
+  problem: string;
+  reference: string;
+  code: string;
+  transcript: string;
+  elapsedSec: number;
+}): Promise<MockReview> {
+  const content = dataBlock([
+    { label: "PROBLEM", body: args.problem },
+    { label: "REFERENCE SOLUTION", body: args.reference },
+    { label: "CANDIDATE FINAL CODE", body: args.code || "(nothing was written)" },
+    { label: "QUESTIONS ASKED AND THEIR ANSWERS", body: args.transcript },
+    { label: "TOTAL TIME (seconds)", body: String(args.elapsedSec) },
+  ]);
+  return callJson(
+    MOCK_REVIEW_SYSTEM,
+    content,
+    MOCK_REVIEW_JSON_SCHEMA as unknown as Record<string, unknown>,
+    "mock_review",
+    normalizeMockReview,
+    { timeoutMs: 52_000, maxRetries: 0 },
   );
 }
 

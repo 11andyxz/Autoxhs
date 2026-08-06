@@ -121,6 +121,25 @@ export function ensureCodingSchema(): Promise<void> {
           REFERENCES ip_coding_problem(id) ON DELETE CASCADE
       )
     `);
+    // 面试模式:一场「AI 出题 → 自由手写 → 边写边追问 → 复盘」的记录。
+    // 题目本身仍落在 ip_coding_problem(所以事后还能拿去跟打),这张表只存这一场的过程。
+    await p.query(`
+      CREATE TABLE IF NOT EXISTS ip_mock_interview (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        problem_id INT NULL,
+        title VARCHAR(255) NOT NULL DEFAULT '',
+        lang VARCHAR(16) NOT NULL DEFAULT 'java',
+        code MEDIUMTEXT NOT NULL,
+        turns_json MEDIUMTEXT NULL,
+        review_json MEDIUMTEXT NULL,
+        verdict VARCHAR(10) NULL,
+        duration_sec INT NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_ip_mock_created (created_at),
+        CONSTRAINT fk_ip_mock_problem FOREIGN KEY (problem_id)
+          REFERENCES ip_coding_problem(id) ON DELETE SET NULL
+      )
+    `);
     // 后加的列(老库升级用;新库上面已建好,重复执行报 ER_DUP_FIELDNAME 直接忽略)。
     await execIgnoring("ALTER TABLE ip_coding_problem ADD COLUMN setup MEDIUMTEXT NULL", ["ER_DUP_FIELDNAME"]);
     // 英文题干:面试是英文的,题面也要能读英文(老库里的题先留空,再导入种子题时补齐)。
@@ -559,4 +578,104 @@ export async function codingCounts(): Promise<CodingCounts> {
     total: Number(r.total) || 0,
     due: Number(r.due) || 0,
   }));
+}
+
+/* ---------------- 面试模式 ---------------- */
+
+/**
+ * 面试模式现出的题:入库并把 id 拿回来(`addCodingProblems` 只回条数,这里要拿 id 关联这场面试)。
+ * 仍走 INSERT IGNORE + problem_hash 唯一键 —— 万一撞上已有的同名题,就复用那一条,不再插一份。
+ */
+export async function addCodingProblemGetId(it: CodingProblemInput): Promise<{ id: number; created: boolean }> {
+  await ensureCodingSchema();
+  const p = getPool();
+  const hash = problemHash(it.category, it.title);
+  const [res] = await p.execute<ResultSetHeader>(
+    `INSERT IGNORE INTO ip_coding_problem
+       (category, lang, title, prompt, prompt_en, setup, solution, explanation, difficulty, source, problem_hash, due_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+    [
+      it.category,
+      it.lang,
+      it.title.slice(0, 255),
+      it.prompt.slice(0, 4000),
+      (it.promptEn ?? "").slice(0, 4000) || null,
+      (it.setup ?? "").slice(0, 4000) || null,
+      it.solution.slice(0, 8000),
+      (it.explanation ?? "").slice(0, 4000) || null,
+      Math.max(1, Math.min(3, Math.round(it.difficulty) || 2)),
+      it.source,
+      hash,
+    ],
+  );
+  if (res.insertId) return { id: res.insertId, created: (res.affectedRows || 0) > 0 };
+  // 撞了唯一键:把已有那条的 id 查回来。
+  const [rows] = await p.execute<RowDataPacket[]>(
+    "SELECT id FROM ip_coding_problem WHERE problem_hash = ? LIMIT 1",
+    [hash],
+  );
+  const id = (rows[0] as { id?: number } | undefined)?.id;
+  if (!id) throw new Error("题目入库失败");
+  return { id, created: false };
+}
+
+export type MockInterviewRow = {
+  id: number;
+  problem_id: number | null;
+  title: string;
+  lang: string;
+  code: string;
+  turns_json: string | null;
+  review_json: string | null;
+  verdict: string | null;
+  duration_sec: number;
+  created_at: string;
+};
+
+const MOCK_COLS = "id, problem_id, title, lang, code, turns_json, review_json, verdict, duration_sec, created_at";
+
+export async function saveMockInterview(v: {
+  problemId: number | null;
+  title: string;
+  lang: string;
+  code: string;
+  turnsJson: string;
+  reviewJson: string;
+  verdict: string;
+  durationSec: number;
+}): Promise<number> {
+  await ensureCodingSchema();
+  const p = getPool();
+  const [res] = await p.execute<ResultSetHeader>(
+    `INSERT INTO ip_mock_interview (problem_id, title, lang, code, turns_json, review_json, verdict, duration_sec)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      v.problemId,
+      v.title.slice(0, 255),
+      v.lang.slice(0, 16),
+      v.code.slice(0, 60_000),
+      v.turnsJson.slice(0, 200_000) || null,
+      v.reviewJson.slice(0, 200_000) || null,
+      v.verdict.slice(0, 10) || null,
+      Math.max(0, Math.round(v.durationSec) || 0),
+    ],
+  );
+  return res.insertId;
+}
+
+/** 最近几场面试(列表用,不带代码正文以外的大字段裁剪 —— 量很小,直接全取)。 */
+export async function listMockInterviews(limit = 20): Promise<MockInterviewRow[]> {
+  await ensureCodingSchema();
+  const p = getPool();
+  const n = Math.max(1, Math.min(50, Math.round(limit) || 20));
+  const [rows] = await p.query<RowDataPacket[]>(
+    `SELECT ${MOCK_COLS} FROM ip_mock_interview ORDER BY created_at DESC, id DESC LIMIT ${n}`,
+  );
+  return (rows as MockInterviewRow[]).map((r) => ({ ...r, duration_sec: Number(r.duration_sec) }));
+}
+
+export async function deleteMockInterview(id: number): Promise<void> {
+  await ensureCodingSchema();
+  const p = getPool();
+  await p.execute("DELETE FROM ip_mock_interview WHERE id = ?", [id]);
 }
